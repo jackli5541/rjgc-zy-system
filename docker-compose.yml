@@ -75,6 +75,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks: [test]
   test-migrate:
     profiles: ["test"]
     build: ./backend
@@ -84,6 +85,7 @@ services:
     depends_on:
       test-postgres:
         condition: service_healthy
+    networks: [test]
   test-api:
     profiles: ["test"]
     build: ./backend
@@ -95,7 +97,7 @@ services:
       test-migrate:
         condition: service_completed_successfully
     networks:
-      default:
+      test:
         aliases:
           - api
     healthcheck:
@@ -109,6 +111,7 @@ services:
     depends_on:
       test-api:
         condition: service_healthy
+    networks: [test]
   e2e:
     profiles: ["test"]
     build:
@@ -122,6 +125,10 @@ services:
       test-frontend:
         condition: service_healthy
     ipc: host
+    networks: [test]
 volumes:
   postgres_data:
   private_files:
+
+networks:
+  test:

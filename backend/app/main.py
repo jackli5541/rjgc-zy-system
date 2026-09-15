@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import csv, io, mimetypes, re, secrets
+import csv, io, mimetypes, os, re, secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from app.database import get_db
-from app.models import Assignment, AuditLog, ClassMember, FileObject, Grade, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 
@@ -126,7 +126,7 @@ def require_team(db: Session, cid: UUID, user: User):
 
 
 def class_json(x: TeachingClass, *, member_count: int | None = None, assignment_count: int | None = None, deletable: bool | None = None):
-    item = {"id": str(x.id), "course": x.course, "semester": x.semester, "name": x.name, "invite_code": x.invite_code, "status": x.status, "team_deadline": x.team_deadline, "max_team_members": x.max_team_members, "version": x.version}
+    item = {"id": str(x.id), "course": x.course, "semester": x.semester, "name": x.name, "invite_code": x.invite_code, "status": x.status, "team_deadline": x.team_deadline, "max_team_members": x.max_team_members, "topic_public": x.topic_public, "invite_requires_approval": x.invite_requires_approval, "version": x.version}
     if member_count is not None: item["member_count"] = member_count
     if assignment_count is not None: item["assignment_count"] = assignment_count
     if deletable is not None: item["deletable"] = deletable
@@ -138,13 +138,16 @@ def team_json(db: Session, x: Team, viewer: User):
     count = db.scalar(select(func.count()).select_from(TeamMember).where(TeamMember.team_id == x.id, TeamMember.status == "ACTIVE")) or 0
     topic = db.scalar(select(Topic).where(Topic.team_id == x.id))
     pending = db.scalar(select(func.count()).select_from(TeamRequest).where(TeamRequest.team_id == x.id, TeamRequest.status == "PENDING")) or 0
-    return {"id": str(x.id), "name": x.name, "leader_id": str(x.leader_id), "leader_name": leader.display_name, "member_count": count, "max_members": x.max_members, "open_recruitment": x.open_recruitment, "status": x.status, "is_leader": x.leader_id == viewer.id, "pending_count": pending, "topic": None if not topic else {"id": str(topic.id), "name": topic.name, "description": topic.description, "status": topic.review_status, "reason": topic.review_reason}, "version": x.version}
+    course = db.get(TeachingClass, x.class_id)
+    own_team = membership(db, x.class_id, viewer.id)
+    can_view_topic = viewer.role == "TEACHER" or (own_team and own_team[1].id == x.id) or bool(course and course.topic_public)
+    return {"id": str(x.id), "name": x.name, "leader_id": str(x.leader_id), "leader_name": leader.display_name, "member_count": count, "max_members": x.max_members, "open_recruitment": x.open_recruitment, "status": x.status, "is_leader": x.leader_id == viewer.id, "pending_count": pending, "topic": None if not topic or not can_view_topic else {"id": str(topic.id), "name": topic.name, "description": topic.description, "status": topic.review_status, "reason": topic.review_reason}, "version": x.version}
 
 
 class LoginIn(BaseModel):
     account: str; password: str; role: Literal["teacher", "student"] | None = None
 class ClassIn(BaseModel):
-    semester: str = Field(min_length=2, max_length=40); name: str = Field(min_length=2, max_length=100); max_team_members: int = Field(5, ge=2, le=20); team_deadline: datetime | None = None
+    semester: str = Field(min_length=2, max_length=40); name: str = Field(min_length=2, max_length=100); max_team_members: int = Field(5, ge=2, le=20); team_deadline: datetime | None = None; topic_public: bool = False; invite_requires_approval: bool = True
 class TeamIn(BaseModel):
     class_id: UUID; name: str = Field(min_length=2, max_length=40); open_recruitment: bool = True
 class TopicIn(BaseModel):
@@ -165,6 +168,8 @@ class CampaignTargetIn(BaseModel):
     class_id: UUID; assignment_id: UUID
 class CampaignBulkIn(CampaignFields):
     targets: list[CampaignTargetIn] = Field(min_length=1)
+class CampaignUpdateIn(CampaignFields):
+    version: int
 class ReviewIn(BaseModel):
     reviewee_id: UUID; scores: dict[str, float]; comment: str = Field(max_length=2000)
 class GradeIn(BaseModel):
@@ -173,6 +178,7 @@ class AssignmentUpdateIn(BaseModel):
     title: str | None = Field(None, min_length=2, max_length=100); description: str | None = Field(None, min_length=1, max_length=5000); starts_at: datetime | None = None; due_at: datetime | None = None; allow_late: bool | None = None; submitter_type: Literal["TEAM", "INDIVIDUAL"] | None = None; version: int
 class ReasonIn(BaseModel): reason: str = Field(min_length=2, max_length=500)
 class PasswordIn(BaseModel): current_password: str; new_password: str = Field(min_length=8, max_length=128)
+class ClassJoinIn(BaseModel): invite_code: str = Field(min_length=4, max_length=12)
 class InviteIn(BaseModel): student_id: UUID
 class TransferIn(BaseModel): new_leader_id: UUID
 class ClassUpdateIn(BaseModel):
@@ -181,6 +187,8 @@ class ClassUpdateIn(BaseModel):
     name: str | None = Field(None, min_length=2, max_length=100)
     team_deadline: datetime | None = None
     max_team_members: int | None = Field(None, ge=2, le=20)
+    topic_public: bool | None = None
+    invite_requires_approval: bool | None = None
     status: Literal["ACTIVE", "ARCHIVED"] | None = None
 class MemberCreateIn(BaseModel):
     student_no: str = Field(min_length=4, max_length=32, pattern=r"^[A-Za-z0-9_-]+$")
@@ -231,7 +239,9 @@ def auth_session(user: CurrentUser, db: Db, session_id: Annotated[str | None, Co
 def logout(response: Response, user: CsrfUser, db: Db, session_id: Annotated[str | None, Cookie()] = None):
     x = db.scalar(select(LoginSession).where(LoginSession.token_hash == token_hash(session_id or "")))
     if x: x.revoked_at = now(); db.commit()
-    response.delete_cookie("session_id", path="/"); return response
+    response.delete_cookie("session_id", path="/")
+    response.status_code = 204
+    return response
 
 
 @app.post("/api/v1/auth/password", status_code=204)
@@ -260,8 +270,49 @@ def classes(user: CurrentUser, db: Db):
 
 @app.post("/api/v1/classes", status_code=201)
 def create_class(data: ClassIn, user: CsrfUser, db: Db):
-    teacher(user); x = TeachingClass(teacher_id=user.id, semester=data.semester.strip(), name=data.name.strip(), invite_code=secrets.token_hex(4).upper(), max_team_members=data.max_team_members, team_deadline=data.team_deadline)
+    teacher(user); x = TeachingClass(teacher_id=user.id, semester=data.semester.strip(), name=data.name.strip(), invite_code=secrets.token_hex(4).upper(), max_team_members=data.max_team_members, team_deadline=data.team_deadline, topic_public=data.topic_public, invite_requires_approval=data.invite_requires_approval)
     db.add(x); db.flush(); audit(db, user, "CLASS_CREATED", "class", str(x.id)); db.commit(); return class_json(x)
+
+
+@app.post("/api/v1/classes/join")
+def join_class(data: ClassJoinIn, user: CsrfUser, db: Db):
+    if user.role != "STUDENT": raise ApiError(403, "STUDENT_REQUIRED", "仅学生可以通过邀请码加入教学班")
+    course = db.scalar(select(TeachingClass).where(TeachingClass.invite_code == data.invite_code.strip().upper()).with_for_update())
+    if not course: raise ApiError(404, "INVITE_CODE_INVALID", "邀请码无效")
+    if course.status != "ACTIVE": raise ApiError(409, "CLASS_ARCHIVED", "教学班已归档，无法加入")
+    member = db.scalar(select(ClassMember).where(ClassMember.class_id == course.id, ClassMember.user_id == user.id).with_for_update())
+    if member and member.status == "ACTIVE": raise ApiError(409, "CLASS_MEMBER_EXISTS", "你已加入该教学班")
+    if course.invite_requires_approval:
+        pending = db.scalar(select(ClassJoinRequest).where(ClassJoinRequest.class_id == course.id, ClassJoinRequest.user_id == user.id, ClassJoinRequest.status == "PENDING").with_for_update())
+        if pending: raise ApiError(409, "CLASS_JOIN_PENDING", "加入申请正在等待教师审核")
+        request = ClassJoinRequest(class_id=course.id, user_id=user.id); db.add(request); audit(db, user, "CLASS_JOIN_REQUESTED", "class", str(course.id)); db.commit()
+        return {"status": "PENDING", "class_id": str(course.id), "class_name": course.name}
+    if member: member.status = "ACTIVE"
+    else: db.add(ClassMember(class_id=course.id, user_id=user.id))
+    audit(db, user, "CLASS_JOINED_BY_INVITE", "class", str(course.id)); db.commit()
+    return {"status": "APPROVED", "class_id": str(course.id), "class_name": course.name}
+
+
+@app.get("/api/v1/classes/{cid}/join-requests")
+def class_join_requests(cid: UUID, user: CurrentUser, db: Db):
+    teacher(user); require_class(db, user, cid)
+    rows = db.execute(select(ClassJoinRequest, User).join(User).where(ClassJoinRequest.class_id == cid).order_by(ClassJoinRequest.created_at.desc())).all()
+    return {"items": [{"id": str(item.id), "user_id": str(person.id), "student_no": person.login_name, "name": person.display_name, "status": item.status, "created_at": item.created_at} for item, person in rows]}
+
+
+@app.post("/api/v1/classes/{cid}/join-requests/{rid}/decision")
+def decide_class_join_request(cid: UUID, rid: UUID, decision: Literal["APPROVED", "REJECTED"], user: CsrfUser, db: Db):
+    teacher(user); require_writable_class(db, user, cid)
+    request = db.scalar(select(ClassJoinRequest).where(ClassJoinRequest.id == rid, ClassJoinRequest.class_id == cid).with_for_update())
+    if not request or request.status != "PENDING": raise ApiError(409, "CLASS_JOIN_NOT_PENDING", "该加入申请无法处理")
+    request.status, request.resolved_at = decision, now()
+    if decision == "APPROVED":
+        member = db.scalar(select(ClassMember).where(ClassMember.class_id == cid, ClassMember.user_id == request.user_id).with_for_update())
+        if member and member.status == "ACTIVE": raise ApiError(409, "CLASS_MEMBER_EXISTS", "该学生已加入教学班")
+        if member: member.status = "ACTIVE"
+        else: db.add(ClassMember(class_id=cid, user_id=request.user_id))
+    audit(db, user, f"CLASS_JOIN_{decision}", "class_join_request", str(request.id)); db.commit()
+    return {"id": str(request.id), "status": request.status}
 
 
 @app.get("/api/v1/classes/current/context")
@@ -522,6 +573,8 @@ def writable_teacher_classes(db: Session, user: User, class_ids: list[UUID]) -> 
 
 
 def create_assignments_for_classes(data: AssignmentFields, courses: list[TeachingClass], user: User, db: Session) -> list[Assignment]:
+    if data.starts_at and data.starts_at >= data.due_at:
+        raise ApiError(422, "ASSIGNMENT_TIME_INVALID", "开始时间必须早于截止时间")
     created = []
     for course in courses:
         item = Assignment(class_id=course.id, title=data.title.strip(), description=data.description, submitter_type=data.submitter_type, starts_at=data.starts_at, due_at=data.due_at, allow_late=data.allow_late, status="PUBLISHED" if data.publish else "DRAFT")
@@ -538,7 +591,15 @@ def assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
     if user.role == "STUDENT": require_team(db, class_id, user)
     q = select(Assignment).where(Assignment.class_id == class_id)
     if user.role == "STUDENT": q = q.where(Assignment.status == "PUBLISHED")
-    items = db.scalars(q.order_by(Assignment.created_at.desc())).all(); return {"items": [assignment_json(x) for x in items], "total": len(items)}
+    items = db.scalars(q.order_by(Assignment.created_at.desc())).all()
+    result = []
+    for item in items:
+        payload = assignment_json(item)
+        if user.role == "STUDENT":
+            submission, _ = own_submission(db, item, user)
+            payload["submission_status"] = submission.status if submission else "NOT_SUBMITTED"
+        result.append(payload)
+    return {"items": result, "total": len(result)}
 
 
 @app.post("/api/v1/assignments", status_code=201)
@@ -563,6 +624,9 @@ def update_assignment(aid: UUID, data: AssignmentUpdateIn, user: CsrfUser, db: D
     if assignment.version != data.version: raise ApiError(409, "ASSIGNMENT_VERSION_CONFLICT", "作业已被修改，请刷新后重试", {"current_version": assignment.version})
     has_submissions = bool(db.scalar(select(Submission.id).where(Submission.assignment_id == aid).limit(1)))
     if data.submitter_type and data.submitter_type != assignment.submitter_type and has_submissions: raise ApiError(409, "SUBMITTER_TYPE_LOCKED", "已有提交后不能修改提交类型")
+    starts_at = data.starts_at if data.starts_at is not None else assignment.starts_at
+    due_at = data.due_at if data.due_at is not None else assignment.due_at
+    if starts_at and starts_at >= due_at: raise ApiError(422, "ASSIGNMENT_TIME_INVALID", "开始时间必须早于截止时间")
     for key in ("title", "description", "starts_at", "due_at", "allow_late", "submitter_type"):
         value = getattr(data, key)
         if value is not None: setattr(assignment, key, value.strip() if isinstance(value, str) else value)
@@ -593,14 +657,37 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
     team = None
     if user.role == "STUDENT":
         if a.status != "PUBLISHED": raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "可提交的作业不存在")
+        if a.starts_at and a.starts_at > now(): raise ApiError(409, "ASSIGNMENT_NOT_STARTED", "作业尚未开始")
         _, team = require_team(db, a.class_id, user)
-    content = await file.read(); suffix = Path(file.filename or "file").suffix.lower()
-    if not content or len(content) > 100 * 1024 * 1024: raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空且不得超过 100 MB")
-    if suffix not in {".pdf", ".png", ".jpg", ".jpeg", ".md", ".docx", ".pptx", ".xlsx", ".zip"}: raise ApiError(422, "FILE_TYPE_INVALID", "不支持该文件格式")
-    fid = uuid4(); relative = f"{aid}/{fid.hex}{suffix}"; target = settings.file_root / relative; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(content)
+    suffix = Path(file.filename or "file").suffix.lower()
+    supported = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".md", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
+    office_formats = {".docx", ".pptx", ".xlsx"}
+    if suffix not in supported: raise ApiError(422, "FILE_TYPE_INVALID", "仅支持 Markdown、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包")
+    fid = uuid4(); relative = f"{aid}/{fid.hex}{suffix}"; target = settings.file_root / relative; target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.uploading")
+    size = 0
+    try:
+        with temporary.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.max_file_size_bytes:
+                    raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空且不得超过 1 GB")
+                output.write(chunk)
+        if not size: raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空")
+        os.replace(temporary, target)
+    except Exception:
+        if temporary.exists(): temporary.unlink()
+        raise
+    finally:
+        await file.close()
     purpose = "ATTACHMENT" if user.role == "TEACHER" else "SUBMISSION"
     team_id = team.id if team and a.submitter_type == "TEAM" else None
-    x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=purpose, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=len(content), detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status="READY" if suffix in {".pdf", ".png", ".jpg", ".jpeg", ".md"} else "PENDING"); db.add(x); db.commit(); return {"id": str(x.id), "name": x.original_name, "size": x.size_bytes, "preview_status": x.preview_status, "purpose": x.purpose, "owner_name": user.display_name, "submitted": False}
+    preview_status = "PENDING" if suffix in office_formats else "NOT_AVAILABLE" if suffix in {".zip", ".rar", ".7z"} else "READY"
+    x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=purpose, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
+    db.add(x)
+    if suffix in office_formats: db.add(BackgroundJob(kind="FILE_PREVIEW", payload={"file_id": str(fid)}))
+    db.commit()
+    return {"id": str(x.id), "name": x.original_name, "size": x.size_bytes, "preview_status": x.preview_status, "purpose": x.purpose, "owner_name": user.display_name, "submitted": False}
 
 
 @app.get("/api/v1/assignments/{aid}/files")
@@ -618,7 +705,7 @@ def assignment_files(aid: UUID, user: CurrentUser, db: Db):
     def item(file: FileObject):
         linked = bool(db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == file.id).limit(1)))
         owner = db.get(User, file.owner_id)
-        return {"id": str(file.id), "name": file.original_name, "size": file.size_bytes, "preview_status": file.preview_status, "owner_name": owner.display_name, "created_at": file.created_at, "submitted": linked}
+        return {"id": str(file.id), "name": file.original_name, "size": file.size_bytes, "preview_status": file.preview_status, "preview_error": file.preview_error, "owner_name": owner.display_name, "created_at": file.created_at, "submitted": linked}
     return {"attachments": [item(x) for x in materials], "drafts": [item(x) for x in drafts]}
 
 
@@ -651,6 +738,7 @@ def submit(aid: UUID, data: SubmitIn, user: CsrfUser, db: Db, idempotency_key: A
     a = db.get(Assignment, aid)
     if not a or a.status != "PUBLISHED": raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "可提交的作业不存在")
     require_writable_class(db, user, a.class_id)
+    if a.starts_at and a.starts_at > now(): raise ApiError(409, "ASSIGNMENT_NOT_STARTED", "作业尚未开始")
     s, team = own_submission(db, a, user)
     if team and team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "小组作业仅组长可正式提交")
     if a.due_at < now() and not a.allow_late: raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止且不允许迟交")
@@ -734,9 +822,18 @@ def create_campaigns_bulk(data: CampaignBulkIn, user: CsrfUser, db: Db):
 @app.get("/api/v1/review-campaigns")
 def campaigns(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id)
-    if user.role == "STUDENT": require_team(db, class_id, user)
-    rows = db.execute(select(ReviewCampaign, Assignment).join(Assignment).where(ReviewCampaign.class_id == class_id).order_by(ReviewCampaign.due_at.desc())).all()
-    items = [{"id": str(c.id), "assignment_id": str(a.id), "assignment_title": a.title, "rubric": c.rubric, "comment_min_length": c.comment_min_length, "due_at": c.due_at, "publish_at": c.publish_at, "require_all": c.require_all, "allow_update": c.allow_update, "status": c.status, "completed": db.scalar(select(func.count()).select_from(PeerReview).where(PeerReview.campaign_id == c.id, PeerReview.status == "VALID")) or 0} for c, a in rows]
+    own_team = require_team(db, class_id, user)[1] if user.role == "STUDENT" else None
+    query = select(ReviewCampaign, Assignment).join(Assignment).where(ReviewCampaign.class_id == class_id)
+    if user.role == "STUDENT": query = query.where(or_(ReviewCampaign.publish_at.is_(None), ReviewCampaign.publish_at <= now()))
+    rows = db.execute(query.order_by(ReviewCampaign.due_at.desc())).all()
+    items = []
+    for c, a in rows:
+        payload = {"id": str(c.id), "assignment_id": str(a.id), "assignment_title": a.title, "rubric": c.rubric, "comment_min_length": c.comment_min_length, "due_at": c.due_at, "publish_at": c.publish_at, "require_all": c.require_all, "allow_update": c.allow_update, "status": c.status, "version": c.version, "completed": db.scalar(select(func.count()).select_from(PeerReview).where(PeerReview.campaign_id == c.id, PeerReview.status == "VALID")) or 0}
+        if own_team:
+            peers = db.scalar(select(func.count()).select_from(TeamMember).where(TeamMember.team_id == own_team.id, TeamMember.status == "ACTIVE", TeamMember.user_id != user.id)) or 0
+            finished = db.scalar(select(func.count()).select_from(PeerReview).where(PeerReview.campaign_id == c.id, PeerReview.reviewer_id == user.id, PeerReview.status == "VALID")) or 0
+            payload["pending_count"] = max(peers - finished, 0)
+        items.append(payload)
     return {"items": items, "total": len(items)}
 
 
@@ -744,6 +841,7 @@ def campaigns(user: CurrentUser, db: Db, class_id: UUID = Query()):
 def candidates(cid: UUID, user: CurrentUser, db: Db):
     c = db.get(ReviewCampaign, cid)
     if not c: raise ApiError(404, "CAMPAIGN_NOT_FOUND", "互评活动不存在")
+    if c.status != "ACTIVE" or (c.publish_at and c.publish_at > now()) or c.due_at < now(): raise ApiError(409, "CAMPAIGN_CLOSED", "互评活动未开放或已截止")
     _, team = require_team(db, c.class_id, user); a = db.get(Assignment, c.assignment_id); people = db.scalars(select(User).join(TeamMember, TeamMember.user_id == User.id).where(TeamMember.team_id == team.id, TeamMember.status == "ACTIVE", User.id != user.id)).all(); items = []
     for person in people:
         s = db.scalar(select(Submission).where(Submission.assignment_id == a.id, Submission.owner_user_id == person.id, Submission.status == "SUBMITTED")); v = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s else None
@@ -755,7 +853,7 @@ def candidates(cid: UUID, user: CurrentUser, db: Db):
 @app.post("/api/v1/review-campaigns/{cid}/reviews", status_code=201)
 def review(cid: UUID, data: ReviewIn, user: CsrfUser, db: Db):
     c = db.get(ReviewCampaign, cid)
-    if not c or c.status != "ACTIVE" or c.due_at < now(): raise ApiError(409, "CAMPAIGN_CLOSED", "互评活动未开放或已截止")
+    if not c or c.status != "ACTIVE" or (c.publish_at and c.publish_at > now()) or c.due_at < now(): raise ApiError(409, "CAMPAIGN_CLOSED", "互评活动未开放或已截止")
     require_writable_class(db, user, c.class_id)
     if data.reviewee_id == user.id: raise ApiError(422, "SELF_REVIEW_FORBIDDEN", "不能评价自己")
     _, mine = require_team(db, c.class_id, user); other = membership(db, c.class_id, data.reviewee_id)
@@ -777,6 +875,13 @@ def received(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_team(db, class_id, user); reviewer = aliased(User)
     rows = db.execute(select(PeerReview, Assignment, reviewer).join(ReviewCampaign, ReviewCampaign.id == PeerReview.campaign_id).join(Assignment, Assignment.id == ReviewCampaign.assignment_id).join(reviewer, reviewer.id == PeerReview.reviewer_id).where(PeerReview.reviewee_id == user.id, PeerReview.status == "VALID", ReviewCampaign.class_id == class_id, or_(ReviewCampaign.publish_at.is_(None), ReviewCampaign.publish_at <= now()))).all()
     return {"items": [{"id": str(r.id), "assignment_title": a.title, "reviewer_name": p.display_name, "scores": r.scores, "total_score": r.total_score, "comment": r.comment, "created_at": r.created_at} for r, a, p in rows]}
+
+@app.get("/api/v1/peer-reviews/sent")
+def sent_reviews(user: CurrentUser, db: Db, class_id: UUID = Query()):
+    require_team(db, class_id, user)
+    reviewee = aliased(User)
+    rows = db.execute(select(PeerReview, Assignment, reviewee).join(ReviewCampaign, ReviewCampaign.id == PeerReview.campaign_id).join(Assignment, Assignment.id == ReviewCampaign.assignment_id).join(reviewee, reviewee.id == PeerReview.reviewee_id).where(PeerReview.reviewer_id == user.id, ReviewCampaign.class_id == class_id).order_by(PeerReview.updated_at.desc())).all()
+    return {"items": [{"id": str(r.id), "assignment_title": a.title, "reviewee_name": p.display_name, "scores": r.scores, "total_score": r.total_score, "comment": r.comment, "status": r.status, "created_at": r.created_at, "updated_at": r.updated_at} for r, a, p in rows]}
 
 
 @app.post("/api/v1/peer-reviews/{rid}/invalidate", status_code=204)
@@ -901,7 +1006,7 @@ def update_class(cid: UUID, data: ClassUpdateIn, user: CsrfUser, db: Db):
     course = db.scalar(select(TeachingClass).where(TeachingClass.id == cid, TeachingClass.teacher_id == user.id).with_for_update())
     if not course: raise ApiError(404, "CLASS_NOT_FOUND", "未找到可管理的教学班")
     if course.version != data.version: raise ApiError(409, "CLASS_VERSION_CONFLICT", "教学班已被修改，请刷新后重试", {"current_version": course.version})
-    metadata_fields = {"semester", "name", "team_deadline", "max_team_members"} & data.model_fields_set
+    metadata_fields = {"semester", "name", "team_deadline", "max_team_members", "topic_public", "invite_requires_approval"} & data.model_fields_set
     if course.status == "ARCHIVED" and metadata_fields: raise ApiError(409, "CLASS_ARCHIVED", "请先恢复教学班再编辑资料")
     changes = {}
     if data.max_team_members is not None and data.max_team_members != course.max_team_members:
@@ -919,6 +1024,10 @@ def update_class(cid: UUID, data: ClassUpdateIn, user: CsrfUser, db: Db):
     if "team_deadline" in data.model_fields_set and data.team_deadline != course.team_deadline:
         changes["team_deadline"] = {"from": course.team_deadline.isoformat() if course.team_deadline else None, "to": data.team_deadline.isoformat() if data.team_deadline else None}
         course.team_deadline = data.team_deadline
+    for field in ("topic_public", "invite_requires_approval"):
+        value = getattr(data, field)
+        if value is not None and value != getattr(course, field):
+            changes[field] = {"from": getattr(course, field), "to": value}; setattr(course, field, value)
     if data.status is not None and data.status != course.status:
         changes["status"] = {"from": course.status, "to": data.status}; course.status = data.status
     if changes:
@@ -1020,9 +1129,13 @@ def topic_decision(topic_id: UUID, decision: Literal["APPROVED", "REJECTED"], da
     teacher(user); topic = db.get(Topic, topic_id)
     if not topic or not user_class(db, user, topic.class_id): raise ApiError(404, "TOPIC_NOT_FOUND", "选题不存在")
     require_writable_class(db, user, topic.class_id)
-    topic.review_status, topic.review_reason = decision, data.reason
-    for member in db.scalars(select(TeamMember).where(TeamMember.team_id == topic.team_id, TeamMember.status == "ACTIVE")): notify(db, member.user_id, "TOPIC_DECISION", f"选题审核结果：{decision}")
-    audit(db, user, "TOPIC_DECIDED", "topic", str(topic.id), {"decision": decision, "reason": data.reason}); db.commit(); return {"id": str(topic.id), "status": topic.review_status, "reason": topic.review_reason}
+    reason = (data.reason or "").strip()
+    if decision == "REJECTED" and not reason: raise ApiError(422, "TOPIC_REASON_REQUIRED", "驳回选题时必须填写原因")
+    if decision == "APPROVED" and not reason: reason = "审核通过"
+    topic.review_status, topic.review_reason = decision, reason
+    decision_label = "已通过" if decision == "APPROVED" else "已驳回"
+    for member in db.scalars(select(TeamMember).where(TeamMember.team_id == topic.team_id, TeamMember.status == "ACTIVE")): notify(db, member.user_id, "TOPIC_DECISION", f"选题审核结果：{decision_label}")
+    audit(db, user, "TOPIC_DECIDED", "topic", str(topic.id), {"decision": decision, "reason": reason}); db.commit(); return {"id": str(topic.id), "status": topic.review_status, "reason": topic.review_reason}
 
 
 @app.post("/api/v1/assignments/{aid}/submission/retract", status_code=204)
@@ -1039,11 +1152,40 @@ def retract(aid: UUID, user: CsrfUser, db: Db):
 def submission_board(aid: UUID, user: CurrentUser, db: Db):
     teacher(user); assignment = db.get(Assignment, aid)
     if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-    rows = db.scalars(select(Submission).where(Submission.assignment_id == aid)).all(); items = []
-    for s in rows:
-        owner = db.get(User, s.owner_user_id) if s.owner_user_id else db.get(Team, s.owner_team_id); latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s.current_version_no else None
-        items.append({"id": str(s.id), "owner": owner.display_name if isinstance(owner, User) else owner.name, "status": s.status, "version_no": s.current_version_no, "submitted_at": latest.submitted_at if latest else None, "is_late": latest.is_late if latest else False})
+    rows = db.scalars(select(Submission).where(Submission.assignment_id == aid)).all()
+    by_owner = {str(row.owner_user_id or row.owner_team_id): row for row in rows}
+    if assignment.submitter_type == "INDIVIDUAL":
+        owners = [(member.user_id, person.display_name, None) for member, person in db.execute(select(ClassMember, User).join(User).where(ClassMember.class_id == assignment.class_id, ClassMember.status == "ACTIVE").order_by(User.login_name)).all()]
+    else:
+        owners = [(team.id, team.name, team.name) for team in db.scalars(select(Team).where(Team.class_id == assignment.class_id, Team.status == "ACTIVE").order_by(Team.name)).all()]
+    items = []
+    for owner_id, owner_name, team_name in owners:
+        submission = by_owner.get(str(owner_id))
+        versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id).order_by(SubmissionVersion.version_no.desc())).all() if submission else []
+        latest = versions[0] if versions else None
+        def version_json(version: SubmissionVersion):
+            files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
+            return {"version_no": version.version_no, "submitted_at": version.submitted_at, "is_late": version.is_late, "member_snapshot": version.member_snapshot, "files": [{"id": str(file.id), "name": file.original_name, "size": file.size_bytes} for file in files]}
+        items.append({"id": str(submission.id) if submission else str(owner_id), "owner": owner_name, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "version_no": submission.current_version_no if submission else 0, "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "versions": [version_json(version) for version in versions]})
     return {"items": items, "total": len(items)}
+
+
+@app.patch("/api/v1/review-campaigns/{cid}")
+def update_campaign(cid: UUID, data: CampaignUpdateIn, user: CsrfUser, db: Db):
+    teacher(user); campaign = db.scalar(select(ReviewCampaign).where(ReviewCampaign.id == cid).with_for_update())
+    if not campaign or not user_class(db, user, campaign.class_id): raise ApiError(404, "CAMPAIGN_NOT_FOUND", "互评活动不存在")
+    require_writable_class(db, user, campaign.class_id)
+    if campaign.version != data.version: raise ApiError(409, "CAMPAIGN_VERSION_CONFLICT", "互评活动已被修改，请刷新后重试", {"current_version": campaign.version})
+    if data.publish_at and data.publish_at >= data.due_at: raise ApiError(422, "CAMPAIGN_TIME_INVALID", "公开时间必须早于截止时间")
+    if abs(sum(float(x.get("weight", 0)) for x in data.rubric) - 100) > .01 or any(not x.get("key") or not x.get("label") for x in data.rubric): raise ApiError(422, "RUBRIC_INVALID", "评价维度权重合计必须为 100")
+    has_reviews = bool(db.scalar(select(PeerReview.id).where(PeerReview.campaign_id == cid, PeerReview.status == "VALID").limit(1)))
+    if has_reviews and data.rubric != campaign.rubric: raise ApiError(409, "CAMPAIGN_RUBRIC_LOCKED", "已有评价后不能修改评分维度或权重")
+    campaign.rubric, campaign.comment_min_length = data.rubric, data.comment_min_length
+    campaign.due_at, campaign.publish_at = data.due_at, data.publish_at
+    campaign.require_all, campaign.allow_update = data.require_all, data.allow_update
+    campaign.version += 1
+    audit(db, user, "REVIEW_CAMPAIGN_UPDATED", "review_campaign", str(cid)); db.commit()
+    return {"id": str(campaign.id), "version": campaign.version, "status": campaign.status}
 
 
 @app.get("/api/v1/files/{fid}/preview")
@@ -1056,7 +1198,15 @@ def preview_file(fid: UUID, user: CurrentUser, db: Db):
         html = markdown.markdown(path.read_text(encoding="utf-8"), extensions=["fenced_code"])
         clean = bleach.clean(html, tags=["p", "h1", "h2", "h3", "h4", "pre", "code", "ul", "ol", "li", "strong", "em", "blockquote", "a"], attributes={"a": ["href", "title"]}, protocols=["http", "https", "mailto"])
         return HTMLResponse(clean)
-    return response
+    if path.suffix.lower() in {".docx", ".pptx", ".xlsx"}:
+        if file.preview_status == "PENDING": raise ApiError(409, "FILE_PREVIEW_PENDING", "文件正在生成预览，请稍后刷新")
+        if file.preview_status == "READY" and file.preview_storage_path:
+            preview = settings.file_root / file.preview_storage_path
+            if preview.is_file(): return FileResponse(preview, media_type="application/pdf", headers={"Content-Disposition": "inline"})
+        if file.preview_status == "FAILED": raise ApiError(409, "FILE_PREVIEW_FAILED", "预览生成失败，请下载原文件查看", {"reason": file.preview_error or "转换服务不可用"})
+    # Preview endpoints must render in the browser; the download endpoint keeps
+    # the original filename and attachment disposition.
+    return FileResponse(path, media_type=file.detected_mime, headers={"Content-Disposition": "inline"})
 
 
 @app.get("/api/v1/assignments/{aid}/download.zip")
@@ -1080,4 +1230,8 @@ def campaign_stats(cid: UUID, user: CurrentUser, db: Db):
     reviews = db.scalars(select(PeerReview).where(PeerReview.campaign_id == cid, PeerReview.status == "VALID")).all()
     reviewers = len({x.reviewer_id for x in reviews}); received_count = {}
     for x in reviews: received_count[str(x.reviewee_id)] = received_count.get(str(x.reviewee_id), 0) + 1
-    return {"review_count": len(reviews), "reviewer_count": reviewers, "average_score": round(sum(x.total_score for x in reviews) / len(reviews), 2) if reviews else None, "received_count": received_count}
+    grouped = {}
+    for member in db.scalars(select(TeamMember).join(Team).where(Team.class_id == campaign.class_id, Team.status == "ACTIVE", TeamMember.status == "ACTIVE")):
+        grouped.setdefault(member.team_id, []).append(member.user_id)
+    eligible_reviewers = sum(len(member_ids) for member_ids in grouped.values() if len(member_ids) > 1)
+    return {"review_count": len(reviews), "reviewer_count": reviewers, "uncompleted_reviewer_count": max(eligible_reviewers - reviewers, 0), "average_score": round(sum(x.total_score for x in reviews) / len(reviews), 2) if reviews else None, "received_count": received_count}

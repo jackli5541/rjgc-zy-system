@@ -97,6 +97,108 @@ def test_role_mismatch_and_unauthenticated():
     assert client.post("/api/v1/auth/login", json={"account": "teacher", "password": "123456", "role": "student"}).status_code == 403
 
 
+def test_assignment_time_window_retract_and_review_visibility():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2030 春季", "name": "时间规则测试班", "max_team_members": 5}).json()
+    class_id = course["id"]
+    student_record = teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": "20300001", "name": "时间测试学生"}).json()
+    student, student_headers = login("20300001", "20300001", "student")
+    team = student.post("/api/v1/teams", headers=student_headers, json={"class_id": class_id, "name": "时间测试小组", "open_recruitment": True})
+    assert team.status_code == 201, team.text
+
+    invalid = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "无效时间", "description": "开始时间不能晚于截止时间", "submitter_type": "INDIVIDUAL", "starts_at": "2099-12-02T12:00:00+08:00", "due_at": "2099-12-01T12:00:00+08:00"})
+    assert invalid.status_code == 422 and invalid.json()["code"] == "ASSIGNMENT_TIME_INVALID"
+
+    future = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "未开始作业", "description": "测试开始时间限制", "submitter_type": "INDIVIDUAL", "starts_at": "2099-12-01T12:00:00+08:00", "due_at": "2099-12-02T12:00:00+08:00"})
+    assert future.status_code == 201, future.text
+    assert student.get(f"/api/v1/assignments?class_id={class_id}").json()["items"][0]["submission_status"] == "NOT_SUBMITTED"
+    blocked_upload = student.post(f"/api/v1/assignments/{future.json()['id']}/files", headers=student_headers, files={"file": ("future.pdf", b"future", "application/pdf")})
+    assert blocked_upload.status_code == 409 and blocked_upload.json()["code"] == "ASSIGNMENT_NOT_STARTED"
+
+    assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "可撤回作业", "description": "测试截止前撤回", "submitter_type": "INDIVIDUAL", "due_at": "2099-12-02T12:00:00+08:00"}).json()
+    uploaded = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("work.pdf", b"work", "application/pdf")})
+    assert uploaded.status_code == 201, uploaded.text
+    submitted = student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "time-window-submit"}, json={"file_ids": [uploaded.json()["id"]]})
+    assert submitted.status_code == 201, submitted.text
+    assert student.post(f"/api/v1/assignments/{assignment['id']}/submission/retract", headers=student_headers).status_code == 204
+    board = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions", headers=teacher_headers).json()["items"]
+    assert board[0]["status"] == "RETRACTED" and board[0]["versions"][0]["version_no"] == 1
+
+    campaign = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": assignment["id"], "rubric": [{"key": "quality", "label": "质量", "weight": 100}], "due_at": "2099-12-03T12:00:00+08:00", "publish_at": "2099-12-02T12:00:00+08:00", "allow_update": False})
+    assert campaign.status_code == 201, campaign.text
+    assert student.get(f"/api/v1/review-campaigns?class_id={class_id}").json()["items"] == []
+    assert student.get(f"/api/v1/review-campaigns/{campaign.json()['id']}/candidates").status_code == 409
+
+    late_assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "已截止作业", "description": "测试截止后不可撤回", "submitter_type": "INDIVIDUAL", "due_at": "2020-12-02T12:00:00+08:00", "allow_late": True}).json()
+    late_file = student.post(f"/api/v1/assignments/{late_assignment['id']}/files", headers=student_headers, files={"file": ("late.pdf", b"late", "application/pdf")}).json()
+    late_submit = student.post(f"/api/v1/assignments/{late_assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "late-submit"}, json={"file_ids": [late_file["id"]]})
+    assert late_submit.status_code == 201, late_submit.text
+    rejected_retract = student.post(f"/api/v1/assignments/{late_assignment['id']}/submission/retract", headers=student_headers)
+    assert rejected_retract.status_code == 409 and rejected_retract.json()["code"] == "RETRACT_NOT_ALLOWED"
+
+    peer_record = teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": "20300002", "name": "互评测试学生"}).json()
+    peer, peer_headers = login("20300002", "20300002", "student")
+    join_request = peer.post(f"/api/v1/teams/{team.json()['id']}/applications", headers=peer_headers)
+    assert join_request.status_code == 201, join_request.text
+    assert student.post(f"/api/v1/team-requests/{join_request.json()['id']}/decision?decision=APPROVED", headers=student_headers).status_code == 200
+    review_assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "禁止修改互评作业", "description": "验证重复评价限制", "submitter_type": "INDIVIDUAL", "due_at": "2099-12-02T12:00:00+08:00"}).json()
+    peer_file = peer.post(f"/api/v1/assignments/{review_assignment['id']}/files", headers=peer_headers, files={"file": ("peer.pdf", b"peer", "application/pdf")}).json()
+    assert peer.post(f"/api/v1/assignments/{review_assignment['id']}/submission", headers={**peer_headers, "Idempotency-Key": "peer-review-work"}, json={"file_ids": [peer_file["id"]]}).status_code == 201
+    immediate_campaign = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": review_assignment["id"], "rubric": [{"key": "quality", "label": "质量", "weight": 100}], "due_at": "2099-12-03T12:00:00+08:00", "comment_min_length": 0, "allow_update": False})
+    assert immediate_campaign.status_code == 201, immediate_campaign.text
+    review_payload = {"reviewee_id": peer_record["id"], "scores": {"quality": 90}, "comment": "测试同一评价不可修改"}
+    assert student.post(f"/api/v1/review-campaigns/{immediate_campaign.json()['id']}/reviews", headers=student_headers, json=review_payload).status_code == 201
+    repeated_review = student.post(f"/api/v1/review-campaigns/{immediate_campaign.json()['id']}/reviews", headers=student_headers, json={**review_payload, "comment": "尝试修改已有评价内容"})
+    assert repeated_review.status_code == 409 and repeated_review.json()["code"] == "REVIEW_DUPLICATE"
+
+
+def test_logout_returns_no_content_and_revokes_session():
+    client, headers = login("teacher", "123456", "teacher")
+    response = client.post("/api/v1/auth/logout", headers=headers)
+    assert response.status_code == 204
+    assert client.get("/api/v1/classes").status_code == 401
+
+
+def test_invite_code_join_and_class_visibility_settings():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    seed = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2028 春季", "name": "邀请码账号班", "max_team_members": 5}).json()
+    added = teacher.post(f"/api/v1/classes/{seed['id']}/members", headers=teacher_headers, json={"student_no": "20280001", "name": "邀请码学生"})
+    assert added.status_code == 201, added.text
+    student, student_headers = login("20280001", "20280001", "student")
+
+    auto = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2028 春季", "name": "自动加入班", "max_team_members": 5, "topic_public": True, "invite_requires_approval": False}).json()
+    joined = student.post("/api/v1/classes/join", headers=student_headers, json={"invite_code": auto["invite_code"]})
+    assert joined.status_code == 200 and joined.json()["status"] == "APPROVED"
+    assert student.get("/api/v1/classes").json()["total"] >= 2
+
+    approval = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2028 春季", "name": "审核加入班", "max_team_members": 5}).json()
+    pending = student.post("/api/v1/classes/join", headers=student_headers, json={"invite_code": approval["invite_code"]})
+    assert pending.status_code == 200 and pending.json()["status"] == "PENDING"
+    requests = teacher.get(f"/api/v1/classes/{approval['id']}/join-requests").json()["items"]
+    assert len(requests) == 1 and requests[0]["student_no"] == "20280001"
+    decided = teacher.post(f"/api/v1/classes/{approval['id']}/join-requests/{requests[0]['id']}/decision?decision=APPROVED", headers=teacher_headers)
+    assert decided.status_code == 200 and decided.json()["status"] == "APPROVED"
+
+    updated = teacher.patch(f"/api/v1/classes/{approval['id']}", headers=teacher_headers, json={"version": approval["version"], "topic_public": True, "invite_requires_approval": False})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["topic_public"] is True and updated.json()["invite_requires_approval"] is False
+
+
+def test_teacher_can_approve_pending_topic():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2028 秋季", "name": "选题审核测试班", "max_team_members": 5}).json()
+    member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20280002", "name": "选题学生"})
+    assert member.status_code == 201, member.text
+    student, student_headers = login("20280002", "20280002", "student")
+    team = student.post("/api/v1/teams", headers=student_headers, json={"class_id": course["id"], "name": "选题小组", "open_recruitment": True})
+    assert team.status_code == 201, team.text
+    topic = student.post(f"/api/v1/teams/{team.json()['id']}/topic", headers=student_headers, json={"name": "课程作业系统", "description": "完成课程作业的协作系统"})
+    assert topic.status_code == 200, topic.text
+    decision = teacher.post(f"/api/v1/topics/{topic.json()['id']}/decision?decision=APPROVED", headers=teacher_headers, json={"reason": "审核通过"})
+    assert decision.status_code == 200, decision.text
+    assert decision.json()["status"] == "APPROVED"
+
+
 def test_multisheet_roster_and_member_crud():
     teacher, headers = login("teacher", "123456", "teacher")
     course = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2026 秋季", "name": "成员管理测试班", "max_team_members": 5})

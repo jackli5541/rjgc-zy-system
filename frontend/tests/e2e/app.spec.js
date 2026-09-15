@@ -30,6 +30,16 @@ test('teacher uses top navigation and starts with an empty class list', async ({
   await expect(page.getByRole('heading', { name: '还没有教学班' })).toBeVisible()
   await expect(page.getByText('暂无教学班')).toBeVisible()
 
+  await page.locator('.header-right .ant-btn').first().click()
+  await expect(page.getByRole('dialog', { name: '站内通知' })).toBeVisible()
+  await expect(page.locator('.ant-drawer')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Close' }).click()
+
+  await page.getByRole('button', { name: '创建教学班' }).click()
+  const createClassDialog = page.getByRole('dialog', { name: '创建教学班' })
+  await expect(createClassDialog.getByRole('button', { name: '取 消' })).toBeVisible()
+  await createClassDialog.getByRole('button', { name: '取 消' }).click()
+
   const bodyBox = await page.locator('body').boundingBox()
   const viewport = page.viewportSize()
   expect(bodyBox.width).toBeLessThanOrEqual(viewport.width)
@@ -45,6 +55,7 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   const assignments = { 'class-1': [], 'class-2': [], 'class-3': [] }
   const campaigns = { 'class-1': [], 'class-2': [], 'class-3': [] }
   let assignmentPayload
+  let assignmentPatch
   let campaignPayload
   let classPatch
 
@@ -67,11 +78,17 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
     if (path === '/review-campaigns' && request.method() === 'GET') {
       const classId = url.searchParams.get('class_id'); return json({ items: campaigns[classId] || [], total: (campaigns[classId] || []).length })
     }
+    if (/^\/assignments\/[^/]+\/files$/.test(path)) return json({ attachments: [], drafts: [] })
+    if (/^\/assignments\/[^/]+\/submissions$/.test(path)) return json({ items: [], total: 0 })
     if (path === '/assignments/bulk' && request.method() === 'POST') {
       assignmentPayload = request.postDataJSON()
       const items = assignmentPayload.class_ids.map((classId, index) => ({ id: `assignment-${index + 1}`, class_id: classId, title: assignmentPayload.title, description: assignmentPayload.description, submitter_type: assignmentPayload.submitter_type, due_at: assignmentPayload.due_at, status: 'PUBLISHED', version: 1 }))
       items.forEach(item => { assignments[item.class_id].push(item); classes.find(course => course.id === item.class_id).assignment_count += 1 })
       return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ items, total: items.length }) })
+    }
+    const assignmentMatch = path.match(/^\/assignments\/([^/]+)$/)
+    if (assignmentMatch && request.method() === 'PATCH') {
+      assignmentPatch = request.postDataJSON(); const item = Object.values(assignments).flat().find(row => row.id === assignmentMatch[1]); Object.assign(item, assignmentPatch, { version: item.version + 1 }); return json(item)
     }
     if (path === '/review-campaigns/bulk' && request.method() === 'POST') {
       campaignPayload = request.postDataJSON()
@@ -104,6 +121,7 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await page.getByRole('button', { name: '作业管理' }).click()
   await page.getByRole('button', { name: '新建作业' }).click()
   const assignmentDialog = page.getByRole('dialog', { name: '新建作业' })
+  await expect(assignmentDialog.getByRole('button', { name: '取 消' })).toBeVisible()
   await assignmentDialog.locator('.ant-form-item').filter({ hasText: '教学班' }).locator('.ant-select-selector').click()
   await page.locator('.ant-select-dropdown:visible .ant-select-item-option').filter({ hasText: '测试二班' }).click()
   await assignmentDialog.locator('.ant-form-item').filter({ hasText: '标题' }).locator('input').fill('跨班需求报告')
@@ -111,6 +129,17 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await assignmentDialog.locator('.ant-form-item').filter({ hasText: '说明' }).locator('textarea').fill('完成需求分析并提交。')
   await assignmentDialog.locator('.ant-modal-footer .ant-btn-primary').click()
   await expect.poll(() => assignmentPayload?.class_ids.length).toBe(2)
+  await expect(page.getByText('已发布', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('PUBLISHED', { exact: true })).toHaveCount(0)
+  await page.locator('.assignment-row').filter({ hasText: '跨班需求报告' }).first().click()
+  const assignmentDetail = page.locator('.ant-modal-wrap:visible').filter({ hasText: '作业附件' })
+  await expect(assignmentDetail).toBeVisible()
+  await assignmentDetail.getByRole('button', { name: '编辑作业' }).click()
+  const editAssignmentDialog = page.getByRole('dialog', { name: '编辑作业' })
+  await editAssignmentDialog.locator('.ant-form-item').filter({ hasText: '说明' }).locator('textarea').fill('更新后的作业说明。')
+  await editAssignmentDialog.locator('.ant-modal-footer .ant-btn-primary').click()
+  await expect.poll(() => assignmentPatch?.description).toBe('更新后的作业说明。')
+  expect(assignmentPatch?.version).toBe(1)
 
   await page.getByRole('button', { name: '互评管理' }).click()
   await page.getByRole('button', { name: '开启互评' }).click()

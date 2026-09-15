@@ -49,6 +49,8 @@ class TeachingClass(Base):
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
     team_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     max_team_members: Mapped[int] = mapped_column(Integer, default=5)
+    topic_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    invite_requires_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -62,6 +64,19 @@ class ClassMember(Base):
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (UniqueConstraint("class_id", "user_id", name="uq_class_member"),)
+
+
+class ClassJoinRequest(Base):
+    __tablename__ = "class_join_requests"
+    id: Mapped[UUID] = uuid_pk()
+    class_id: Mapped[UUID] = mapped_column(ForeignKey("teaching_classes.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+Index("uq_pending_class_join_request", ClassJoinRequest.class_id, ClassJoinRequest.user_id, unique=True, postgresql_where=ClassJoinRequest.status == "PENDING")
 
 
 class ImportBatch(Base):
@@ -159,6 +174,8 @@ class FileObject(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     detected_mime: Mapped[str] = mapped_column(String(100))
     preview_status: Mapped[str] = mapped_column(String(16), default="READY")
+    preview_storage_path: Mapped[str | None] = mapped_column(String(255))
+    preview_error: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
