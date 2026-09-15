@@ -1,0 +1,7 @@
+FROM mcr.microsoft.com/playwright:v1.61.0-noble
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY playwright.config.js ./
+COPY tests/e2e ./tests/e2e
+CMD ["npm", "run", "test:e2e"]

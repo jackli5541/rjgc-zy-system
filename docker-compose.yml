@@ -1,0 +1,127 @@
+name: software-engineering-coursework
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: coursework
+      POSTGRES_USER: coursework
+      POSTGRES_PASSWORD: coursework
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coursework -d coursework"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  api:
+    profiles: ["container-app"]
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://coursework:coursework@postgres:5432/coursework
+      CORS_ORIGINS: http://localhost:8080
+      FILE_ROOT: /data/files
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - private_files:/data/files
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  task-runner:
+    profiles: ["container-app"]
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://coursework:coursework@postgres:5432/coursework
+      FILE_ROOT: /data/files
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - private_files:/data/files
+  migrate:
+    profiles: ["container-app"]
+    build: ./backend
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://coursework:coursework@postgres:5432/coursework
+    depends_on:
+      postgres:
+        condition: service_healthy
+  frontend:
+    profiles: ["container-app"]
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+  test-postgres:
+    profiles: ["test"]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: coursework_test
+      POSTGRES_USER: coursework
+      POSTGRES_PASSWORD: coursework
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coursework -d coursework_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  test-migrate:
+    profiles: ["test"]
+    build: ./backend
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://coursework:coursework@test-postgres:5432/coursework_test
+    depends_on:
+      test-postgres:
+        condition: service_healthy
+  test-api:
+    profiles: ["test"]
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://coursework:coursework@test-postgres:5432/coursework_test
+      CORS_ORIGINS: http://test-frontend
+      FILE_ROOT: /tmp/coursework-test-files
+    depends_on:
+      test-migrate:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases:
+          - api
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  test-frontend:
+    profiles: ["test"]
+    build: ./frontend
+    depends_on:
+      test-api:
+        condition: service_healthy
+  e2e:
+    profiles: ["test"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.e2e
+    environment:
+      PLAYWRIGHT_BASE_URL: http://test-frontend
+    volumes:
+      - ./frontend/test-results:/app/test-results
+    depends_on:
+      test-frontend:
+        condition: service_healthy
+    ipc: host
+volumes:
+  postgres_data:
+  private_files:
