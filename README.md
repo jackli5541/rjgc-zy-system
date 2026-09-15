@@ -36,12 +36,14 @@
 
 该模式仅在 Docker 中运行 PostgreSQL，后端 API、任务进程和前端开发服务器运行在本机，支持前端热更新。
 
-```powershell
+```bat
 git clone https://github.com/jackli5541/rjgc-zy-system.git
 cd rjgc-zy-system
-.\scripts\init-local.ps1
-.\scripts\start-local.ps1
+scripts\init-local.bat
+scripts\start-local.bat
 ```
+
+也可以直接运行同目录下的 `.ps1` 脚本；`.bat` 文件只是 Windows 命令行和双击启动入口。
 
 首次执行 `init-local.ps1` 会启动 PostgreSQL、创建 Python 虚拟环境、安装前后端依赖、执行数据库迁移并初始化系统。启动完成后访问：
 
@@ -51,8 +53,8 @@ cd rjgc-zy-system
 
 停止本地前后端进程：
 
-```powershell
-.\scripts\stop-local.ps1
+```bat
+scripts\stop-local.bat
 ```
 
 PostgreSQL 会继续在后台运行，可用 `docker compose stop postgres` 停止。开发数据库默认映射到本机 `5433` 端口，数据保存在 Docker 卷中。

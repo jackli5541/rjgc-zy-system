@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $backendRoot = Join-Path $projectRoot 'backend'
 $venvPython = Join-Path $backendRoot '.venv\Scripts\python.exe'
@@ -24,4 +24,4 @@ Set-Location (Join-Path $projectRoot 'frontend')
 npm install
 if ($LASTEXITCODE -ne 0) { throw '前端依赖安装失败。' }
 
-Write-Host '本地环境初始化完成。运行 scripts/start-local.ps1 启动前后端。'
+Write-Host '本地环境初始化完成。运行 scripts/start-local.bat（或 start-local.ps1）启动前后端。'
