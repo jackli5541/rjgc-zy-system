@@ -573,7 +573,7 @@ def create_team(data: TeamIn, user: CsrfUser, db: Db):
     if membership(db, course.id, user.id): raise ApiError(409, "ALREADY_IN_TEAM", "你已经加入小组")
     x = Team(class_id=course.id, leader_id=user.id, name=data.name.strip(), normalized_name="".join(data.name.casefold().split()), open_recruitment=data.open_recruitment); db.add(x)
     try:
-        db.flush(); db.add(TeamMember(team_id=x.id, class_id=course.id, user_id=user.id, role="LEADER")); db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == course.id, TeamRequest.applicant_id == user.id, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); audit(db, user, "TEAM_CREATED", "team", str(x.id)); db.commit()
+        db.flush(); db.add(TeamMember(team_id=x.id, class_id=course.id, user_id=user.id, role="LEADER")); db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == course.id, TeamRequest.applicant_id == user.id, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); notify(db, user.id, "TOPIC_REQUIRED", "小组已创建，请提交选题", "team", str(x.id)); audit(db, user, "TEAM_CREATED", "team", str(x.id)); db.commit()
     except IntegrityError: db.rollback(); raise ApiError(409, "TEAM_NAME_EXISTS", "小组名称已被使用")
     return team_json(db, x, user)
 
@@ -638,7 +638,10 @@ def topic(tid: UUID, data: TopicIn, user: CsrfUser, db: Db):
     norm = "".join(data.name.casefold().split()); item = db.scalar(select(Topic).where(Topic.team_id == tid))
     if item: item.name, item.normalized_name, item.description, item.review_status, item.version = data.name.strip(), norm, data.description, "PENDING", item.version + 1
     else: item = Topic(class_id=x.class_id, team_id=tid, name=data.name.strip(), normalized_name=norm, description=data.description); db.add(item)
-    try: db.flush(); audit(db, user, "TOPIC_SUBMITTED", "team", str(tid)); db.commit()
+    try:
+        db.flush()
+        db.execute(Notification.__table__.delete().where(Notification.user_id == user.id, Notification.kind == "TOPIC_REQUIRED", Notification.object_type == "team", Notification.object_id == str(tid)))
+        audit(db, user, "TOPIC_SUBMITTED", "team", str(tid)); db.commit()
     except IntegrityError: db.rollback(); raise ApiError(409, "TOPIC_DUPLICATE", "该选题已被使用，请重新填写")
     return {"id": str(item.id), "name": item.name, "status": item.review_status}
 
@@ -678,6 +681,8 @@ def writable_teacher_classes(db: Session, user: User, class_ids: list[UUID]) -> 
 def create_assignments_for_classes(data: AssignmentFields, courses: list[TeachingClass], user: User, db: Session) -> list[Assignment]:
     if data.starts_at and data.starts_at >= data.due_at:
         raise ApiError(422, "ASSIGNMENT_TIME_INVALID", "开始时间必须早于截止时间")
+    if data.publish and data.submitter_type == "TEAM" and data.due_at <= now():
+        raise ApiError(422, "TEAM_ASSIGNMENT_DUE_INVALID", "小组作业截止时间必须晚于当前时间")
     if data.auto_review_enabled:
         if data.submitter_type != "INDIVIDUAL": raise ApiError(422, "INDIVIDUAL_ASSIGNMENT_REQUIRED", "自动互评只能关联个人作业")
         if not data.auto_review_mode or not data.auto_review_due_at: raise ApiError(422, "AUTO_REVIEW_CONFIG_REQUIRED", "请完整配置自动互评模式和截止时间")
@@ -747,6 +752,8 @@ def update_assignment(aid: UUID, data: AssignmentUpdateIn, user: CsrfUser, db: D
     auto_review_criteria_text = data.auto_review_criteria_text if "auto_review_criteria_text" in data.model_fields_set else assignment.auto_review_criteria_text
     auto_review_due_at = data.auto_review_due_at if "auto_review_due_at" in data.model_fields_set else assignment.auto_review_due_at
     submitter_type = data.submitter_type or assignment.submitter_type
+    if assignment.status == "PUBLISHED" and submitter_type == "TEAM" and due_at <= now():
+        raise ApiError(422, "TEAM_ASSIGNMENT_DUE_INVALID", "小组作业截止时间必须晚于当前时间")
     if auto_review_enabled and campaign is None:
         if submitter_type != "INDIVIDUAL": raise ApiError(422, "INDIVIDUAL_ASSIGNMENT_REQUIRED", "自动互评只能关联个人作业")
         if not auto_review_mode or not auto_review_due_at: raise ApiError(422, "AUTO_REVIEW_CONFIG_REQUIRED", "请完整配置自动互评模式和截止时间")
@@ -775,6 +782,8 @@ def publish_assignment(aid: UUID, user: CsrfUser, db: Db):
     require_writable_class(db, user, assignment.class_id)
     if assignment.status == "PUBLISHED": return assignment_json(assignment)
     if assignment.status == "CLOSED": raise ApiError(409, "ASSIGNMENT_CLOSED", "已提前截止的作业请先撤回发布后再重新发布")
+    if assignment.submitter_type == "TEAM" and assignment.due_at <= now():
+        raise ApiError(422, "TEAM_ASSIGNMENT_DUE_INVALID", "小组作业截止时间必须晚于当前时间")
     if assignment.auto_review_enabled:
         criteria_exists = bool(db.scalar(select(FileObject.id).where(FileObject.assignment_id == aid, FileObject.purpose == "REVIEW_CRITERIA").limit(1)))
         if not (assignment.auto_review_criteria_text or "").strip() and not criteria_exists: raise ApiError(422, "REVIEW_CRITERIA_REQUIRED", "自动互评标准文字和附件至少提供一种")
@@ -1336,7 +1345,8 @@ def grade_revisions(gid: UUID, user: CurrentUser, db: Db):
 
 @app.get("/api/v1/notifications")
 def notifications(user: CurrentUser, db: Db):
-    items = db.scalars(select(Notification).where(Notification.user_id == user.id).order_by(Notification.created_at.desc()).limit(100)).all(); return {"items": [{"id": str(x.id), "title": x.title, "kind": x.kind, "read": bool(x.read_at), "created_at": x.created_at} for x in items], "unread": sum(not x.read_at for x in items)}
+    items = db.scalars(select(Notification).where(Notification.user_id == user.id).order_by(Notification.created_at.desc()).limit(100)).all()
+    return {"items": [{"id": str(x.id), "title": x.title, "kind": x.kind, "object_type": x.object_type, "object_id": x.object_id, "link": f"/teams?team={x.object_id}" if x.object_type == "team" and x.object_id else None, "read": bool(x.read_at), "created_at": x.created_at} for x in items], "unread": sum(not x.read_at for x in items)}
 
 
 @app.post("/api/v1/notifications/read", status_code=204)

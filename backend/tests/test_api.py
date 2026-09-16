@@ -163,6 +163,13 @@ def test_assignment_time_window_update_and_review_visibility():
     invalid = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "无效时间", "description": "开始时间不能晚于截止时间", "submitter_type": "INDIVIDUAL", "starts_at": "2099-12-02T12:00:00+08:00", "due_at": "2099-12-01T12:00:00+08:00"})
     assert invalid.status_code == 422 and invalid.json()["code"] == "ASSIGNMENT_TIME_INVALID"
 
+    expired_team = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "过期小组作业", "description": "截止时间必须在未来", "submitter_type": "TEAM", "due_at": "2020-01-01T00:00:00+08:00", "publish": True})
+    assert expired_team.status_code == 422 and expired_team.json()["code"] == "TEAM_ASSIGNMENT_DUE_INVALID"
+    expired_team_draft = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "过期小组草稿", "description": "草稿可以保存但不能发布", "submitter_type": "TEAM", "due_at": "2020-01-01T00:00:00+08:00", "publish": False})
+    assert expired_team_draft.status_code == 201
+    blocked_publish = teacher.post(f"/api/v1/assignments/{expired_team_draft.json()['id']}/publish", headers=teacher_headers)
+    assert blocked_publish.status_code == 422 and blocked_publish.json()["code"] == "TEAM_ASSIGNMENT_DUE_INVALID"
+
     future = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "未开始作业", "description": "测试开始时间限制", "submitter_type": "INDIVIDUAL", "starts_at": "2099-12-01T12:00:00+08:00", "due_at": "2099-12-02T12:00:00+08:00"})
     assert future.status_code == 201, future.text
     assert student.get(f"/api/v1/assignments?class_id={class_id}").json()["items"][0]["submission_status"] == "NOT_SUBMITTED"
@@ -244,8 +251,12 @@ def test_teacher_can_approve_pending_topic():
     student, student_headers = login("20280002", "20280002", "student")
     team = student.post("/api/v1/teams", headers=student_headers, json={"class_id": course["id"], "name": "选题小组", "open_recruitment": True})
     assert team.status_code == 201, team.text
+    reminders = student.get("/api/v1/notifications").json()["items"]
+    topic_reminder = next(item for item in reminders if item["kind"] == "TOPIC_REQUIRED")
+    assert topic_reminder["link"] == f"/teams?team={team.json()['id']}"
     topic = student.post(f"/api/v1/teams/{team.json()['id']}/topic", headers=student_headers, json={"name": "课程作业系统", "description": "完成课程作业的协作系统"})
     assert topic.status_code == 200, topic.text
+    assert all(item["kind"] != "TOPIC_REQUIRED" for item in student.get("/api/v1/notifications").json()["items"])
     decision = teacher.post(f"/api/v1/topics/{topic.json()['id']}/decision?decision=APPROVED", headers=teacher_headers, json={"reason": "审核通过"})
     assert decision.status_code == 200, decision.text
     assert decision.json()["status"] == "APPROVED"
