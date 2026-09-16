@@ -9,8 +9,7 @@ class Settings(BaseSettings):
     file_root: Path = Path("./data/files")
     session_hours: int = 24
     secure_cookies: bool = False
-    max_file_size_bytes: int = 1024 * 1024 * 1024
-    office_converter: str = "soffice"
+    max_file_size_bytes: int = 100 * 1024 * 1024
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

@@ -1,15 +1,11 @@
-import os
-import subprocess
-import tempfile
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, select
 
 from app.database import SessionLocal
-from app.models import BackgroundJob, FileObject, ImportBatch, LoginSession
+from app.models import Assignment, AuditLog, BackgroundJob, ClassMember, FileObject, ImportBatch, LoginSession, Notification, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, User
 from app.settings import settings
 
 
@@ -27,51 +23,64 @@ def fail_preview(job_id: UUID, file_id: UUID | None, reason: str) -> None:
 
 
 def process_preview(job_id: UUID, file_id: UUID) -> None:
-    with SessionLocal() as db:
-        file = db.get(FileObject, file_id)
-        if not file:
-            fail_preview(job_id, None, "找不到待预览文件")
-            return
-        source = settings.file_root / file.storage_path
-        if not source.is_file():
-            fail_preview(job_id, file_id, "原文件存储不可用")
-            return
-        preview_relative = f"previews/{file.id.hex}.pdf"
-        preview_target = settings.file_root / preview_relative
-        original_name = file.original_name
+    fail_preview(job_id, file_id, "Office 文件本期仅支持权限校验后的原文件下载")
 
-    temp_root = settings.file_root / ".preview-tmp"
-    temp_root.mkdir(parents=True, exist_ok=True)
-    try:
-        with tempfile.TemporaryDirectory(dir=temp_root) as directory:
-            result = subprocess.run(
-                [settings.office_converter, "--headless", "--convert-to", "pdf", "--outdir", directory, str(source)],
-                capture_output=True,
-                text=True,
-                timeout=180,
-                check=False,
-            )
-            converted = Path(directory) / f"{Path(original_name).stem}.pdf"
-            if result.returncode or not converted.is_file():
-                detail = (result.stderr or result.stdout or "转换工具未生成 PDF").strip()
-                raise RuntimeError(detail[:500])
-            preview_target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(converted, preview_target)
-    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
-        fail_preview(job_id, file_id, f"Office 预览转换失败：{error}")
+
+def process_auto_review(db, current: datetime) -> None:
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.auto_review_enabled.is_(True), Assignment.auto_review_status == "PENDING", Assignment.status.in_(["PUBLISHED", "CLOSED"]), Assignment.due_at <= current)
+        .order_by(Assignment.due_at)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+    if not assignment:
+        return
+    existing = db.scalar(select(ReviewCampaign).where(ReviewCampaign.assignment_id == assignment.id))
+    if existing:
+        assignment.auto_review_status = "CREATED"
+        return
+    if not assignment.auto_review_due_at or assignment.auto_review_due_at <= current:
+        assignment.auto_review_status, assignment.auto_review_error = "FAILED", "互评截止时间已过，未自动创建"
+        return
+    frozen_rows = db.execute(
+        select(User, SubmissionVersion)
+        .join(ClassMember, and_(ClassMember.user_id == User.id, ClassMember.class_id == assignment.class_id, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT"))
+        .join(Submission, and_(Submission.owner_user_id == User.id, Submission.assignment_id == assignment.id, Submission.status == "SUBMITTED"))
+        .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+        .where(User.status == "ACTIVE")
+        .order_by(User.login_name)
+        .with_for_update()
+    ).all()
+    if len(frozen_rows) < 2:
+        assignment.auto_review_status, assignment.auto_review_error = "FAILED", "全班已正式提交学生少于 2 人"
         return
 
-    with SessionLocal.begin() as db:
-        job = db.get(BackgroundJob, job_id)
-        file = db.get(FileObject, file_id)
-        if job:
-            job.status = "COMPLETED"
-            job.result_path = preview_relative
-            job.last_error = None
-        if file:
-            file.preview_status = "READY"
-            file.preview_storage_path = preview_relative
-            file.preview_error = None
+    campaign = ReviewCampaign(assignment_id=assignment.id, class_id=assignment.class_id, mode=assignment.auto_review_mode, criteria_text=(assignment.auto_review_criteria_text or "").strip(), assignment_snapshot_at=current, rubric=[{"key": "score", "label": "总分", "weight": 100}], comment_min_length=1, due_at=assignment.auto_review_due_at, publish_at=current, require_all=False, allow_update=False)
+    db.add(campaign)
+    db.flush()
+    if assignment.auto_review_mode == "CLASS":
+        groups = [("教学班", frozen_rows)]
+    else:
+        grouped = {(team.id, team.name): [] for team in db.scalars(select(Team).where(Team.class_id == assignment.class_id, Team.status == "ACTIVE")).all()}
+        for person, version in frozen_rows:
+            team_row = db.execute(select(TeamMember.team_id, Team.name).join(Team, Team.id == TeamMember.team_id).where(TeamMember.class_id == assignment.class_id, TeamMember.user_id == person.id, TeamMember.status == "ACTIVE", Team.status == "ACTIVE")).first()
+            key, label = (team_row.team_id, team_row.name) if team_row else (None, "未分组")
+            grouped.setdefault((key, label), []).append((person, version))
+        groups = [(label, rows) for (_, label), rows in grouped.items()]
+    for label, rows in groups:
+        if len(rows) < 2:
+            reason = f"{label} 已正式提交人数少于 2 人"
+            for person, _ in rows:
+                db.add(ReviewAssignment(campaign_id=campaign.id, reviewer_id=person.id, status="SKIPPED", skip_reason=reason))
+            continue
+        for index, (reviewer, _) in enumerate(rows):
+            reviewee, version = rows[(index + 1) % len(rows)]
+            db.add(ReviewAssignment(campaign_id=campaign.id, reviewer_id=reviewer.id, reviewee_id=reviewee.id, submission_version_id=version.id))
+            db.add(Notification(user_id=reviewer.id, kind="REVIEW_ASSIGNED", title=f"新的互评任务：{assignment.title}", object_type="review_campaign", object_id=str(campaign.id)))
+    course = db.get(TeachingClass, assignment.class_id)
+    assignment.auto_review_status, assignment.auto_review_error = "CREATED", None
+    db.add(AuditLog(actor_id=course.teacher_id if course else None, action="REVIEW_CAMPAIGN_AUTO_CREATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(assignment.id), "mode": assignment.auto_review_mode}))
 
 
 def run_once() -> None:
@@ -79,6 +88,7 @@ def run_once() -> None:
         current = datetime.now(UTC)
         db.execute(delete(LoginSession).where(LoginSession.expires_at < current))
         db.execute(delete(ImportBatch).where(ImportBatch.status == "PREVIEWED", ImportBatch.created_at < current - timedelta(days=1)))
+        process_auto_review(db, current)
         job = db.scalar(select(BackgroundJob).where(BackgroundJob.status == "PENDING", BackgroundJob.available_at <= current).with_for_update(skip_locked=True).limit(1))
         if not job:
             return

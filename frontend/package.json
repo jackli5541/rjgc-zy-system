@@ -11,6 +11,9 @@
   },
   "dependencies": {
     "@ant-design/icons-vue": "^7.0.1",
+    "@tiptap/pm": "^3.31.3",
+    "@tiptap/starter-kit": "^3.31.3",
+    "@tiptap/vue-3": "^3.31.3",
     "ant-design-vue": "^4.2.6",
     "pinia": "^3.0.3",
     "vue": "^3.5.13",

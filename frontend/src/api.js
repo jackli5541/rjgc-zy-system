@@ -7,9 +7,7 @@ export async function api(path, options = {}) {
   if (csrfToken && !['GET', 'HEAD'].includes((options.method || 'GET').toUpperCase())) headers.set('X-CSRF-Token', csrfToken)
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   const response = await fetch(`/api/v1${path}`, { credentials: 'include', ...options, headers })
-  if (response.status === 401 && window.location.pathname !== '/login') {
-    window.location.assign('/login')
-  }
+  if (response.status === 401 && window.location.pathname !== '/login') window.dispatchEvent(new CustomEvent('auth-expired'))
   if (response.status === 204) return null
   const type = response.headers.get('content-type') || ''
   const data = type.includes('json') ? await response.json() : await response.text()

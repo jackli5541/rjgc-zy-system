@@ -21,10 +21,20 @@ if not exist "%VITE%" (
     exit /b 1
 )
 
+echo Applying database migrations...
+pushd "%BACKEND_ROOT%"
+"%PYTHON%" -m alembic upgrade head
+if errorlevel 1 (
+    popd
+    echo Database migration failed. Services were not started.
+    exit /b 1
+)
+popd
+
 echo Starting API, worker and frontend...
 pushd "%BACKEND_ROOT%"
-start "coursework-api" /b "%PYTHON%" -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-start "coursework-worker" /b "%PYTHON%" -m app.worker
+start "coursework-api" /b "%PYTHON%" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app
+start "coursework-worker" /b "%PYTHON%" -m watchfiles --filter python app.worker.main app
 popd
 
 pushd "%FRONTEND_ROOT%"
@@ -35,6 +45,7 @@ echo.
 echo Services are running:
 echo   Web: http://localhost:8080
 echo   API: http://localhost:8000
+echo   API and worker reload automatically when backend Python files change.
 echo Close this CMD window to stop all services.
 echo.
 

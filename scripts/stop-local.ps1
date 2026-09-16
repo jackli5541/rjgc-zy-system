@@ -8,8 +8,17 @@ if (-not (Test-Path -LiteralPath $stateFile)) {
 }
 
 $state = Get-Content -Raw -LiteralPath $stateFile | ConvertFrom-Json
+
+function Stop-ProcessTree([int]$RootProcessId) {
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $RootProcessId" -ErrorAction SilentlyContinue)
+    foreach ($child in $children) {
+        Stop-ProcessTree -RootProcessId $child.ProcessId
+    }
+    Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
+}
+
 foreach ($processId in @($state.api, $state.worker, $state.frontend)) {
-    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    Stop-ProcessTree -RootProcessId $processId
 }
 Remove-Item -LiteralPath $stateFile
 Write-Host '本地前后端已停止；PostgreSQL 容器保持运行。'

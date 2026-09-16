@@ -157,6 +157,12 @@ class Assignment(Base):
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     allow_late: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_review_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_review_mode: Mapped[str | None] = mapped_column(String(16))
+    auto_review_criteria_text: Mapped[str | None] = mapped_column(Text)
+    auto_review_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    auto_review_status: Mapped[str | None] = mapped_column(String(16))
+    auto_review_error: Mapped[str | None] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(16), default="DRAFT")
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -176,6 +182,7 @@ class FileObject(Base):
     preview_status: Mapped[str] = mapped_column(String(16), default="READY")
     preview_storage_path: Mapped[str | None] = mapped_column(String(255))
     preview_error: Mapped[str | None] = mapped_column(String(500))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -215,6 +222,9 @@ class ReviewCampaign(Base):
     id: Mapped[UUID] = uuid_pk()
     assignment_id: Mapped[UUID] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), unique=True)
     class_id: Mapped[UUID] = mapped_column(ForeignKey("teaching_classes.id", ondelete="CASCADE"), index=True)
+    mode: Mapped[str | None] = mapped_column(String(16))
+    criteria_text: Mapped[str | None] = mapped_column(Text)
+    assignment_snapshot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rubric: Mapped[list] = mapped_column(JSON)
     comment_min_length: Mapped[int] = mapped_column(Integer, default=20)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -225,9 +235,26 @@ class ReviewCampaign(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class ReviewAssignment(Base):
+    __tablename__ = "review_assignments"
+    id: Mapped[UUID] = uuid_pk()
+    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("review_campaigns.id", ondelete="CASCADE"), index=True)
+    reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    reviewee_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    submission_version_id: Mapped[UUID | None] = mapped_column(ForeignKey("submission_versions.id"))
+    status: Mapped[str] = mapped_column(String(16), default="PENDING")
+    skip_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "reviewer_id", name="uq_review_assignment_reviewer"),
+        UniqueConstraint("campaign_id", "reviewee_id", name="uq_review_assignment_reviewee"),
+    )
+
+
 class PeerReview(Base):
     __tablename__ = "peer_reviews"
     id: Mapped[UUID] = uuid_pk()
+    allocation_id: Mapped[UUID | None] = mapped_column(ForeignKey("review_assignments.id", ondelete="CASCADE"), unique=True)
     campaign_id: Mapped[UUID] = mapped_column(ForeignKey("review_campaigns.id", ondelete="CASCADE"), index=True)
     reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
     reviewee_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)

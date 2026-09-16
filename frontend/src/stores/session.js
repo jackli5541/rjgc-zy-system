@@ -9,13 +9,20 @@ export const useSessionStore = defineStore('session', {
     teamGate: state => Boolean(state.context?.team_gate_required)
   },
   actions: {
+    clear() {
+      this.user = null
+      this.context = null
+      this.classes = []
+      this.ready = true
+      setCsrfToken('')
+    },
     async restore() {
       try {
         const data = await api('/auth/session')
         this.user = data.user
         setCsrfToken(data.csrf_token)
         await this.refreshClasses()
-      } catch { this.user = null }
+      } catch { this.clear() }
       finally { this.ready = true }
     },
     async login(payload) {
@@ -33,8 +40,7 @@ export const useSessionStore = defineStore('session', {
     },
     async refreshContext() { if (this.user) await this.refreshClasses(this.classId) },
     async logout() {
-      await api('/auth/logout', { method: 'POST' })
-      this.user = null; this.context = null; this.classes = []; setCsrfToken('')
+      try { await api('/auth/logout', { method: 'POST' }) } finally { this.clear() }
     }
   }
 })
