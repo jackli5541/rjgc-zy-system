@@ -177,6 +177,11 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await expect.poll(() => assignmentPatch?.description).toContain('更新后的作业说明。')
   expect(assignmentPatch?.version).toBe(1)
 
+  await assignmentDetail.getByRole('tab', { name: '成绩管理' }).click()
+  await expect(assignmentDetail.getByText('互评活动等待创建')).toBeVisible()
+  await expect(assignmentDetail.getByText('本作业没有互评活动，暂无成绩可管理')).toHaveCount(0)
+  await assignmentDetail.getByRole('tab', { name: '详情' }).click()
+
   await assignmentDetail.getByRole('button', { name: '提前截止' }).click()
   await page.getByRole('button', { name: '确认截止' }).click()
   await expect.poll(() => assignmentClosed).toBe(true)

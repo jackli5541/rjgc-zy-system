@@ -733,7 +733,9 @@ onBeforeUnmount(() => { clearInterval(gateTimer); clearInterval(clockTimer); win
               </template>
             </a-tab-pane>
             <a-tab-pane v-if="role==='TEACHER'" key="grades" tab="成绩管理">
-              <a-empty v-if="!selectedCampaign" class="detail-empty grade-empty" description="本作业没有互评活动，暂无成绩可管理"/>
+              <a-empty v-if="!selectedCampaign&&!selectedAssignment.auto_review_enabled" class="detail-empty grade-empty" description="本作业未开启互评，暂无成绩可管理"/>
+              <a-result v-else-if="!selectedCampaign&&selectedAssignment.auto_review_status==='FAILED'" status="error" title="互评活动创建失败" :sub-title="selectedAssignment.auto_review_error||'请返回互评管理查看详情并调整设置。'"/>
+              <a-result v-else-if="!selectedCampaign" status="info" title="互评活动等待创建" sub-title="已开启互评，系统将在作业截止后创建活动；互评结束后会生成成绩草稿。"/>
               <a-result v-else-if="!selectedCampaign.grades_generated_at||!gradeDetail" status="info" title="成绩尚未生成" sub-title="互评截止后系统会生成成绩草稿，届时可填写小组系数并发布。"/>
               <template v-else>
                 <section class="assignment-pane grade-management-heading"><div class="assignment-pane-heading"><h2>成绩概览</h2><a-button type="primary" :disabled="!gradeDetail.summary.publishable" @click="openGradePublish"><CheckCircleOutlined/> 发布成绩</a-button></div><div class="grade-summary"><div><span>参与学生</span><strong>{{gradeDetail.total}}</strong></div><div><span>可发布</span><strong>{{gradeDetail.summary.publishable}}</strong></div><div><span>待处理</span><strong>{{gradeDetail.summary.pending}}</strong></div><div><span>已发布</span><strong>{{gradeDetail.summary.published}}</strong></div></div></section>
