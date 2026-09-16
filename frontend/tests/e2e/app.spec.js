@@ -14,9 +14,9 @@ test('teacher uses top navigation and starts with an empty class list', async ({
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
     const json = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/auth/session') return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ message: '请先登录' }) })
-    if (path === '/auth/login' && request.method() === 'POST') return json({ user: { id: 'teacher-empty', account: 'teacher', name: '王老师', role: 'TEACHER' }, csrf_token: 'test-csrf' })
+    if (path === '/auth/login' && request.method() === 'POST') return json({ user: { id: 'teacher-empty', account: 'teacher', name: '老师', role: 'TEACHER' }, csrf_token: 'test-csrf' })
     if (path === '/classes') return json({ items: [], total: 0 })
-    if (path === '/classes/current/context') return json({ user: { id: 'teacher-empty', account: 'teacher', name: '王老师', role: 'TEACHER' }, current_class: null, team_membership: null, team_gate_required: false, permissions: { manage_class: true, access_coursework: true } })
+    if (path === '/classes/current/context') return json({ user: { id: 'teacher-empty', account: 'teacher', name: '老师', role: 'TEACHER' }, current_class: null, team_membership: null, team_gate_required: false, permissions: { manage_class: true, access_coursework: true } })
     return json({ items: [], total: 0 })
   })
   await page.goto('/login')
@@ -67,11 +67,11 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
     const url = new URL(request.url())
     const path = url.pathname.replace('/api/v1', '')
     const json = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
-    if (path === '/auth/session') return json({ user: { id: 'teacher-1', account: 'teacher', name: '王老师', role: 'TEACHER' }, csrf_token: 'test-csrf' })
+    if (path === '/auth/session') return json({ user: { id: 'teacher-1', account: 'teacher', name: '老师', role: 'TEACHER' }, csrf_token: 'test-csrf' })
     if (path === '/classes' && request.method() === 'GET') return json({ items: classes, total: classes.length })
     if (path === '/classes/current/context') {
       const selected = classes.find(item => item.id === url.searchParams.get('class_id')) || classes[0] || null
-      return json({ user: { id: 'teacher-1', account: 'teacher', name: '王老师', role: 'TEACHER' }, current_class: selected, team_membership: null, team_gate_required: false, permissions: { manage_class: true, access_coursework: true } })
+      return json({ user: { id: 'teacher-1', account: 'teacher', name: '老师', role: 'TEACHER' }, current_class: selected, team_membership: null, team_gate_required: false, permissions: { manage_class: true, access_coursework: true } })
     }
     if (path === '/notifications') return json({ items: [], total: 0 })
     if (/^\/classes\/[^/]+\/members$/.test(path)) return json({ items: [], total: 0 })
@@ -230,7 +230,7 @@ test('teacher exports centrally and manages grades from assignment detail', asyn
     const url = new URL(request.url())
     const path = url.pathname.replace('/api/v1', '')
     const json = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
-    if (path === '/auth/session') return json({ user: { id: 'teacher-1', account: 'teacher', name: '王老师', role: 'TEACHER' }, csrf_token: 'test-csrf' })
+    if (path === '/auth/session') return json({ user: { id: 'teacher-1', account: 'teacher', name: '老师', role: 'TEACHER' }, csrf_token: 'test-csrf' })
     if (path === '/classes') return json({ items: [{ id: 'class-1', semester: '2026 秋季', name: '软件工程 1 班', status: 'ACTIVE' }], total: 1 })
     if (path === '/classes/current/context') return json({ user: { id: 'teacher-1', role: 'TEACHER' }, current_class: { id: 'class-1', semester: '2026 秋季', name: '软件工程 1 班', status: 'ACTIVE' }, team_gate_required: false })
     if (path === '/notifications') return json({ items: [], total: 0 })
@@ -288,7 +288,7 @@ test('logout removes the protected view and shows login without a reload', async
   await page.route('**/api/v1/**', route => {
     const path = new URL(route.request().url()).pathname.replace('/api/v1', '')
     const body = path === '/auth/session'
-      ? { user: { id: 'teacher-1', account: 'teacher', name: '王老师', role: 'TEACHER' }, csrf_token: 'test-csrf' }
+      ? { user: { id: 'teacher-1', account: 'teacher', name: '老师', role: 'TEACHER' }, csrf_token: 'test-csrf' }
       : path === '/classes' ? { items: [], total: 0 }
         : path === '/classes/current/context' ? { current_class: null, team_gate_required: false }
           : { items: [], total: 0 }
@@ -315,7 +315,7 @@ test('expired session switches from the protected view to login', async ({ page 
       return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ message: '请先登录' }) })
     }
     const body = path === '/auth/session'
-      ? { user: { id: 'teacher-1', account: 'teacher', name: '王老师', role: 'TEACHER' }, csrf_token: 'test-csrf' }
+      ? { user: { id: 'teacher-1', account: 'teacher', name: '老师', role: 'TEACHER' }, csrf_token: 'test-csrf' }
       : path === '/classes' ? { items: [{ id: 'class-1', semester: '2026 秋季', name: '软件工程一班', status: 'ACTIVE' }], total: 1 }
         : path === '/classes/current/context' ? { current_class: { id: 'class-1', name: '软件工程一班', status: 'ACTIVE' }, team_gate_required: false }
           : { items: [], total: 0 }
