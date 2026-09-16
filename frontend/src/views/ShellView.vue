@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { ArrowLeftOutlined, BellOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CloseOutlined, CodeOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, OrderedListOutlined, PlusOutlined, RedoOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, BellOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CloseOutlined, CodeOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, KeyOutlined, LeftOutlined, LinkOutlined, LogoutOutlined, OrderedListOutlined, PlusOutlined, RedoOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined, UserOutlined } from '@ant-design/icons-vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { api } from '../api'
@@ -64,7 +64,9 @@ const passwordForm = reactive({ current_password: '', new_password: '' })
 const gradeForm = reactive({ assignment_id: '', subject_user_id: '', subject_team_id: '', score: 0, comment: '', publish: false, reason: '' })
 const inviteTarget = ref('')
 const importState = reactive({ file: null, preview: null, result: null, step: 0, loading: false })
+const filePreview = reactive({ open: false, files: [], index: 0, url: '', loading: false, error: '' })
 let gateTimer
+let previewLoadSequence = 0
 
 const descriptionEditor = useEditor({
   content: '',
@@ -130,6 +132,8 @@ const canSubmitAssignment = computed(() => {
 })
 const campaignEnded = computed(() => Boolean(selectedCampaign.value && (selectedCampaign.value.status !== 'ACTIVE' || new Date(selectedCampaign.value.due_at) <= new Date())))
 const currentCampaignReviews = computed(() => receivedReviews.value.filter(item => item.campaign_id === selectedCampaign.value?.id))
+const activePreviewFile = computed(() => filePreview.files[filePreview.index] || null)
+const activePreviewIsImage = computed(() => /\.(png|jpe?g|gif|webp)$/i.test(activePreviewFile.value?.name || ''))
 const eligibleReviewAssignments = computed(() => {
   const used = new Set(campaigns.value.map(item => item.assignment_id))
   return assignments.value.filter(item => item.submitter_type === 'INDIVIDUAL' && ['PUBLISHED', 'CLOSED'].includes(item.status) && new Date(item.due_at) < new Date() && !used.has(item.id))
@@ -519,6 +523,62 @@ async function persistGrade() { await action(async () => { const payload = { ...
 async function saveGrade() { if (!gradeForm.publish) return persistGrade(); const preview = gradePublishPreview.value; Modal.confirm({ title: '确认发布成绩？', content: preview ? `${preview.assignment}：已评分 ${preview.scored}，未评分 ${preview.pending}，当前成绩范围 ${preview.range}。发布后学生即可查看该成绩和评语。` : '发布后学生即可查看该成绩和评语。', okText: '确认发布', cancelText: '取消', onOk: persistGrade }) }
 async function logout() { try { await session.logout() } finally { await router.replace('/login') } }
 function downloadExport(kind, format = 'xlsx') { window.location.href = `/api/v1/exports/${kind}.${format}?class_id=${classId.value}` }
+function clearPreviewUrl() {
+  if (filePreview.url) URL.revokeObjectURL(filePreview.url)
+  filePreview.url = ''
+}
+async function loadFilePreview() {
+  const requestSequence = ++previewLoadSequence
+  clearPreviewUrl()
+  filePreview.error = ''
+  const file = activePreviewFile.value
+  if (!file) return
+  if (!file.previewable || file.download_only || (file.preview_status && file.preview_status !== 'READY')) {
+    filePreview.loading = false
+    filePreview.error = file.preview_error || '该文件格式暂不支持在线预览，可下载原文件查看。'
+    return
+  }
+  filePreview.loading = true
+  try {
+    const response = await fetch(`/api/v1/files/${file.id}/preview`, { credentials: 'include' })
+    if (response.status === 401) window.dispatchEvent(new CustomEvent('auth-expired'))
+    if (!response.ok) {
+      const type = response.headers.get('content-type') || ''
+      const body = type.includes('json') ? await response.json() : await response.text()
+      throw new Error(body?.message || body?.detail?.message || '文件预览加载失败')
+    }
+    const contentType = response.headers.get('content-type') || ''
+    if (!contentType.startsWith('image/') && !contentType.includes('application/pdf') && !contentType.includes('text/html')) {
+      throw new Error('该文件内容无法在浏览器中预览')
+    }
+    const objectUrl = URL.createObjectURL(await response.blob())
+    if (requestSequence !== previewLoadSequence || !filePreview.open) { URL.revokeObjectURL(objectUrl); return }
+    filePreview.url = objectUrl
+  } catch (error) {
+    if (requestSequence === previewLoadSequence) filePreview.error = error.message || '文件预览加载失败，请下载原文件查看。'
+  } finally {
+    if (requestSequence === previewLoadSequence) filePreview.loading = false
+  }
+}
+function openFilePreview(file, files) {
+  filePreview.files = [...(files || [])]
+  filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file.id))
+  filePreview.open = true
+  loadFilePreview()
+}
+function switchFilePreview(step) {
+  const next = filePreview.index + step
+  if (next < 0 || next >= filePreview.files.length) return
+  filePreview.index = next
+  loadFilePreview()
+}
+function closeFilePreview() {
+  previewLoadSequence += 1
+  filePreview.open = false
+  filePreview.loading = false
+  filePreview.error = ''
+  clearPreviewUrl()
+}
 
 async function pollGate() {
   if (!session.teamGate) return
@@ -530,7 +590,7 @@ async function pollGate() {
 watch(() => route.fullPath, loadView)
 watch(() => session.teamGate, required => { clearInterval(gateTimer); gateTimer = required ? setInterval(pollGate, 10000) : undefined })
 onMounted(async () => { await loadView(); if (session.teamGate) gateTimer = setInterval(pollGate, 10000); window.addEventListener('focus', pollGate) })
-onBeforeUnmount(() => { clearInterval(gateTimer); window.removeEventListener('focus', pollGate) })
+onBeforeUnmount(() => { clearInterval(gateTimer); window.removeEventListener('focus', pollGate); closeFilePreview() })
 </script>
 
 <template>
@@ -586,13 +646,13 @@ onBeforeUnmount(() => { clearInterval(gateTimer); window.removeEventListener('fo
               <section class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-upload v-if="role==='TEACHER'" :custom-request="uploadFile"><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
                 <a-empty v-if="!assignmentAttachments.length" class="detail-empty" description="暂无作业资料"/>
-                <div v-else class="assignment-file-list"><div v-for="file in assignmentAttachments" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><a :href="file.previewable?`/api/v1/files/${file.id}/preview`:`/api/v1/files/${file.id}`" target="_blank">{{file.name}}<small v-if="file.download_only">（下载查看）</small></a><a-space><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip><a-tooltip v-if="role==='TEACHER'&&selectedAssignment.status==='DRAFT'" title="删除附件"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></a-space></div></div>
+                <div v-else class="assignment-file-list"><div v-for="file in assignmentAttachments" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,assignmentAttachments)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-space><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip><a-tooltip v-if="role==='TEACHER'&&selectedAssignment.status==='DRAFT'" title="删除附件"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></a-space></div></div>
               </section>
               <section v-if="role==='TEACHER'&&selectedAssignment.auto_review_enabled" class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>自动互评标准</h2><a-upload v-if="selectedAssignment.status==='DRAFT'" :custom-request="uploadReviewCriteria" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.xlsx"><a-button><UploadOutlined/> 上传标准附件</a-button></a-upload></div>
                 <p class="detail-description">{{selectedAssignment.auto_review_criteria_text||'标准见附件'}}</p>
                 <a-empty v-if="!reviewCriteriaFiles.length" class="detail-empty" description="暂无标准附件"/>
-                <div v-else class="assignment-file-list"><div v-for="file in reviewCriteriaFiles" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><a :href="file.previewable?`/api/v1/files/${file.id}/preview`:`/api/v1/files/${file.id}`" target="_blank">{{file.name}}<small v-if="file.download_only">（下载查看）</small></a><a-space><a-tag>{{selectedAssignment.auto_review_mode==='CLASS'?'班级一人评一人':'组内一人评一人'}}</a-tag><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip><a-tooltip v-if="selectedAssignment.status==='DRAFT'" title="删除附件"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></a-space></div></div>
+                <div v-else class="assignment-file-list"><div v-for="file in reviewCriteriaFiles" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,reviewCriteriaFiles)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-space><a-tag>{{selectedAssignment.auto_review_mode==='CLASS'?'班级一人评一人':'组内一人评一人'}}</a-tag><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip><a-tooltip v-if="selectedAssignment.status==='DRAFT'" title="删除附件"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></a-space></div></div>
               </section>
               <section v-if="role==='TEACHER'" class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业操作</h2></div>
@@ -616,7 +676,7 @@ onBeforeUnmount(() => { clearInterval(gateTimer); window.removeEventListener('fo
               <section class="assignment-pane submission-files-pane">
                 <div class="assignment-pane-heading"><h2>提交附件</h2><a-upload v-if="canSubmitAssignment" :custom-request="uploadFile" multiple><a-button><UploadOutlined/> 上传附件</a-button></a-upload></div>
                 <a-empty v-if="!draftFiles.length" class="detail-empty" description="暂无提交附件"/>
-                <div v-else class="assignment-file-list"><div v-for="file in draftFiles" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><a :href="file.previewable?`/api/v1/files/${file.id}/preview`:`/api/v1/files/${file.id}`" target="_blank">{{file.name}}</a><a-tooltip v-if="canSubmitAssignment" :title="file.submitted?'从待更新附件中移除':'删除附件'"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></div></div>
+                <div v-else class="assignment-file-list"><div v-for="file in draftFiles" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,draftFiles)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-tooltip v-if="canSubmitAssignment" :title="file.submitted?'从待更新附件中移除':'删除附件'"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></div></div>
                 <div v-if="canSubmitAssignment" class="submission-actions"><a-button type="primary" :disabled="!draftFiles.length" @click="submitAssignment">{{assignmentIsUpdate?'更新提交':'提交'}}</a-button></div>
               </section>
               </template>
@@ -667,8 +727,8 @@ onBeforeUnmount(() => { clearInterval(gateTimer); window.removeEventListener('fo
             <a-alert v-if="reviewTask?.status==='SKIPPED'" type="warning" show-icon message="本次任务已跳过" :description="reviewTask.skip_reason"/>
             <template v-else-if="reviewTask">
               <section class="assignment-pane"><div class="assignment-pane-heading"><h2>评价对象</h2><span>提交于 {{formatTime(reviewTask.submission?.submitted_at)}}</span></div><div class="review-subject"><span class="review-subject-icon"><UserOutlined/></span><div><strong>{{reviewTask.reviewee?.name}}</strong><span>{{reviewTask.reviewee?.student_no}}</span></div></div></section>
-              <section class="assignment-pane"><div class="assignment-pane-heading"><h2>互评标准</h2><span v-if="reviewTask.campaign.criteria_files.length">{{reviewTask.campaign.criteria_files.length}} 个附件</span></div><p class="detail-description review-criteria">{{reviewTask.campaign.criteria_text||'互评标准见附件'}}</p><div v-if="reviewTask.campaign.criteria_files.length" class="assignment-file-list"><div v-for="file in reviewTask.campaign.criteria_files" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><a :href="file.previewable?`/api/v1/files/${file.id}/preview`:`/api/v1/files/${file.id}`" target="_blank">{{file.name}}<small v-if="file.download_only">（下载查看）</small></a><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip></div></div></section>
-              <section class="assignment-pane"><div class="assignment-pane-heading"><h2>作品文件</h2><span>{{reviewTask.submission?.files?.length||0}} 个附件</span></div><a-empty v-if="!reviewTask.submission?.files?.length" class="detail-empty" description="暂无作品文件"/><div v-else class="assignment-file-list"><div v-for="file in reviewTask.submission.files" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><a :href="file.previewable?`/api/v1/files/${file.id}/preview`:`/api/v1/files/${file.id}`" target="_blank">{{file.name}}<small v-if="file.download_only">（下载查看）</small></a><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip></div></div></section>
+              <section class="assignment-pane"><div class="assignment-pane-heading"><h2>互评标准</h2><span v-if="reviewTask.campaign.criteria_files.length">{{reviewTask.campaign.criteria_files.length}} 个附件</span></div><p class="detail-description review-criteria">{{reviewTask.campaign.criteria_text||'互评标准见附件'}}</p><div v-if="reviewTask.campaign.criteria_files.length" class="assignment-file-list"><div v-for="file in reviewTask.campaign.criteria_files" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,reviewTask.campaign.criteria_files)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip></div></div></section>
+              <section class="assignment-pane"><div class="assignment-pane-heading"><h2>作品文件</h2><span>{{reviewTask.submission?.files?.length||0}} 个附件</span></div><a-empty v-if="!reviewTask.submission?.files?.length" class="detail-empty" description="暂无作品文件"/><div v-else class="assignment-file-list"><div v-for="file in reviewTask.submission.files" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,reviewTask.submission.files)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip></div></div></section>
               <section class="assignment-pane review-response-pane"><div class="assignment-pane-heading"><h2>{{reviewTask.status==='COMPLETED'?'已提交评价':'提交评价'}}</h2></div><div v-if="reviewTask.status==='COMPLETED'" class="submitted-review"><strong>{{reviewTask.review?.score}} 分</strong><p>{{reviewTask.review?.comment}}</p></div><a-form v-else class="review-form" layout="vertical"><a-form-item label="总分" required><div class="score-control"><a-slider v-model:value="reviewForm.score" :min="0" :max="100"/><a-input-number v-model:value="reviewForm.score" :min="0" :max="100"/></div></a-form-item><a-form-item label="评语" required><a-textarea v-model:value="reviewForm.comment" :rows="5" :maxlength="2000" show-count/></a-form-item><div class="submission-actions"><a-button type="primary" @click="submitReview">提交评价</a-button></div></a-form></section>
             </template>
           </template>
@@ -680,6 +740,23 @@ onBeforeUnmount(() => { clearInterval(gateTimer); window.removeEventListener('fo
       <template v-else-if="view==='system'&&role==='TEACHER'"><div class="page-title"><div><div class="eyebrow">运行管理</div><h1>系统与审计</h1><p>关键业务操作不可修改。</p></div></div><a-empty v-if="!audits.length" description="暂无审计记录"/><a-table v-else :data-source="audits" row-key="id"><a-table-column title="时间"><template #default="{record}">{{formatTime(record.created_at)}}</template></a-table-column><a-table-column title="操作者" data-index="actor"/><a-table-column title="操作"><template #default="{record}">{{actionLabel(record.action)}}</template></a-table-column><a-table-column title="对象"><template #default="{record}">{{objectLabel(record.object_type)}}</template></a-table-column></a-table></template>
     </a-spin></div></a-layout-content>
 
+    <a-drawer :open="filePreview.open" :width="'min(100vw, 1040px)'" placement="right" root-class-name="file-preview-drawer" :title="activePreviewFile?.name||'文件预览'" @close="closeFilePreview">
+      <div class="file-preview-toolbar">
+        <a-space>
+          <a-tooltip title="上一个文件"><span><a-button shape="circle" :disabled="filePreview.index<=0" @click="switchFilePreview(-1)"><LeftOutlined/></a-button></span></a-tooltip>
+          <span>{{filePreview.files.length ? `${filePreview.index+1} / ${filePreview.files.length}` : '0 / 0'}}</span>
+          <a-tooltip title="下一个文件"><span><a-button shape="circle" :disabled="filePreview.index>=filePreview.files.length-1" @click="switchFilePreview(1)"><RightOutlined/></a-button></span></a-tooltip>
+        </a-space>
+        <a-button v-if="activePreviewFile" :href="`/api/v1/files/${activePreviewFile.id}`"><DownloadOutlined/> 下载原文件</a-button>
+      </div>
+      <div class="file-preview-stage">
+        <a-spin v-if="filePreview.loading" size="large" tip="正在加载文件"/>
+        <a-result v-else-if="filePreview.error" status="warning" title="无法在线预览" :sub-title="filePreview.error"><template #extra><a-button v-if="activePreviewFile" type="primary" :href="`/api/v1/files/${activePreviewFile.id}`"><DownloadOutlined/> 下载原文件</a-button></template></a-result>
+        <img v-else-if="filePreview.url&&activePreviewIsImage" :src="filePreview.url" :alt="activePreviewFile?.name" @error="filePreview.error='图片加载失败，请下载原文件查看。'"/>
+        <iframe v-else-if="filePreview.url" :src="filePreview.url" :title="activePreviewFile?.name"/>
+      </div>
+    </a-drawer>
+
     <a-modal v-model:open="noticesOpen" title="站内通知" :footer="null" width="520px" centered><div class="notification-toolbar"><span>{{notifications.filter(x=>!x.read).length ? `${notifications.filter(x=>!x.read).length} 条未读消息` : '消息已全部阅读'}}</span><a-button v-if="notifications.some(x=>!x.read)" type="link" @click="readAll">全部标为已读</a-button></div><a-empty v-if="!notifications.length" description="暂无通知"/><div v-else class="notification-list"><div v-for="item in notifications" :key="item.id" class="notification-item" :class="{unread:!item.read}"><span class="notification-dot"/><div><strong>{{item.title}}</strong><span>{{formatTime(item.created_at)}}</span></div></div></div></a-modal>
 
     <a-modal v-model:open="modals.class" :title="classForm.id?'编辑教学班':'创建教学班'" ok-text="保存" @ok="saveClass"><a-form layout="vertical"><a-form-item label="课程"><a-input value="软件工程" disabled/></a-form-item><a-form-item label="学期" required><a-input v-model:value="classForm.semester" placeholder="例如：2026 秋季"/></a-form-item><a-form-item label="班级名称" required><a-input v-model:value="classForm.name"/></a-form-item><a-form-item label="组队截止时间"><a-input v-model:value="classForm.team_deadline" type="datetime-local"/></a-form-item><a-form-item label="小组人数上限"><a-input-number v-model:value="classForm.max_team_members" :min="2" :max="20"/></a-form-item><a-form-item label="选题可见性"><a-switch v-model:checked="classForm.topic_public" checked-children="公开" un-checked-children="仅本组"/></a-form-item><a-form-item label="邀请码加入"><a-switch v-model:checked="classForm.invite_requires_approval" checked-children="需审核" un-checked-children="自动加入"/></a-form-item></a-form></a-modal>
@@ -690,7 +767,7 @@ onBeforeUnmount(() => { clearInterval(gateTimer); window.removeEventListener('fo
     <a-modal v-model:open="modals.team" title="创建小组" @ok="createTeam"><a-form layout="vertical"><a-form-item label="小组名称" required><a-input v-model:value="teamForm.name"/></a-form-item><a-checkbox v-model:checked="teamForm.open_recruitment">允许其他成员申请加入</a-checkbox></a-form></a-modal>
     <a-modal v-model:open="selectedTeam" :title="selectedTeam?.name" :footer="null"><template v-if="selectedTeam"><p>组长：{{selectedTeam.leader_name}} · {{selectedTeam.member_count}} / {{selectedTeam.max_members}} 人</p><a-list :data-source="selectedTeam.members||[]"><template #renderItem="{item}"><a-list-item>{{item.name}}（{{item.student_no}}）<a-space><a-tag>{{roleLabel(item.role)}}</a-tag><a-button v-if="selectedTeam.is_leader&&item.role!=='LEADER'" type="link" @click="transferLeader(item.id)">移交组长</a-button></a-space></a-list-item></template></a-list><template v-if="selectedTeam.is_leader"><a-divider/><a-space-compact block><a-select v-model:value="inviteTarget" placeholder="选择未入组学生" style="width:100%" :options="members.filter(x=>!x.team).map(x=>({value:x.id,label:`${x.name}（${x.student_no}）`}))"/><a-button type="primary" :disabled="!inviteTarget" @click="inviteMember">邀请</a-button></a-space-compact><a-divider/><a-form layout="vertical"><a-form-item label="选题名称"><a-input v-model:value="topicForm.name"/></a-form-item><a-form-item label="选题说明"><a-textarea v-model:value="topicForm.description" :rows="3"/></a-form-item><a-space><a-button type="primary" @click="saveTopic">提交选题审核</a-button><a-button danger @click="disbandTeam">解散小组</a-button></a-space></a-form></template><a-button v-else-if="role==='STUDENT'&&selectedTeam.id===session.context?.team_membership?.team_id" danger @click="leaveTeam">退出小组</a-button></template></a-modal>
     <a-modal v-model:open="modals.assignment" :title="assignmentForm.id ? '编辑作业' : '新建作业'" :footer="null" width="720px"><a-form layout="vertical"><a-form-item v-if="!assignmentForm.id" label="教学班" required><a-select v-model:value="assignmentForm.class_ids" mode="multiple" placeholder="选择一个或多个教学班" :options="classOptions"/></a-form-item><a-form-item label="标题" required><a-input v-model:value="assignmentForm.title"/></a-form-item><a-form-item label="提交类型" :help="assignmentForm.has_submissions ? '已有提交，不能修改提交类型' : ''"><a-segmented :disabled="assignmentForm.has_submissions||assignmentForm.auto_review_enabled" v-model:value="assignmentForm.submitter_type" :options="[{label:'个人作业',value:'INDIVIDUAL'},{label:'小组作业',value:'TEAM'}]"/></a-form-item><a-form-item label="开始时间"><a-input v-model:value="assignmentForm.starts_at" type="datetime-local"/></a-form-item><a-form-item label="截止时间" required><a-input v-model:value="assignmentForm.due_at" type="datetime-local"/></a-form-item><a-form-item label="说明" required><div class="editor-shell"><div v-if="descriptionEditor" class="editor-toolbar"><a-tooltip title="二级标题"><a-button size="small" :type="descriptionEditor.isActive('heading',{level:2})?'primary':'default'" @click="descriptionEditor.chain().focus().toggleHeading({level:2}).run()">H2</a-button></a-tooltip><a-tooltip title="粗体"><a-button size="small" :type="descriptionEditor.isActive('bold')?'primary':'default'" @click="descriptionEditor.chain().focus().toggleBold().run()"><BoldOutlined/></a-button></a-tooltip><a-tooltip title="无序列表"><a-button size="small" @click="descriptionEditor.chain().focus().toggleBulletList().run()"><UnorderedListOutlined/></a-button></a-tooltip><a-tooltip title="有序列表"><a-button size="small" @click="descriptionEditor.chain().focus().toggleOrderedList().run()"><OrderedListOutlined/></a-button></a-tooltip><a-tooltip title="链接"><a-button size="small" @click="setDescriptionLink"><LinkOutlined/></a-button></a-tooltip><a-tooltip title="代码块"><a-button size="small" @click="descriptionEditor.chain().focus().toggleCodeBlock().run()"><CodeOutlined/></a-button></a-tooltip></div><EditorContent :editor="descriptionEditor"/></div></a-form-item><a-form-item v-if="!assignmentForm.id" label="作业附件"><a-upload :before-upload="queueAssignmentAttachment" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.pptx,.xlsx,.zip,.rar,.7z"><a-button><UploadOutlined/> 选择附件</a-button></a-upload><div v-for="(file,index) in pendingAssignmentFiles" :key="file.uid||`${file.name}-${index}`" class="uploaded-file"><span>{{file.name}}</span><a-button danger type="link" @click="removePendingAssignmentAttachment(index)">移除</a-button></div></a-form-item><a-form-item v-if="!assignmentForm.id" label="截止后自动发布互评"><a-switch v-model:checked="assignmentForm.auto_review_enabled" @change="toggleAutoReview"/></a-form-item><template v-if="!assignmentForm.id&&assignmentForm.auto_review_enabled"><a-form-item label="互评模式" required><a-segmented v-model:value="assignmentForm.auto_review_mode" :options="[{label:'组内一人评一人',value:'TEAM'},{label:'班级一人评一人',value:'CLASS'}]"/></a-form-item><a-form-item label="互评标准"><a-textarea v-model:value="assignmentForm.auto_review_criteria_text" :rows="4" maxlength="5000" show-count/></a-form-item><a-form-item label="互评标准附件"><a-upload :before-upload="queueAutoReviewAttachment" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.xlsx"><a-button><UploadOutlined/> 选择附件</a-button></a-upload><div v-for="(file,index) in pendingAutoReviewFiles" :key="file.uid||`${file.name}-${index}`" class="uploaded-file"><span>{{file.name}}</span><a-button danger type="link" @click="pendingAutoReviewFiles.splice(index,1)">移除</a-button></div></a-form-item><a-form-item label="互评截止时间" required><a-input v-model:value="assignmentForm.auto_review_due_at" type="datetime-local"/></a-form-item></template><a-checkbox v-model:checked="assignmentForm.allow_late">允许迟交并标记</a-checkbox><div class="modal-actions"><a-button @click="modals.assignment=false">取消</a-button><a-button v-if="!assignmentForm.id" @click="createAssignment(false)">保存草稿</a-button><a-button type="primary" @click="assignmentForm.id?createAssignment():createAssignment(true)">{{assignmentForm.id?'保存修改':'发布'}}</a-button></div></a-form></a-modal>
-    <a-modal v-model:open="selectedSubmission" :title="selectedSubmission?`${selectedSubmission.owner} · 提交详情`:'提交详情'" :footer="null" width="680px"><template v-if="selectedSubmission"><a-descriptions bordered :column="2" size="small"><a-descriptions-item v-if="selectedSubmission.student_no" label="学号">{{selectedSubmission.student_no}}</a-descriptions-item><a-descriptions-item label="小组">{{selectedSubmission.team_name||'未分组'}}</a-descriptions-item><a-descriptions-item label="提交时间">{{formatTime(selectedSubmission.submitted_at)}}</a-descriptions-item><a-descriptions-item label="状态"><a-tag>{{statusLabel(selectedSubmission.status)}}</a-tag><a-tag v-if="selectedSubmission.is_late" color="red">迟交</a-tag></a-descriptions-item></a-descriptions><div class="submission-detail-heading"><h3>提交附件</h3><span>{{selectedSubmission.files?.length||0}} 个附件</span></div><a-empty v-if="!selectedSubmission.files?.length" class="detail-empty" description="暂无提交附件"/><div v-else class="assignment-file-list"><div v-for="file in selectedSubmission.files" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><a :href="file.previewable?`/api/v1/files/${file.id}/preview`:`/api/v1/files/${file.id}`" target="_blank">{{file.name}}<small v-if="file.download_only">（下载查看）</small></a><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip></div></div></template></a-modal>
+    <a-modal v-model:open="selectedSubmission" :title="selectedSubmission?`${selectedSubmission.owner} · 提交详情`:'提交详情'" :footer="null" width="680px"><template v-if="selectedSubmission"><a-descriptions bordered :column="2" size="small"><a-descriptions-item v-if="selectedSubmission.student_no" label="学号">{{selectedSubmission.student_no}}</a-descriptions-item><a-descriptions-item label="小组">{{selectedSubmission.team_name||'未分组'}}</a-descriptions-item><a-descriptions-item label="提交时间">{{formatTime(selectedSubmission.submitted_at)}}</a-descriptions-item><a-descriptions-item label="状态"><a-tag>{{statusLabel(selectedSubmission.status)}}</a-tag><a-tag v-if="selectedSubmission.is_late" color="red">迟交</a-tag></a-descriptions-item></a-descriptions><div class="submission-detail-heading"><h3>提交附件</h3><span>{{selectedSubmission.files?.length||0}} 个附件</span></div><a-empty v-if="!selectedSubmission.files?.length" class="detail-empty" description="暂无提交附件"/><div v-else class="assignment-file-list"><div v-for="file in selectedSubmission.files" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,selectedSubmission.files)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip></div></div></template></a-modal>
     <a-modal v-model:open="modals.campaign" title="创建一对一互评" @ok="createCampaign" width="680px"><a-form layout="vertical"><a-form-item label="个人作业" required><a-select v-model:value="campaignForm.assignment_id" placeholder="选择已截止的个人作业" :options="eligibleReviewAssignments.map(item=>({value:item.id,label:item.title}))" :not-found-content="'暂无已截止且未创建互评的个人作业'"/></a-form-item><a-form-item label="分配模式" required><a-segmented v-model:value="campaignForm.mode" :options="[{label:'组内一人评一人',value:'TEAM'},{label:'班级一人评一人',value:'CLASS'}]"/></a-form-item><a-form-item label="互评标准"><a-textarea v-model:value="campaignForm.criteria_text" :rows="4" maxlength="5000" show-count/></a-form-item><a-form-item label="标准附件"><a-upload :before-upload="queueCriteriaAttachment" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.xlsx"><a-button><UploadOutlined/> 选择附件</a-button></a-upload><div v-for="(file,index) in pendingCriteriaFiles" :key="file.uid||`${file.name}-${index}`" class="uploaded-file"><span>{{file.name}}</span><a-button danger type="link" @click="pendingCriteriaFiles.splice(index,1)">移除</a-button></div></a-form-item><a-form-item label="互评截止时间" required><a-input v-model:value="campaignForm.due_at" type="datetime-local"/></a-form-item></a-form></a-modal>
     <a-modal v-model:open="modals.review" title="评价作品" @ok="submitReview"><a-form layout="vertical"><template v-if="selectedCampaign?.assignment_snapshot_at"><a-form-item label="总分" required><a-slider v-model:value="reviewForm.score" :min="0" :max="100"/><a-input-number v-model:value="reviewForm.score" :min="0" :max="100"/></a-form-item></template><template v-else><a-form-item v-for="dim in selectedCampaign?.rubric||[]" :key="dim.key" :label="`${dim.label}（权重 ${dim.weight}%）`"><a-slider v-model:value="reviewForm.scores[dim.key]" :min="0" :max="100"/></a-form-item></template><a-form-item label="评语" required><a-textarea v-model:value="reviewForm.comment" :rows="4" :maxlength="2000" show-count/></a-form-item></a-form></a-modal>
     <a-modal v-model:open="selectedGrade" :title="selectedGrade ? `${selectedGrade.assignment_title} · 修订记录` : '修订记录'" :footer="null"><a-empty v-if="!gradeRevisions.length" description="暂无修订记录"/><a-timeline v-else><a-timeline-item v-for="item in gradeRevisions" :key="item.id"><strong>{{item.score}} 分 · {{statusLabel(item.status)}}</strong><p>{{item.comment||'无评语'}}</p><span>{{item.reason||'未填写修改原因'}} · {{formatTime(item.created_at)}}</span></a-timeline-item></a-timeline></a-modal>

@@ -320,6 +320,10 @@ test('student assignment detail submits every uploaded file without selection co
     { id: 'file-1', name: '需求分析报告.pdf', previewable: true, download_only: false, submitted: true },
     { id: 'file-2', name: '补充说明.md', previewable: true, download_only: false, submitted: false },
   ]
+  const materials = [
+    { id: 'material-1', name: '作业模板.pdf', previewable: true, download_only: false, preview_status: 'READY' },
+    { id: 'material-2', name: '参考答案.docx', previewable: false, download_only: true, preview_status: 'NOT_AVAILABLE' },
+  ]
 
   await page.route('**/api/v1/**', async route => {
     const request = route.request()
@@ -331,7 +335,8 @@ test('student assignment detail submits every uploaded file without selection co
     if (path === '/classes/current/context') return json({ user: { id: 'student-1', account: '20260001', name: '张同学', role: 'STUDENT' }, current_class: { id: 'class-1', semester: '2026 秋季', name: '软件工程 1 班', status: 'ACTIVE' }, team_membership: { team_id: 'team-1' }, team_gate_required: false, permissions: { access_coursework: true } })
     if (path === '/notifications') return json({ items: [], total: 0 })
     if (path === '/assignments' && request.method() === 'GET') return json({ items: [assignment], total: 1 })
-    if (path === '/assignments/assignment-detail/files') return json({ attachments: [{ id: 'material-1', name: '作业模板.pdf', previewable: true }], review_criteria: [], drafts: files })
+    if (path === '/assignments/assignment-detail/files') return json({ attachments: materials, review_criteria: [], drafts: files })
+    if (path === '/files/material-1/preview') return route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>作业模板预览</h1>' })
     if (path === '/assignments/assignment-detail/submission' && request.method() === 'GET') return json({ status: 'SUBMITTED', submitted_at: '2026-09-15T08:00:00Z', is_late: false, files: [files[0]] })
     if (path === '/assignments/assignment-detail/submission' && request.method() === 'POST') {
       submissionPayload = request.postDataJSON()
@@ -345,6 +350,17 @@ test('student assignment detail submits every uploaded file without selection co
   await expect(workspace.getByRole('tab', { name: '作业详情' })).toBeVisible()
   await expect(workspace).toContainText('作业资料')
   await expect(workspace).toContainText('作业模板.pdf')
+  const detailUrl = page.url()
+  await workspace.getByRole('button', { name: '作业模板.pdf' }).click()
+  const previewDrawer = page.locator('.file-preview-drawer')
+  await expect(previewDrawer).toBeVisible()
+  await expect(previewDrawer.locator('iframe')).toHaveCount(1)
+  expect(page.url()).toBe(detailUrl)
+  await previewDrawer.getByRole('button', { name: 'Close' }).click()
+  await workspace.getByRole('button', { name: /参考答案\.docx/ }).click()
+  await expect(previewDrawer.getByText('无法在线预览')).toBeVisible()
+  await expect(previewDrawer).toContainText('该文件格式暂不支持在线预览')
+  await previewDrawer.getByRole('button', { name: 'Close' }).click()
   await workspace.getByRole('tab', { name: '提交作业' }).click()
   await expect(workspace.getByText('已提交', { exact: true })).toBeVisible()
   await expect(workspace.locator('input[type="checkbox"]')).toHaveCount(0)
