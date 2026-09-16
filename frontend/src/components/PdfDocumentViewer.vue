@@ -7,7 +7,7 @@ import 'pdfjs-dist/web/pdf_viewer.css'
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
 
 const props = defineProps({ url: { type: String, default: '' }, annotations: { type: Array, default: () => [] }, editable: Boolean, selectedAnnotationId: { type: String, default: '' } })
-const emit = defineEmits(['selection', 'select', 'error'])
+const emit = defineEmits(['selection', 'select', 'layout', 'error'])
 const stage = ref(null)
 const pages = ref([])
 const scale = ref(1.2)
@@ -89,6 +89,7 @@ async function setScale(value) {
   renderedAtScale.clear()
   await nextTick()
   observePages()
+  emit('layout')
 }
 
 function fitWidth() {
@@ -111,12 +112,19 @@ function createTextAnnotation() {
   const pageElement = element?.closest?.('.pdf-page')
   if (!pageElement || !stage.value.contains(pageElement)) return
   const pageRect = pageElement.getBoundingClientRect()
-  const rects = Array.from(range.getClientRects()).filter(rect => rect.width && rect.height && rect.top < pageRect.bottom && rect.bottom > pageRect.top).map(rect => ({
-    x: Math.max(0, (rect.left - pageRect.left) / pageRect.width),
-    y: Math.max(0, (rect.top - pageRect.top) / pageRect.height),
-    width: Math.min(1, rect.width / pageRect.width),
-    height: Math.min(1, rect.height / pageRect.height)
-  }))
+  const rects = Array.from(range.getClientRects()).flatMap(rect => {
+    const left = Math.max(pageRect.left, rect.left)
+    const top = Math.max(pageRect.top, rect.top)
+    const right = Math.min(pageRect.right, rect.right)
+    const bottom = Math.min(pageRect.bottom, rect.bottom)
+    if (right <= left || bottom <= top) return []
+    return [{
+      x: (left - pageRect.left) / pageRect.width,
+      y: (top - pageRect.top) / pageRect.height,
+      width: (right - left) / pageRect.width,
+      height: (bottom - top) / pageRect.height
+    }]
+  })
   const selectionRect = range.getBoundingClientRect()
   if (rects.length) emit('selection', { kind: 'PDF_TEXT_OR_REGION', selectionType: 'TEXT', viewportRect: { left: selectionRect.left, top: selectionRect.top, right: selectionRect.right, bottom: selectionRect.bottom, width: selectionRect.width, height: selectionRect.height }, anchor: { page: Number(pageElement.dataset.page), rects, quote: selection.toString().trim() } })
 }
@@ -148,8 +156,19 @@ function regionEnd() {
 
 function focusAnnotation(id) {
   if (!id) return
-  stage.value?.querySelector(`[data-annotation-id="${id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const target = stage.value?.querySelector(`[data-annotation-id="${id}"]`)
+  if (!target) return
+  target.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' })
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) target.animate([{ filter: 'brightness(1)' }, { filter: 'brightness(1.28)' }, { filter: 'brightness(1)' }], { duration: 650, easing: 'ease' })
 }
+
+function annotationRect(id) {
+  return stage.value?.querySelector(`[data-comment-annotation-id="${id}"]`)?.getBoundingClientRect() || stage.value?.querySelector(`[data-annotation-id="${id}"]`)?.getBoundingClientRect() || null
+}
+
+function viewportRect() { return stage.value?.getBoundingClientRect() || null }
+
+defineExpose({ focusAnnotation, annotationRect, viewportRect })
 
 function selectExisting(id, event, openBubble = false) {
   const rect = event.currentTarget.getBoundingClientRect()

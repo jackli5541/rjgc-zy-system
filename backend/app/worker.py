@@ -7,6 +7,7 @@ from sqlalchemy import and_, delete, select
 from app.database import SessionLocal
 from app.grading import finalize_campaign
 from app.models import Assignment, AuditLog, BackgroundJob, ClassMember, FileObject, ImportBatch, LoginSession, Notification, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, User
+from app.realtime import publish_event
 from app.settings import settings
 
 
@@ -40,9 +41,11 @@ def process_auto_review(db, current: datetime) -> None:
     existing = db.scalar(select(ReviewCampaign).where(ReviewCampaign.assignment_id == assignment.id))
     if existing:
         assignment.auto_review_status = "CREATED"
+        publish_event(db, class_id=assignment.class_id, scopes=["assignments", "reviews"], resource_type="assignment", resource_id=assignment.id)
         return
     if not assignment.auto_review_due_at or assignment.auto_review_due_at <= current:
         assignment.auto_review_status, assignment.auto_review_error = "FAILED", "互评截止时间已过，未自动创建"
+        publish_event(db, class_id=assignment.class_id, scopes=["assignments", "reviews"], resource_type="assignment", resource_id=assignment.id)
         return
     frozen_rows = db.execute(
         select(User, SubmissionVersion)
@@ -55,6 +58,7 @@ def process_auto_review(db, current: datetime) -> None:
     ).all()
     if len(frozen_rows) < 2:
         assignment.auto_review_status, assignment.auto_review_error = "FAILED", "全班已正式提交学生少于 2 人"
+        publish_event(db, class_id=assignment.class_id, scopes=["assignments", "reviews"], resource_type="assignment", resource_id=assignment.id)
         return
 
     campaign = ReviewCampaign(assignment_id=assignment.id, class_id=assignment.class_id, mode=assignment.auto_review_mode, criteria_text=(assignment.auto_review_criteria_text or "").strip(), assignment_snapshot_at=current, rubric=[{"key": "score", "label": "总分", "weight": 100}], comment_min_length=1, due_at=assignment.auto_review_due_at, publish_at=current, require_all=False, allow_update=True)
@@ -87,6 +91,7 @@ def process_auto_review(db, current: datetime) -> None:
     course = db.get(TeachingClass, assignment.class_id)
     assignment.auto_review_status, assignment.auto_review_error = "CREATED", None
     db.add(AuditLog(actor_id=course.teacher_id if course else None, action="REVIEW_CAMPAIGN_AUTO_CREATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(assignment.id), "mode": assignment.auto_review_mode}))
+    publish_event(db, class_id=assignment.class_id, scopes=["assignments", "reviews", "notifications", "dashboard"], resource_type="review_campaign", resource_id=campaign.id)
 
 
 def process_due_campaign(db, current: datetime) -> None:
@@ -102,6 +107,7 @@ def process_due_campaign(db, current: datetime) -> None:
     finalize_campaign(db, campaign, current)
     course = db.get(TeachingClass, campaign.class_id)
     db.add(AuditLog(actor_id=course.teacher_id if course else None, action="PEER_GRADES_GENERATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(campaign.assignment_id)}))
+    publish_event(db, class_id=campaign.class_id, scopes=["reviews", "grades", "dashboard"], resource_type="review_campaign", resource_id=campaign.id)
 
 
 def run_once() -> None:

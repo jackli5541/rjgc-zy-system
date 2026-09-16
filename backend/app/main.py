@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-import csv, hashlib, html, io, mimetypes, os, re, secrets
+import asyncio, csv, hashlib, html, io, json, mimetypes, os, re, secrets
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import psycopg
 from fastapi import Cookie, Depends, FastAPI, File, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 import bleach
 import markdown
 import zipfile
@@ -21,16 +24,27 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.grading import final_score, finalize_campaign
 from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
+from app.realtime import hub as realtime_hub, publish_event
 
-app = FastAPI(title="软件工程作业系统 API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await realtime_hub.start()
+    try:
+        yield
+    finally:
+        await realtime_hub.stop()
+
+
+app = FastAPI(title="软件工程作业系统 API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+request_client_id: ContextVar[str | None] = ContextVar("request_client_id", default=None)
 
-SAFE_HTML_TAGS = ["p", "br", "h1", "h2", "h3", "h4", "strong", "em", "s", "ul", "ol", "li", "blockquote", "pre", "code", "a", "table", "thead", "tbody", "tr", "th", "td", "img", "hr", "input"]
+SAFE_HTML_TAGS = ["div", "span", "section", "article", "header", "footer", "main", "p", "br", "h1", "h2", "h3", "h4", "strong", "b", "em", "s", "small", "u", "ul", "ol", "li", "blockquote", "pre", "code", "a", "table", "thead", "tbody", "tr", "th", "td", "img", "hr", "input"]
 SAFE_HTML_ATTRIBUTES = {
     "a": ["href", "title", "target", "rel"],
     "img": ["src", "alt", "title", "width", "height"],
@@ -50,11 +64,39 @@ def clean_file_html(value: str) -> str:
         if tag == "img" and name in {"alt", "title", "width", "height"}: return True
         if tag == "img" and name == "src": return attribute_value.startswith("https://")
         if tag == "input" and name in {"type", "checked", "disabled"}: return name != "type" or attribute_value == "checkbox"
-        if tag == "code" and name == "class": return attribute_value.startswith("language-")
+        if tag == "code" and name == "class" and attribute_value.startswith("language-"): return True
+        if name in {"class", "id"}: return bool(re.fullmatch(r"[A-Za-z0-9_\- ]{1,200}", attribute_value))
         return False
 
-    cleaned = bleach.clean(value, tags=SAFE_HTML_TAGS, attributes=allowed_attribute, protocols=["https", "mailto"], strip=True)
-    return re.sub(r'<a\s+([^>]*href="[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
+    styles = re.findall(r"<style\b[^>]*>(.*?)</style\s*>", value, flags=re.IGNORECASE | re.DOTALL)
+    without_styles = re.sub(r"<style\b[^>]*>.*?</style\s*>", "", value, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = bleach.clean(without_styles, tags=SAFE_HTML_TAGS, attributes=allowed_attribute, protocols=["https", "mailto"], strip=True)
+    cleaned = re.sub(r'<a\s+([^>]*href="[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
+    scoped_css = scope_preview_css("\n".join(styles))
+    return f"<style>{scoped_css}</style>{cleaned}" if scoped_css else cleaned
+
+
+def scope_preview_css(value: str) -> str:
+    value = re.sub(r"/\*.*?\*/", "", value, flags=re.DOTALL)
+    value = re.sub(r"@(?:import|charset|namespace)\b[^;]*;", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"@(?:page|font-face|keyframes|supports|media)\b[^{}]*\{(?:[^{}]|\{[^{}]*\})*\}", "", value, flags=re.IGNORECASE | re.DOTALL)
+    value = re.sub(r"url\s*\([^)]*\)|expression\s*\([^)]*\)|javascript:|behavior\s*:|-moz-binding\s*:", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"position\s*:\s*fixed", "position:absolute", value, flags=re.IGNORECASE)
+    prefix = ".rich-document-content"
+    rules = []
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", value):
+        selectors, declarations = match.group(1).strip(), match.group(2).strip()
+        if not selectors or not declarations or selectors.startswith("@"):
+            continue
+        scoped = []
+        for selector in selectors.split(","):
+            selector = selector.strip()
+            if not selector: continue
+            selector = re.sub(r"(^|\s)(?::root|html|body)(?=\s|$|[.:#>+~\[])", r"\1", selector, flags=re.IGNORECASE).strip()
+            scoped.append(prefix if not selector else f"{prefix} {selector}")
+        if scoped:
+            rules.append(f"{','.join(scoped)}{{{declarations}}}")
+    return "\n".join(rules)
 
 
 def render_rich_file(path: Path) -> tuple[str, str]:
@@ -84,9 +126,13 @@ class ApiError(Exception):
 @app.middleware("http")
 async def request_id(request: Request, call_next):
     request.state.request_id = request.headers.get("X-Request-ID") or uuid4().hex
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request.state.request_id
-    return response
+    token = request_client_id.set(request.headers.get("X-Client-ID"))
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+    finally:
+        request_client_id.reset(token)
 
 
 @app.exception_handler(ApiError)
@@ -106,12 +152,62 @@ Db = Annotated[Session, Depends(get_db)]
 def now() -> datetime: return datetime.now(UTC)
 
 
+def realtime_scopes(action: str) -> list[str]:
+    if action.startswith(("CLASS_", "ROSTER_")): return ["classes", "members", "dashboard", "audit"]
+    if action.startswith("TEAM_") or action.startswith("TOPIC_") or action == "TEAMS_AUTO_GROUPED": return ["teams", "members", "dashboard", "audit"]
+    if action.startswith("ASSIGNMENT_"): return ["assignments", "dashboard", "audit"]
+    if action.startswith("SUBMISSION_"): return ["submissions", "assignments", "dashboard", "grades", "audit"]
+    if action.startswith(("PEER_", "REVIEW_")): return ["reviews", "submissions", "grades", "dashboard", "audit"]
+    if action.startswith(("TEACHER_", "GRADE_", "GRADES_")): return ["submissions", "grades", "dashboard", "audit"]
+    return ["audit"]
+
+
+def realtime_class_id(db: Session, kind: str, oid: str, changes: dict) -> UUID | None:
+    try:
+        object_id = UUID(str(oid))
+    except (TypeError, ValueError):
+        return None
+    if kind == "class": return object_id
+    if changes.get("class_id"):
+        try: return UUID(str(changes["class_id"]))
+        except (TypeError, ValueError): pass
+    if kind == "assignment":
+        item = db.get(Assignment, object_id); return item.class_id if item else None
+    if kind == "team":
+        item = db.get(Team, object_id); return item.class_id if item else None
+    if kind == "topic":
+        item = db.get(Topic, object_id); return item.class_id if item else None
+    if kind == "submission":
+        item = db.get(Submission, object_id); assignment = db.get(Assignment, item.assignment_id) if item else None; return assignment.class_id if assignment else None
+    if kind == "submission_assessment":
+        item = db.get(SubmissionAssessment, object_id); assignment = db.get(Assignment, item.assignment_id) if item else None; return assignment.class_id if assignment else None
+    if kind in {"review_campaign", "peer_review"}:
+        campaign = db.get(ReviewCampaign, object_id) if kind == "review_campaign" else None
+        if kind == "peer_review":
+            review = db.get(PeerReview, object_id); campaign = db.get(ReviewCampaign, review.campaign_id) if review else None
+        return campaign.class_id if campaign else None
+    if kind in {"team_request", "class_join_request"}:
+        model = TeamRequest if kind == "team_request" else ClassJoinRequest
+        item = db.get(model, object_id); return item.class_id if item else None
+    return None
+
+
 def audit(db: Session, user: User | None, action: str, kind: str, oid: str, changes: dict | None = None):
     db.add(AuditLog(actor_id=user.id if user else None, action=action, object_type=kind, object_id=oid, changes=changes or {}))
+    class_id = realtime_class_id(db, kind, oid, changes or {})
+    if class_id:
+        publish_event(db, class_id=class_id, scopes=realtime_scopes(action), resource_type=kind, resource_id=oid, source_client_id=request_client_id.get())
+    elif user:
+        publish_event(db, user_id=user.id, scopes=["audit"], resource_type=kind, resource_id=oid, source_client_id=request_client_id.get())
 
 
 def notify(db: Session, uid: UUID, kind: str, title: str, object_type: str | None = None, object_id: str | None = None):
     db.add(Notification(user_id=uid, kind=kind, title=title, object_type=object_type, object_id=object_id))
+    scopes = ["notifications"]
+    if kind.startswith("TEAM_") or kind == "TOPIC_REQUIRED": scopes.extend(["teams", "members", "dashboard"])
+    if kind.startswith("REVIEW_"): scopes.extend(["reviews", "dashboard"])
+    if kind.startswith("GRADE_"): scopes.extend(["grades", "dashboard"])
+    publish_event(db, user_id=uid, scopes=scopes, resource_type=object_type or "notification", resource_id=object_id, source_client_id=request_client_id.get())
 
 
 def current_user(session_id: Annotated[str | None, Cookie()] = None, db: Session = Depends(get_db)) -> User:
@@ -123,6 +219,43 @@ def current_user(session_id: Annotated[str | None, Cookie()] = None, db: Session
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
+
+
+@app.get("/api/v1/events")
+async def realtime_events(request: Request, class_id: UUID = Query(), session_id: Annotated[str | None, Cookie()] = None):
+    session_hash = token_hash(session_id or "")
+    with SessionLocal() as db:
+        login_session = db.scalar(select(LoginSession).where(LoginSession.token_hash == session_hash, LoginSession.revoked_at.is_(None), LoginSession.expires_at > now()))
+        user = db.get(User, login_session.user_id) if login_session else None
+        if not user or user.status != "ACTIVE": raise ApiError(401, "SESSION_INVALID", "会话已失效")
+        require_class(db, user, class_id)
+        user_id, user_role = user.id, user.role
+    subscriber = realtime_hub.subscribe(user_id, user_role, class_id)
+
+    async def stream():
+        started = asyncio.get_running_loop().time()
+        ready = {"id": uuid4().hex, "type": "sync_required", "scopes": ["current_view", "notifications"]}
+        yield f"event: sync_required\nid: {ready['id']}\ndata: {json.dumps(ready, separators=(',', ':'))}\n\n"
+        try:
+            while asyncio.get_running_loop().time() - started < 300:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(subscriber.queue.get(), timeout=15)
+                    event_type = payload.get("type", "invalidate")
+                    yield f"event: {event_type}\nid: {payload.get('id', '')}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+                except TimeoutError:
+                    with SessionLocal() as session_db:
+                        active = session_db.scalar(select(LoginSession.id).where(LoginSession.token_hash == session_hash, LoginSession.revoked_at.is_(None), LoginSession.expires_at > now()).limit(1))
+                    if not active:
+                        payload = {"id": uuid4().hex, "type": "auth_expired", "scopes": []}
+                        yield f"event: auth_expired\nid: {payload['id']}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+                        break
+                    yield ": heartbeat\n\n"
+        finally:
+            realtime_hub.unsubscribe(subscriber)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
 
 
 def csrf_user(user: CurrentUser, db: Db, session_id: Annotated[str | None, Cookie()] = None, x_csrf_token: Annotated[str | None, Header()] = None) -> User:
@@ -710,7 +843,7 @@ def cancel_request(rid: UUID, user: CsrfUser, db: Db):
     can_cancel = req and (req.applicant_id == user.id or (req.kind == "INVITATION" and req.inviter_id == user.id))
     if not can_cancel or req.status != "PENDING": raise ApiError(409, "REQUEST_NOT_CANCELLABLE", "申请或邀请无法取消")
     course = require_writable_class(db, user, req.class_id); require_team_window(course, user)
-    req.status, req.resolved_at = "CANCELLED", now(); db.commit(); return Response(status_code=204)
+    req.status, req.resolved_at = "CANCELLED", now(); audit(db, user, "TEAM_REQUEST_CANCELLED", "team_request", str(req.id)); db.commit(); return Response(status_code=204)
 
 
 @app.post("/api/v1/teams/{tid}/topic")
@@ -1099,6 +1232,7 @@ def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
         "status": item.status, "version": item.version, "published_at": item.published_at,
         "evaluator_id": str(item.evaluator_id), "evaluator_name": evaluator.display_name,
         "subject_user_id": str(item.subject_user_id), "submission_version_id": str(item.submission_version_id),
+        "annotations": assessment_annotations(db, item.id),
         "created_at": item.created_at, "updated_at": item.updated_at,
     }
 
@@ -1110,7 +1244,7 @@ POINT_GRADES = {value: key for key, value in GRADE_POINTS.items()}
 def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
     assessments = db.scalars(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id)).all()
     teacher_assessment = next((item for item in assessments if item.kind == "TEACHER" and item.status == "PUBLISHED"), None)
-    peer_assessments = [item for item in assessments if item.kind == "PEER"]
+    peer_assessments = [item for item in assessments if item.kind == "PEER" and item.status == "PUBLISHED"]
     peer_grade = None
     if peer_assessments:
         average = sum(GRADE_POINTS[item.grade] for item in peer_assessments) / len(peer_assessments)
@@ -1119,7 +1253,18 @@ def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
     return {
         "teacher_grade": assessment_json(db, teacher_assessment) if teacher_assessment else None,
         "peer_grade": peer_grade, "peer_review_count": len(peer_assessments),
+        "peer_feedbacks": [assessment_json(db, item) for item in peer_assessments],
         "final_grade": final_grade, "grade_source": "TEACHER" if teacher_assessment else "PEER" if peer_grade else None,
+        "grading_status": "GRADED" if final_grade else "PENDING_ASSESSMENT",
+    }
+
+
+def missing_submission_grade_result(assignment: Assignment) -> dict:
+    overdue = assignment.status in {"PUBLISHED", "CLOSED"} and assignment.due_at <= now()
+    return {
+        "teacher_grade": None, "peer_grade": None, "peer_review_count": 0, "peer_feedbacks": [],
+        "final_grade": "E" if overdue else None, "grade_source": "SYSTEM" if overdue else None,
+        "grading_status": "NO_SUBMISSION" if overdue else "PENDING_SUBMISSION",
     }
 
 
@@ -1305,6 +1450,58 @@ def replace_feedback_annotations(db: Session, item: SubmissionAssessment, annota
     db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id))
     for annotation in annotations:
         db.add(SubmissionAnnotation(assessment_id=item.id, submission_version_id=item.submission_version_id, file_id=UUID(annotation["file_id"]), author_id=user.id, kind=annotation["kind"], mark_type=annotation.get("mark_type") or ("COMMENT" if annotation.get("comment") else "HIGHLIGHT"), color=annotation.get("color") or "YELLOW", anchor=annotation["anchor"], comment=annotation["comment"]))
+
+
+def peer_feedback_context(db: Session, version_id: UUID, user: User):
+    if user.role != "STUDENT": raise ApiError(403, "STUDENT_REQUIRED", "该接口仅供学生使用")
+    row = db.execute(
+        select(SubmissionVersion, Submission, Assignment)
+        .join(Submission, Submission.id == SubmissionVersion.submission_id)
+        .join(Assignment, Assignment.id == Submission.assignment_id)
+        .where(SubmissionVersion.id == version_id)
+    ).first()
+    if not row: raise ApiError(404, "SUBMISSION_VERSION_NOT_FOUND", "提交版本不存在")
+    version, submission_item, assignment = row
+    if assignment.submitter_type != "INDIVIDUAL" or assignment.status not in {"PUBLISHED", "CLOSED"}:
+        raise ApiError(404, "SUBMISSION_VERSION_NOT_FOUND", "提交版本不存在")
+    require_class(db, user, assignment.class_id)
+    if submission_item.owner_user_id == user.id: raise ApiError(422, "SELF_REVIEW_FORBIDDEN", "不能评价自己的作业")
+    reviewer_team = membership(db, assignment.class_id, user.id)
+    reviewee_team = membership(db, assignment.class_id, submission_item.owner_user_id)
+    if not reviewer_team or not reviewee_team or reviewer_team[1].id != reviewee_team[1].id:
+        raise ApiError(403, "TEAM_REVIEW_ONLY", "只能评价本组成员的作业")
+    if submission_item.status != "SUBMITTED" or submission_item.current_version_no != version.version_no:
+        raise ApiError(409, "SUBMISSION_VERSION_READ_ONLY", "只能评价最新正式提交版本")
+    return version, submission_item, assignment
+
+
+@app.get("/api/v1/submission-versions/{version_id}/peer-feedback")
+def get_peer_submission_feedback(version_id: UUID, user: CurrentUser, db: Db):
+    version, _, _ = peer_feedback_context(db, version_id, user)
+    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
+    return feedback_json(db, item)
+
+
+@app.post("/api/v1/submission-versions/{version_id}/peer-feedback/publish")
+def publish_peer_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user: CsrfUser, db: Db):
+    version, submission_item, assignment = peer_feedback_context(db, version_id, user)
+    require_writable_class(db, user, assignment.class_id)
+    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER").with_for_update())
+    current_revision = item.version if item else 0
+    if data.revision != current_revision: raise ApiError(409, "FEEDBACK_VERSION_CONFLICT", "反馈已在其他页面更新，请刷新后重试")
+    annotations = validate_feedback_annotations(db, version.id, data.annotations)
+    comment = clean_html(data.comment)
+    updating = item is not None
+    if item:
+        item.grade, item.comment, item.status, item.published_at, item.draft_payload = data.grade, comment, "PUBLISHED", now(), None
+        item.version += 1
+    else:
+        item = SubmissionAssessment(assignment_id=assignment.id, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=submission_item.owner_user_id, kind="PEER", grade=data.grade, comment=comment, status="PUBLISHED", published_at=now())
+        db.add(item); db.flush()
+    replace_feedback_annotations(db, item, annotations, user)
+    audit(db, user, "PEER_ASSESSMENT_UPDATED" if updating else "PEER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(submission_item.owner_user_id), "annotation_count": len(annotations)})
+    db.commit(); db.refresh(item)
+    return {**feedback_json(db, item), "updated": updating, "result": submission_grade_result(db, version)}
 
 
 def save_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user: User, db: Session, publish: bool) -> dict:
@@ -1569,24 +1766,27 @@ def grades(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id)
     if user.role == "STUDENT":
         require_team(db, class_id, user)
-        rows = db.execute(
-            select(SubmissionVersion, Assignment)
-            .join(Submission, and_(Submission.id == SubmissionVersion.submission_id, SubmissionVersion.version_no == Submission.current_version_no))
-            .join(Assignment, Assignment.id == Submission.assignment_id)
-            .where(Assignment.class_id == class_id, Submission.owner_user_id == user.id, Submission.status == "SUBMITTED")
-            .order_by(SubmissionVersion.submitted_at.desc())
-        ).all()
-        items = []
-        for version, assignment in rows:
-            result = submission_grade_result(db, version)
-            if result["final_grade"]:
-                files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
-                items.append({"id": str(version.id), "submission_version_id": str(version.id), "submission_version_no": version.version_no, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "status": "GRADED", "files": [file_json(file) for file in files], **result})
-        new_assignment_ids = {item["assignment_id"] for item in items}
+        assignments = db.scalars(select(Assignment).where(Assignment.class_id == class_id, Assignment.submitter_type == "INDIVIDUAL", Assignment.status.in_(["PUBLISHED", "CLOSED"])).order_by(Assignment.due_at.desc())).all()
         legacy_rows = db.execute(
             select(Grade, Assignment, GradeCoefficient).select_from(Grade).join(Assignment, Assignment.id == Grade.assignment_id).outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
             .where(Assignment.class_id == class_id, Grade.subject_user_id == user.id, Grade.status == "PUBLISHED")
         ).all()
+        legacy_assignment_ids = {grade.assignment_id for grade, _, _ in legacy_rows}
+        items = []
+        for assignment in assignments:
+            submitted = latest_personal_submission(db, assignment.id, user.id)
+            if submitted:
+                _, version = submitted
+                has_current_assessment = bool(db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == version.id).limit(1)))
+                if assignment.id in legacy_assignment_ids and not has_current_assessment: continue
+                result = submission_grade_result(db, version)
+                files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
+                items.append({"id": str(version.id), "submission_version_id": str(version.id), "submission_version_no": version.version_no, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "status": result["grading_status"], "files": [file_json(file) for file in files], **result})
+            else:
+                result = missing_submission_grade_result(assignment)
+                if result["final_grade"]:
+                    items.append({"id": str(assignment.id), "submission_version_id": None, "submission_version_no": None, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "status": result["grading_status"], "files": [], **result})
+        new_assignment_ids = {item["assignment_id"] for item in items}
         for grade, assignment, coefficient in legacy_rows:
             if str(assignment.id) not in new_assignment_ids:
                 items.append({"id": str(grade.id), "assignment_id": str(assignment.id), "assignment_title": assignment.title, "peer_score": grade.peer_score, "coefficient": coefficient.published_value if coefficient else None, "score": grade.score, "status": grade.status})
@@ -1603,21 +1803,23 @@ def grades(user: CurrentUser, db: Db, class_id: UUID = Query()):
 @app.get("/api/v1/grades/assignments")
 def grade_assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
     teacher(user); require_class(db, user, class_id)
-    rows = db.execute(
-        select(ReviewCampaign, Assignment)
-        .join(Assignment, Assignment.id == ReviewCampaign.assignment_id)
-        .where(ReviewCampaign.class_id == class_id, ReviewCampaign.assignment_snapshot_at.is_not(None))
-        .order_by(ReviewCampaign.due_at.desc())
-    ).all()
+    rows = db.scalars(select(Assignment).where(Assignment.class_id == class_id, Assignment.submitter_type == "INDIVIDUAL").order_by(Assignment.due_at.desc())).all()
+    total_students = db.scalar(select(func.count()).select_from(ClassMember).where(ClassMember.class_id == class_id, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT")) or 0
     items = []
-    for campaign, assignment in rows:
-        grade_rows = db.scalars(select(Grade).where(Grade.campaign_id == campaign.id)).all()
+    for assignment in rows:
+        campaign = db.scalar(select(ReviewCampaign).where(ReviewCampaign.assignment_id == assignment.id))
+        submissions = db.scalars(select(Submission).where(Submission.assignment_id == assignment.id, Submission.status == "SUBMITTED")).all()
+        graded = 0
+        for submission_item in submissions:
+            version = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission_item.id, SubmissionVersion.version_no == submission_item.current_version_no))
+            if version and submission_grade_result(db, version)["final_grade"]: graded += 1
+        if missing_submission_grade_result(assignment)["final_grade"]:
+            graded += max(0, total_students - len(submissions))
         items.append({
-            "id": str(assignment.id), "title": assignment.title, "campaign_id": str(campaign.id), "due_at": campaign.due_at,
-            "campaign_status": campaign.status, "grades_generated_at": campaign.grades_generated_at,
-            "total": len(grade_rows), "published": sum(x.status == "PUBLISHED" for x in grade_rows),
-            "pending": sum(x.peer_score is None for x in grade_rows),
-            "ready": sum(x.peer_score is not None and x.draft_score is not None for x in grade_rows),
+            "id": str(assignment.id), "title": assignment.title, "due_at": assignment.due_at, "status": assignment.status,
+            "campaign_id": str(campaign.id) if campaign else None, "campaign_status": campaign.status if campaign else None,
+            "grades_generated_at": campaign.grades_generated_at if campaign else None,
+            "total": total_students, "submitted": len(submissions), "graded": graded, "pending": max(0, total_students - graded),
         })
     return {"items": items, "total": len(items)}
 
@@ -1741,45 +1943,80 @@ def audit_logs(user: CurrentUser, db: Db, page: int = Query(1, ge=1), page_size:
 
 def export_rows(kind: str, class_id: UUID, user: User, db: Session, assignment_id: UUID | None = None) -> list[list]:
     rows: list[list] = []
+    state_labels = {"ACTIVE": "正常", "ARCHIVED": "已归档", "LEFT": "已退出", "DISBANDED": "已解散", "PUBLISHED": "已发布", "DRAFT": "草稿", "CLOSED": "已结束", "VALID": "有效", "INVALID": "已作废"}
     if kind == "members":
         rows.append(["学号", "姓名", "状态", "小组"])
         for member, person in db.execute(select(ClassMember, User).join(User).where(ClassMember.class_id == class_id)):
             team = membership(db, class_id, person.id)
-            rows.append([person.login_name, person.display_name, member.status, team[1].name if team else ""])
+            rows.append([person.login_name, person.display_name, state_labels.get(member.status, member.status), team[1].name if team else ""])
     elif kind == "teams":
         rows.append(["小组", "组长", "人数", "选题", "状态"])
         for team in db.scalars(select(Team).where(Team.class_id == class_id)):
-            item = team_json(db, team, user); rows.append([item["name"], item["leader_name"], item["member_count"], item["topic"]["name"] if item["topic"] else "", item["status"]])
+            item = team_json(db, team, user); rows.append([item["name"], item["leader_name"], item["member_count"], item["topic"]["name"] if item["topic"] else "", state_labels.get(item["status"], item["status"])])
     elif kind == "grades":
         if assignment_id is None: raise ApiError(422, "ASSIGNMENT_REQUIRED", "导出成绩时必须选择单次作业")
         assignment = db.get(Assignment, assignment_id)
         if not assignment or assignment.class_id != class_id: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-        rows.append(["作业", "学号", "姓名", "小组", "互评分", "小组系数", "最终分", "状态"])
-        grade_rows = db.execute(
-            select(Grade, User, GradeCoefficient, Team)
-            .join(User, User.id == Grade.subject_user_id)
-            .outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
-            .outerjoin(Team, Team.id == GradeCoefficient.team_id)
-            .where(Grade.assignment_id == assignment_id)
-            .order_by(Team.name, User.login_name)
-        ).all()
-        for grade, person, coefficient, team_item in grade_rows:
-            if grade.peer_score is None: status = "待处理"
-            elif not coefficient or coefficient.draft_value is None: status = "待填系数"
-            elif grade.status == "PUBLISHED" and grade.draft_score != grade.score: status = "有未发布修改"
-            elif grade.status == "PUBLISHED": status = "已发布"
-            else: status = "待发布"
-            rows.append([assignment.title, person.login_name, person.display_name, team_item.name if team_item else "未分组", grade.peer_score, coefficient.draft_value if coefficient else None, grade.draft_score, status])
+        has_current_assessments = bool(db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.assignment_id == assignment_id).limit(1)))
+        legacy_grades = db.scalars(select(Grade).where(Grade.assignment_id == assignment_id)).all()
+        if legacy_grades and not has_current_assessments:
+            rows.append(["作业", "学号", "姓名", "小组", "互评分", "小组系数", "最终分", "状态"])
+            grade_rows = db.execute(
+                select(Grade, User, GradeCoefficient, Team)
+                .join(User, User.id == Grade.subject_user_id)
+                .outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
+                .outerjoin(Team, Team.id == GradeCoefficient.team_id)
+                .where(Grade.assignment_id == assignment_id)
+                .order_by(Team.name, User.login_name)
+            ).all()
+            for grade, person, coefficient, team_item in grade_rows:
+                if grade.peer_score is None: status = "待处理"
+                elif not coefficient or coefficient.draft_value is None: status = "待填系数"
+                elif grade.status == "PUBLISHED" and grade.draft_score != grade.score: status = "有未发布修改"
+                elif grade.status == "PUBLISHED": status = "已发布"
+                else: status = "待发布"
+                rows.append([assignment.title, person.login_name, person.display_name, team_item.name if team_item else "未分组", grade.peer_score, coefficient.draft_value if coefficient else None, grade.draft_score, status])
+        else:
+            rows.append(["作业", "学号", "姓名", "小组", "提交状态", "学生互评等级", "教师等级", "最终等级", "成绩来源", "评分状态"])
+            people = db.execute(select(ClassMember, User).join(User).where(ClassMember.class_id == class_id, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT").order_by(User.login_name)).all()
+            for _, person in people:
+                team_row = membership(db, class_id, person.id)
+                submitted = latest_personal_submission(db, assignment.id, person.id)
+                if not submitted:
+                    result = missing_submission_grade_result(assignment)
+                    rows.append([assignment.title, person.login_name, person.display_name, team_row[1].name if team_row else "未分组", "未提交", "", "", result["final_grade"] or "", "系统判定" if result["grade_source"] == "SYSTEM" else "", "已评分" if result["final_grade"] else "未评分"])
+                    continue
+                _, version = submitted
+                result = submission_grade_result(db, version)
+                rows.append([
+                    assignment.title, person.login_name, person.display_name, team_row[1].name if team_row else "未分组", "已提交",
+                    result["peer_grade"] or "", result["teacher_grade"]["grade"] if result["teacher_grade"] else "", result["final_grade"] or "",
+                    "教师评分" if result["grade_source"] == "TEACHER" else "学生互评" if result["grade_source"] == "PEER" else "",
+                    "已评分" if result["final_grade"] else "待评分",
+                ])
     else:
-        rows.append(["作业", "评价人", "被评价人", "总分", "状态", "评语"])
+        rows.append(["作业", "评价人", "被评价人", "评价结果", "状态", "评语", "评价时间"])
+        current_assignment_ids = set()
+        direct_reviews = db.execute(select(SubmissionAssessment, Assignment).join(Assignment, Assignment.id == SubmissionAssessment.assignment_id).where(Assignment.class_id == class_id, SubmissionAssessment.kind == "PEER").order_by(SubmissionAssessment.updated_at.desc())).all()
+        for review, assignment in direct_reviews:
+            current_assignment_ids.add(assignment.id)
+            rows.append([assignment.title, db.get(User, review.evaluator_id).display_name, db.get(User, review.subject_user_id).display_name, review.grade, state_labels.get(review.status, review.status), review.comment, review.published_at or review.updated_at])
         for review, assignment in db.execute(select(PeerReview, Assignment).join(ReviewCampaign, ReviewCampaign.id == PeerReview.campaign_id).join(Assignment).where(ReviewCampaign.class_id == class_id)):
-            rows.append([assignment.title, db.get(User, review.reviewer_id).display_name, db.get(User, review.reviewee_id).display_name, review.total_score, review.status, review.comment])
+            if assignment.id in current_assignment_ids: continue
+            rows.append([assignment.title, db.get(User, review.reviewer_id).display_name, db.get(User, review.reviewee_id).display_name, review.total_score, state_labels.get(review.status, review.status), review.comment, review.updated_at])
     return rows
+
+
+def export_cell(value):
+    if isinstance(value, datetime):
+        localized = value.astimezone(ZoneInfo("Asia/Shanghai")) if value.tzinfo else value
+        return localized.strftime("%Y-%m-%d %H:%M:%S")
+    return value
 
 
 @app.get("/api/v1/exports/{kind}.csv")
 def export_csv(kind: Literal["members", "teams", "grades", "reviews"], user: CurrentUser, db: Db, class_id: UUID = Query(), assignment_id: UUID | None = Query(None)):
-    teacher(user); require_class(db, user, class_id); out = io.StringIO(); writer = csv.writer(out); writer.writerows(export_rows(kind, class_id, user, db, assignment_id))
+    teacher(user); require_class(db, user, class_id); out = io.StringIO(); writer = csv.writer(out); writer.writerows([[export_cell(value) for value in row] for row in export_rows(kind, class_id, user, db, assignment_id)])
     suffix = f"-{assignment_id}" if kind == "grades" else ""
     return PlainTextResponse("\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{kind}{suffix}.csv"'})
 
@@ -1787,7 +2024,7 @@ def export_csv(kind: Literal["members", "teams", "grades", "reviews"], user: Cur
 @app.get("/api/v1/exports/{kind}.xlsx")
 def export_xlsx(kind: Literal["members", "teams", "grades", "reviews"], user: CurrentUser, db: Db, class_id: UUID = Query(), assignment_id: UUID | None = Query(None)):
     teacher(user); require_class(db, user, class_id); workbook = Workbook(); sheet = workbook.active; sheet.title = "导出数据"
-    for row in export_rows(kind, class_id, user, db, assignment_id): sheet.append(row)
+    for row in export_rows(kind, class_id, user, db, assignment_id): sheet.append([export_cell(value) for value in row])
     suffix = f"-{assignment_id}" if kind == "grades" else ""
     target = settings.file_root / "exports" / f"{kind}-{class_id}{suffix}.xlsx"; target.parent.mkdir(parents=True, exist_ok=True); workbook.save(target)
     return FileResponse(target, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=f"{kind}{suffix}.xlsx")
@@ -1940,7 +2177,7 @@ def submission_board(aid: UUID, user: CurrentUser, db: Db):
         submission = by_owner.get(str(owner_id))
         latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id, SubmissionVersion.version_no == submission.current_version_no)) if submission else None
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == latest.id)).all() if latest and submission.status == "SUBMITTED" else []
-        grade_result = submission_grade_result(db, latest) if latest and submission.status == "SUBMITTED" and assignment.submitter_type == "INDIVIDUAL" else {"teacher_grade": None, "peer_grade": None, "peer_review_count": 0, "final_grade": None, "grade_source": None}
+        grade_result = submission_grade_result(db, latest) if latest and submission.status == "SUBMITTED" and assignment.submitter_type == "INDIVIDUAL" else missing_submission_grade_result(assignment) if assignment.submitter_type == "INDIVIDUAL" else {"teacher_grade": None, "peer_grade": None, "peer_review_count": 0, "peer_feedbacks": [], "final_grade": None, "grade_source": None, "grading_status": "PENDING_SUBMISSION"}
         items.append({"id": str(submission.id) if submission else str(owner_id), "submission_version_id": str(latest.id) if latest and submission.status == "SUBMITTED" else None, "submission_version_no": latest.version_no if latest and submission.status == "SUBMITTED" else None, "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
     return {"items": items, "total": len(items)}
 

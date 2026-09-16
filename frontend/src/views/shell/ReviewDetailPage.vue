@@ -1,0 +1,16 @@
+<script setup>
+import { ArrowLeftOutlined, DownloadOutlined, FileTextOutlined } from '@ant-design/icons-vue'
+import { useShellContext } from '../../shellContext'
+const { selectedCampaign, reviewTask, reviewForm, selectedReviewCandidate, formatTime, navigate, selectReviewCandidate, openPeerReviewDrawer } = useShellContext()
+</script>
+
+<template>
+  <div class="page-title detail-title"><div><div class="eyebrow">组内互评</div><h1>{{selectedCampaign.assignment_title}}</h1><div class="assignment-title-meta"><a-tag color="cyan">仅限本组</a-tag><span>{{reviewTask?.team?.name}}</span></div></div><a-button @click="navigate('/reviews')"><ArrowLeftOutlined/> 返回互评列表</a-button></div>
+  <section class="assignment-workspace review-workspace">
+    <a-empty v-if="!reviewTask?.candidates.length" description="本组暂无其他成员提交作业"/>
+    <template v-else>
+      <section class="assignment-pane"><div class="assignment-pane-heading"><h2>选择评价对象</h2><span>{{reviewTask.candidates.length}} 人已提交</span></div><a-select :value="reviewForm.reviewee_id" style="width:100%" :options="reviewTask.candidates.map(item=>({value:item.user_id,label:`${item.name}（${item.student_no}）${item.review?' · 已评价':''}`}))" @change="selectReviewCandidate"/></section>
+      <section v-if="selectedReviewCandidate" class="assignment-pane"><div class="assignment-pane-heading"><h2>{{selectedReviewCandidate.name}}的作品</h2><a-space><span>提交于 {{formatTime(selectedReviewCandidate.submitted_at)}}</span><a-tag v-if="selectedReviewCandidate.review" color="green">已评价</a-tag></a-space></div><div class="assignment-file-list"><div v-for="file in selectedReviewCandidate.files" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openPeerReviewDrawer(selectedReviewCandidate,file)">{{file.name}}</button><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip></div></div><div class="submission-actions"><a-button type="primary" :disabled="!selectedReviewCandidate.files.length" @click="openPeerReviewDrawer(selectedReviewCandidate)">{{selectedReviewCandidate.review?'打开并更新评价':'打开文件并开始评价'}}</a-button></div></section>
+    </template>
+  </section>
+</template>
