@@ -218,6 +218,23 @@ class VersionFile(Base):
     file_id: Mapped[UUID] = mapped_column(ForeignKey("file_objects.id", ondelete="CASCADE"), primary_key=True)
 
 
+class SubmissionAssessment(Base):
+    __tablename__ = "submission_assessments"
+    id: Mapped[UUID] = uuid_pk()
+    assignment_id: Mapped[UUID] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True)
+    submission_version_id: Mapped[UUID] = mapped_column(ForeignKey("submission_versions.id", ondelete="CASCADE"), index=True)
+    evaluator_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    subject_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    grade: Mapped[str] = mapped_column(String(1))
+    comment: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    __table_args__ = (
+        UniqueConstraint("submission_version_id", "evaluator_id", "kind", name="uq_submission_assessment_evaluator"),
+    )
+
+
 class ReviewCampaign(Base):
     __tablename__ = "review_campaigns"
     id: Mapped[UUID] = uuid_pk()

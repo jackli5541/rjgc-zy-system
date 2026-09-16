@@ -68,15 +68,12 @@ def process_auto_review(db, current: datetime) -> None:
             .where(TeamMember.class_id == assignment.class_id, TeamMember.status == "ACTIVE", Team.status == "ACTIVE")
         ).all()
     }
-    if assignment.auto_review_mode == "CLASS":
-        groups = [("教学班", frozen_rows)]
-    else:
-        grouped = {(team.id, team.name): [] for team in db.scalars(select(Team).where(Team.class_id == assignment.class_id, Team.status == "ACTIVE")).all()}
-        for person, version in frozen_rows:
-            team_row = db.execute(select(TeamMember.team_id, Team.name).join(Team, Team.id == TeamMember.team_id).where(TeamMember.class_id == assignment.class_id, TeamMember.user_id == person.id, TeamMember.status == "ACTIVE", Team.status == "ACTIVE")).first()
-            key, label = (team_row.team_id, team_row.name) if team_row else (None, "未分组")
-            grouped.setdefault((key, label), []).append((person, version))
-        groups = [(label, rows) for (_, label), rows in grouped.items()]
+    grouped = {(team.id, team.name): [] for team in db.scalars(select(Team).where(Team.class_id == assignment.class_id, Team.status == "ACTIVE")).all()}
+    for person, version in frozen_rows:
+        team_row = db.execute(select(TeamMember.team_id, Team.name).join(Team, Team.id == TeamMember.team_id).where(TeamMember.class_id == assignment.class_id, TeamMember.user_id == person.id, TeamMember.status == "ACTIVE", Team.status == "ACTIVE")).first()
+        key, label = (team_row.team_id, team_row.name) if team_row else (None, "未分组")
+        grouped.setdefault((key, label), []).append((person, version))
+    groups = [(label, rows) for (_, label), rows in grouped.items()]
     for label, rows in groups:
         if len(rows) < 2:
             reason = f"{label} 已正式提交人数少于 2 人"

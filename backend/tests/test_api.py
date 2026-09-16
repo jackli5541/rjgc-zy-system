@@ -84,7 +84,7 @@ def test_formal_course_workflow():
         submitted = student.post(f"/api/v1/assignments/{assignment_id}/submission", headers={**headers, "Idempotency-Key": f"submit-{content.decode()}"}, json={"file_ids": [upload.json()["id"]]})
         assert submitted.status_code == 201, submitted.text
 
-    assert leader.get(f"/api/v1/files/{personal_files[1]}").status_code == 403
+    assert leader.get(f"/api/v1/files/{personal_files[1]}").status_code == 200
 
     assert teacher.post(f"/api/v1/assignments/{assignment_id}/close", headers=teacher_headers).status_code == 200
     campaign = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": assignment_id, "mode": "TEAM", "criteria_text": "按作品完整性和表达清晰度评分。", "due_at": "2027-12-10T12:00:00+08:00"})
@@ -363,6 +363,15 @@ def test_class_management_and_multi_class_creation_are_atomic():
     assert not_empty.status_code == 409 and not_empty.json()["code"] == "CLASS_NOT_EMPTY"
     assert not_empty.json()["details"]["members"] == 3
 
+    auto_group_course = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2027 春季", "name": "自动分组测试班"}).json()
+    for index in range(13):
+        teacher.post(f"/api/v1/classes/{auto_group_course['id']}/members", headers=headers, json={"student_no": f"2027888{index:02d}", "name": f"分组学生{index}"})
+    grouped = teacher.post(f"/api/v1/classes/{auto_group_course['id']}/teams/auto-group", headers=headers, json={"group_size": 6})
+    assert grouped.status_code == 201, grouped.text
+    assert grouped.json()["created"] == 3 and grouped.json()["assigned"] == 13
+    assert [item["member_count"] for item in grouped.json()["teams"]] == [6, 6, 1]
+    assert teacher.post(f"/api/v1/classes/{auto_group_course['id']}/teams/auto-group", headers=headers, json={"group_size": 6}).json() == {"created": 0, "assigned": 0, "teams": []}
+
     due_at = "2027-12-01T12:00:00+08:00"
     bulk = teacher.post("/api/v1/assignments/bulk", headers=headers, json={"class_ids": [first["id"], second["id"]], "title": "跨班个人作业", "description": "各班独立完成", "submitter_type": "INDIVIDUAL", "due_at": due_at, "publish": True})
     assert bulk.status_code == 201, bulk.text
@@ -419,7 +428,7 @@ def test_one_to_one_class_review_freezes_assignment_and_validates_score():
     office_preview = teacher.get(f"/api/v1/files/{office.json()['id']}/preview")
     assert office_preview.status_code == 200 and "attachment" in office_preview.headers["content-disposition"]
 
-    campaign = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": assignment["id"], "mode": "CLASS", "criteria_text": "按完整性与清晰度给出总分。", "due_at": "2099-01-01T00:00:00+08:00"})
+    campaign = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": assignment["id"], "mode": "TEAM", "criteria_text": "按完整性与清晰度给出总分。", "due_at": "2099-01-01T00:00:00+08:00"})
     assert campaign.status_code == 201, campaign.text
     assert campaign.json()["allocated"] == 3 and campaign.json()["skipped"] == 0
     campaign_id = campaign.json()["id"]
@@ -499,7 +508,7 @@ def test_assignment_deadline_automatically_creates_frozen_review():
     assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={
         "class_id": class_id, "title": "自动互评作业", "description": "截止后自动分配", "submitter_type": "INDIVIDUAL",
         "due_at": "2020-01-01T00:00:00+08:00", "allow_late": True, "auto_review_enabled": True,
-        "auto_review_mode": "CLASS", "auto_review_criteria_text": "按完整性评分。", "auto_review_due_at": "2099-01-01T00:00:00+08:00",
+        "auto_review_mode": "TEAM", "auto_review_criteria_text": "按完整性评分。", "auto_review_due_at": "2099-01-01T00:00:00+08:00",
     })
     assert assignment.status_code == 201, assignment.text
     assignment_id = assignment.json()["id"]
@@ -517,7 +526,7 @@ def test_assignment_deadline_automatically_creates_frozen_review():
         campaign = campaigns[0]
         allocations = db.scalars(select(ReviewAssignment).where(ReviewAssignment.campaign_id == campaign.id)).all()
         assert saved_assignment.auto_review_status == "CREATED"
-        assert campaign.mode == "CLASS" and campaign.assignment_snapshot_at is not None
+        assert campaign.mode == "TEAM" and campaign.assignment_snapshot_at is not None
         assert len(allocations) == 2 and all(item.status == "PENDING" for item in allocations)
     with SessionLocal.begin() as db:
         campaign = db.scalar(select(ReviewCampaign).where(ReviewCampaign.assignment_id == UUID(assignment_id)))
@@ -532,6 +541,50 @@ def test_assignment_deadline_automatically_creates_frozen_review():
         assert len(generated) == 2 and all(item.peer_score is None and item.status == "PENDING" for item in generated)
 
 
+def test_submitted_work_is_immediately_available_for_team_review_and_teacher_grading():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2034 春季", "name": "即时互评测试班"}).json()
+    class_id = course["id"]
+    students = []
+    for index in range(2):
+        student_no = f"2034999{index}"
+        teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": student_no, "name": f"即时互评学生{index}"})
+        students.append(login(student_no, student_no, "student"))
+    team = students[0][0].post("/api/v1/teams", headers=students[0][1], json={"class_id": class_id, "name": "即时互评组", "open_recruitment": True}).json()
+    request = students[1][0].post(f"/api/v1/teams/{team['id']}/applications", headers=students[1][1]).json()
+    students[0][0].post(f"/api/v1/team-requests/{request['id']}/decision?decision=APPROVED", headers=students[0][1])
+
+    assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "即时评价作业", "description": "提交后立即评价", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
+    first_student, first_headers = students[0]
+    file = first_student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=first_headers, files={"file": ("first.pdf", b"first", "application/pdf")}).json()
+    assert first_student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**first_headers, "Idempotency-Key": "direct-first"}, json={"file_ids": [file["id"]]}).status_code == 201
+
+    reviewer, reviewer_headers = students[1]
+    available = reviewer.get(f"/api/v1/peer-review-assignments?class_id={class_id}").json()["items"]
+    assert available[0]["assignment_id"] == assignment["id"] and available[0]["pending_count"] == 1
+    detail = reviewer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()
+    assert [item["student_no"] for item in detail["candidates"]] == ["20349990"]
+    reviewed = reviewer.post(f"/api/v1/assignments/{assignment['id']}/peer-reviews", headers=reviewer_headers, json={"reviewee_id": detail["candidates"][0]["user_id"], "grade": "A", "comment": "完成度高"})
+    assert reviewed.status_code == 201 and reviewed.json()["grade"] == "A"
+
+    board = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"]
+    submitted = next(item for item in board if item["student_no"] == "20349990")
+    assert submitted["teacher_grade"] is None
+    graded = teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{submitted['user_id']}/grade", headers=teacher_headers, json={"grade": "B", "comment": "需求覆盖完整"})
+    assert graded.status_code == 201 and graded.json()["grade"] == "B"
+    refreshed = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"]
+    result = next(item for item in refreshed if item["student_no"] == "20349990")
+    assert result["teacher_grade"]["grade"] == "B" and result["peer_grade"] == "A"
+    assert result["final_grade"] == "B" and result["grade_source"] == "TEACHER"
+    cleared = teacher.delete(f"/api/v1/assignments/{assignment['id']}/submissions/{submitted['user_id']}/grade", headers=teacher_headers)
+    assert cleared.status_code == 200 and cleared.json()["final_grade"] == "A" and cleared.json()["grade_source"] == "PEER"
+    student_grade = first_student.get(f"/api/v1/grades?class_id={class_id}").json()["items"][0]
+    assert student_grade["final_grade"] == "A" and student_grade["grade_source"] == "PEER"
+
+    class_mode = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": assignment["id"], "mode": "CLASS", "criteria_text": "已停用", "due_at": "2099-02-01T00:00:00+08:00"})
+    assert class_mode.status_code == 422
+
+
 def test_teacher_assignment_and_review_lifecycle_controls():
     teacher, teacher_headers = login("teacher", "123456", "teacher")
     course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2032 春季", "name": "作业生命周期测试班", "max_team_members": 5}).json()
@@ -543,7 +596,7 @@ def test_teacher_assignment_and_review_lifecycle_controls():
     edited = teacher.patch(f"/api/v1/assignments/{assignment_id}", headers=teacher_headers, json={"title": "已编辑生命周期作业", "version": draft.json()["version"]})
     assert edited.status_code == 200 and edited.json()["title"] == "已编辑生命周期作业"
     configured = teacher.patch(f"/api/v1/assignments/{assignment_id}", headers=teacher_headers, json={
-        "version": edited.json()["version"], "auto_review_enabled": True, "auto_review_mode": "CLASS",
+        "version": edited.json()["version"], "auto_review_enabled": True, "auto_review_mode": "TEAM",
         "auto_review_criteria_text": "按完整性评分", "auto_review_due_at": "2099-12-10T12:00:00+08:00",
     })
     assert configured.status_code == 200 and configured.json()["auto_review_enabled"] is True

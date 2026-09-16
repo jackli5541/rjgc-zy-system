@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app.database import get_db
 from app.grading import final_score, finalize_campaign
-from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAssessment, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 
@@ -165,12 +165,14 @@ class ClassIn(BaseModel):
     semester: str = Field(min_length=2, max_length=40); name: str = Field(min_length=2, max_length=100); team_deadline: datetime | None = None; topic_public: bool = False; invite_requires_approval: bool = True
 class TeamIn(BaseModel):
     class_id: UUID; name: str = Field(min_length=2, max_length=40); open_recruitment: bool = True
+class AutoGroupIn(BaseModel):
+    group_size: int = Field(default=6, ge=2, le=20)
 class TopicIn(BaseModel):
     name: str = Field(min_length=2, max_length=100); description: str = Field("", max_length=1000)
 class AssignmentFields(BaseModel):
     title: str = Field(min_length=2, max_length=100); description: str = Field(min_length=1, max_length=5000); submitter_type: Literal["TEAM", "INDIVIDUAL"]; starts_at: datetime | None = None; due_at: datetime; allow_late: bool = False; publish: bool = True
     auto_review_enabled: bool = False
-    auto_review_mode: Literal["TEAM", "CLASS"] | None = None
+    auto_review_mode: Literal["TEAM"] | None = None
     auto_review_criteria_text: str = Field("", max_length=5000)
     auto_review_due_at: datetime | None = None
 class AssignmentIn(AssignmentFields):
@@ -179,7 +181,7 @@ class AssignmentBulkIn(AssignmentFields):
     class_ids: list[UUID] = Field(min_length=1)
 class AllocatedCampaignIn(BaseModel):
     assignment_id: UUID
-    mode: Literal["TEAM", "CLASS"]
+    mode: Literal["TEAM"]
     criteria_text: str = Field("", max_length=5000)
     criteria_file_ids: list[UUID] = Field(default_factory=list, max_length=10)
     due_at: datetime
@@ -188,6 +190,11 @@ class ReviewIn(BaseModel):
     comment: str = Field(max_length=2000)
     reviewee_id: UUID | None = None
     scores: dict[str, float] | None = None
+class SubmissionAssessmentIn(BaseModel):
+    grade: Literal["A", "B", "C", "D", "E"]
+    comment: str = Field("", max_length=2000)
+class PeerSubmissionAssessmentIn(SubmissionAssessmentIn):
+    reviewee_id: UUID
 class CoefficientIn(BaseModel):
     coefficient: Decimal = Field(ge=0, decimal_places=2)
     version: int = Field(ge=1)
@@ -196,7 +203,7 @@ class GradePublishIn(BaseModel):
 class AssignmentUpdateIn(BaseModel):
     title: str | None = Field(None, min_length=2, max_length=100); description: str | None = Field(None, min_length=1, max_length=5000); starts_at: datetime | None = None; due_at: datetime | None = None; allow_late: bool | None = None; submitter_type: Literal["TEAM", "INDIVIDUAL"] | None = None; version: int
     auto_review_enabled: bool | None = None
-    auto_review_mode: Literal["TEAM", "CLASS"] | None = None
+    auto_review_mode: Literal["TEAM"] | None = None
     auto_review_criteria_text: str | None = Field(None, max_length=5000)
     auto_review_due_at: datetime | None = None
 class ReasonIn(BaseModel): reason: str = Field(min_length=2, max_length=500)
@@ -581,6 +588,32 @@ def create_team(data: TeamIn, user: CsrfUser, db: Db):
         db.flush(); db.add(TeamMember(team_id=x.id, class_id=course.id, user_id=user.id, role="LEADER")); db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == course.id, TeamRequest.applicant_id == user.id, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); notify(db, user.id, "TOPIC_REQUIRED", "小组已创建，请提交选题", "team", str(x.id)); audit(db, user, "TEAM_CREATED", "team", str(x.id)); db.commit()
     except IntegrityError: db.rollback(); raise ApiError(409, "TEAM_NAME_EXISTS", "小组名称已被使用")
     return team_json(db, x, user)
+
+
+@app.post("/api/v1/classes/{cid}/teams/auto-group", status_code=201)
+def auto_group_teams(cid: UUID, data: AutoGroupIn, user: CsrfUser, db: Db):
+    teacher(user); require_writable_class(db, user, cid)
+    grouped_user_ids = select(TeamMember.user_id).join(Team).where(TeamMember.class_id == cid, TeamMember.status == "ACTIVE", Team.status == "ACTIVE")
+    students = db.scalars(select(User).join(ClassMember).where(ClassMember.class_id == cid, ClassMember.status == "ACTIVE", User.id.not_in(grouped_user_ids)).order_by(User.login_name, User.id)).all()
+    if not students: return {"created": 0, "assigned": 0, "teams": []}
+    existing_names = set(db.scalars(select(Team.normalized_name).where(Team.class_id == cid)).all())
+    created = []
+    next_number = 1
+    for offset in range(0, len(students), data.group_size):
+        members = students[offset:offset + data.group_size]
+        while f"小组{next_number}" in existing_names: next_number += 1
+        name = f"小组{next_number}"
+        existing_names.add(name); next_number += 1
+        team = Team(class_id=cid, leader_id=members[0].id, name=name, normalized_name=name, open_recruitment=False, max_members=data.group_size)
+        db.add(team); db.flush()
+        for index, student in enumerate(members):
+            db.add(TeamMember(team_id=team.id, class_id=cid, user_id=student.id, role="LEADER" if index == 0 else "MEMBER"))
+            notify(db, student.id, "TEAM_ASSIGNED", f"教师已将你分入「{name}」", "team", str(team.id))
+        created.append({"id": str(team.id), "name": name, "member_count": len(members)})
+    db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == cid, TeamRequest.applicant_id.in_([student.id for student in students]), TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now()))
+    audit(db, user, "TEAMS_AUTO_GROUPED", "class", str(cid), {"group_size": data.group_size, "assigned": len(students), "created": len(created)})
+    db.commit()
+    return {"created": len(created), "assigned": len(students), "teams": created}
 
 
 @app.get("/api/v1/teams/{tid}")
@@ -1009,6 +1042,152 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
     return {"id": str(s.id), "submitted_at": v.submitted_at, "is_late": v.is_late}
 
 
+def latest_personal_submission(db: Session, assignment_id: UUID, user_id: UUID):
+    return db.execute(
+        select(Submission, SubmissionVersion)
+        .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+        .where(Submission.assignment_id == assignment_id, Submission.owner_user_id == user_id, Submission.status == "SUBMITTED")
+    ).first()
+
+
+def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
+    evaluator = db.get(User, item.evaluator_id)
+    return {
+        "id": str(item.id), "kind": item.kind, "grade": item.grade, "comment": item.comment,
+        "evaluator_id": str(item.evaluator_id), "evaluator_name": evaluator.display_name,
+        "subject_user_id": str(item.subject_user_id), "submission_version_id": str(item.submission_version_id),
+        "created_at": item.created_at, "updated_at": item.updated_at,
+    }
+
+
+GRADE_POINTS = {"A": 5, "B": 4, "C": 3, "D": 2, "E": 1}
+POINT_GRADES = {value: key for key, value in GRADE_POINTS.items()}
+
+
+def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
+    assessments = db.scalars(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id)).all()
+    teacher_assessment = next((item for item in assessments if item.kind == "TEACHER"), None)
+    peer_assessments = [item for item in assessments if item.kind == "PEER"]
+    peer_grade = None
+    if peer_assessments:
+        average = sum(GRADE_POINTS[item.grade] for item in peer_assessments) / len(peer_assessments)
+        peer_grade = POINT_GRADES[int(average + 0.5)]
+    final_grade = teacher_assessment.grade if teacher_assessment else peer_grade
+    return {
+        "teacher_grade": assessment_json(db, teacher_assessment) if teacher_assessment else None,
+        "peer_grade": peer_grade, "peer_review_count": len(peer_assessments),
+        "final_grade": final_grade, "grade_source": "TEACHER" if teacher_assessment else "PEER" if peer_grade else None,
+    }
+
+
+@app.get("/api/v1/peer-review-assignments")
+def peer_review_assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
+    if user.role != "STUDENT": raise ApiError(403, "STUDENT_REQUIRED", "该接口仅供学生使用")
+    require_class(db, user, class_id)
+    _, team = require_team(db, class_id, user)
+    teammate_ids = select(TeamMember.user_id).where(TeamMember.team_id == team.id, TeamMember.status == "ACTIVE", TeamMember.user_id != user.id)
+    items = []
+    assignments = db.scalars(select(Assignment).where(Assignment.class_id == class_id, Assignment.submitter_type == "INDIVIDUAL", Assignment.status.in_(["PUBLISHED", "CLOSED"])).order_by(Assignment.created_at.desc())).all()
+    for assignment in assignments:
+        versions = db.execute(
+            select(SubmissionVersion.id, Submission.owner_user_id)
+            .join(Submission, Submission.id == SubmissionVersion.submission_id)
+            .where(Submission.assignment_id == assignment.id, Submission.owner_user_id.in_(teammate_ids), Submission.status == "SUBMITTED", SubmissionVersion.version_no == Submission.current_version_no)
+        ).all()
+        if not versions: continue
+        version_ids = [row.id for row in versions]
+        reviewed = db.scalar(select(func.count()).select_from(SubmissionAssessment).where(SubmissionAssessment.submission_version_id.in_(version_ids), SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER")) or 0
+        payload = assignment_json(assignment)
+        payload.update({"assignment_id": str(assignment.id), "assignment_title": assignment.title, "available_count": len(versions), "reviewed_count": reviewed, "pending_count": len(versions) - reviewed})
+        items.append(payload)
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/v1/assignments/{aid}/peer-review")
+def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
+    if user.role != "STUDENT": raise ApiError(403, "STUDENT_REQUIRED", "该接口仅供学生使用")
+    assignment = db.get(Assignment, aid)
+    if not assignment or assignment.submitter_type != "INDIVIDUAL" or assignment.status not in {"PUBLISHED", "CLOSED"}: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    require_class(db, user, assignment.class_id)
+    _, team = require_team(db, assignment.class_id, user)
+    rows = db.execute(
+        select(Submission, SubmissionVersion, User)
+        .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+        .join(User, User.id == Submission.owner_user_id)
+        .join(TeamMember, and_(TeamMember.user_id == Submission.owner_user_id, TeamMember.team_id == team.id, TeamMember.status == "ACTIVE"))
+        .where(Submission.assignment_id == aid, Submission.owner_user_id != user.id, Submission.status == "SUBMITTED")
+        .order_by(User.login_name)
+    ).all()
+    candidates = []
+    for submission_item, version, person in rows:
+        files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
+        review = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
+        candidates.append({
+            "user_id": str(person.id), "name": person.display_name, "student_no": person.login_name,
+            "submitted_at": version.submitted_at, "submission_version_id": str(version.id),
+            "files": [file_json(file) for file in files], "review": assessment_json(db, review) if review else None,
+        })
+    return {"assignment": assignment_json(assignment), "team": {"id": str(team.id), "name": team.name}, "candidates": candidates}
+
+
+@app.post("/api/v1/assignments/{aid}/peer-reviews", status_code=201)
+def save_peer_submission_assessment(aid: UUID, data: PeerSubmissionAssessmentIn, user: CsrfUser, db: Db):
+    if user.role != "STUDENT": raise ApiError(403, "STUDENT_REQUIRED", "该接口仅供学生使用")
+    assignment = db.get(Assignment, aid)
+    if not assignment or assignment.submitter_type != "INDIVIDUAL" or assignment.status not in {"PUBLISHED", "CLOSED"}: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    require_writable_class(db, user, assignment.class_id)
+    if data.reviewee_id == user.id: raise ApiError(422, "SELF_REVIEW_FORBIDDEN", "不能评价自己的作业")
+    reviewer_team = membership(db, assignment.class_id, user.id)
+    reviewee_team = membership(db, assignment.class_id, data.reviewee_id)
+    if not reviewer_team or not reviewee_team or reviewer_team[1].id != reviewee_team[1].id: raise ApiError(403, "TEAM_REVIEW_ONLY", "只能评价本组成员的作业")
+    submitted = latest_personal_submission(db, aid, data.reviewee_id)
+    if not submitted: raise ApiError(409, "REVIEWEE_NOT_SUBMITTED", "该组员尚未提交作业")
+    _, version = submitted
+    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
+    updating = item is not None
+    if item:
+        item.grade, item.comment = data.grade, data.comment.strip()
+    else:
+        item = SubmissionAssessment(assignment_id=aid, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=data.reviewee_id, kind="PEER", grade=data.grade, comment=data.comment.strip())
+        db.add(item)
+    db.flush(); audit(db, user, "PEER_ASSESSMENT_UPDATED" if updating else "PEER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(data.reviewee_id)}); db.commit()
+    return {**assessment_json(db, item), "updated": updating}
+
+
+@app.post("/api/v1/assignments/{aid}/submissions/{student_id}/grade", status_code=201)
+def save_teacher_submission_assessment(aid: UUID, student_id: UUID, data: SubmissionAssessmentIn, user: CsrfUser, db: Db):
+    teacher(user); assignment = db.get(Assignment, aid)
+    if not assignment or assignment.submitter_type != "INDIVIDUAL" or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    require_writable_class(db, user, assignment.class_id)
+    submitted = latest_personal_submission(db, aid, student_id)
+    if not submitted: raise ApiError(409, "SUBMISSION_REQUIRED", "该学生尚未提交作业")
+    _, version = submitted
+    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
+    updating = item is not None
+    if item:
+        item.grade, item.comment = data.grade, data.comment.strip()
+    else:
+        item = SubmissionAssessment(assignment_id=aid, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=student_id, kind="TEACHER", grade=data.grade, comment=data.comment.strip())
+        db.add(item)
+    db.flush(); audit(db, user, "TEACHER_ASSESSMENT_UPDATED" if updating else "TEACHER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(student_id)}); db.commit()
+    return {**assessment_json(db, item), "updated": updating, "result": submission_grade_result(db, version)}
+
+
+@app.delete("/api/v1/assignments/{aid}/submissions/{student_id}/grade")
+def delete_teacher_submission_assessment(aid: UUID, student_id: UUID, user: CsrfUser, db: Db):
+    teacher(user); assignment = db.get(Assignment, aid)
+    if not assignment or assignment.submitter_type != "INDIVIDUAL" or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    require_writable_class(db, user, assignment.class_id)
+    submitted = latest_personal_submission(db, aid, student_id)
+    if not submitted: raise ApiError(409, "SUBMISSION_REQUIRED", "该学生尚未提交作业")
+    _, version = submitted
+    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
+    if item:
+        item_id = str(item.id); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
+    result = submission_grade_result(db, version); db.commit()
+    return result
+
+
 @app.get("/api/v1/files/{fid}")
 def download(fid: UUID, user: CurrentUser, db: Db):
     f = db.get(FileObject, fid); a = db.get(Assignment, f.assignment_id) if f else None
@@ -1026,8 +1205,7 @@ def download(fid: UUID, user: CurrentUser, db: Db):
             else:
                 owner = membership(db, a.class_id, f.owner_id)
                 linked = db.execute(select(SubmissionVersion, Submission).join(Submission, Submission.id == SubmissionVersion.submission_id).join(VersionFile, VersionFile.version_id == SubmissionVersion.id).where(VersionFile.file_id == f.id, Submission.status == "SUBMITTED", Submission.current_version_no == SubmissionVersion.version_no)).first()
-                legacy = db.scalar(select(ReviewCampaign).where(ReviewCampaign.assignment_id == a.id, ReviewCampaign.status == "ACTIVE", ReviewCampaign.assignment_snapshot_at.is_(None)))
-                allowed = bool(owner and mine and owner[1].id == mine.id and linked and legacy)
+                allowed = bool(owner and mine and owner[1].id == mine.id and linked)
     if not allowed: raise ApiError(403, "FILE_FORBIDDEN", "无权访问该文件")
     path = settings.file_root / f.storage_path
     if not path.is_file(): raise ApiError(404, "FILE_MISSING", "文件存储不可用")
@@ -1218,9 +1396,30 @@ def campaign_reviews(cid: UUID, user: CurrentUser, db: Db):
 @app.get("/api/v1/grades")
 def grades(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id)
-    if user.role == "STUDENT": require_team(db, class_id, user)
+    if user.role == "STUDENT":
+        require_team(db, class_id, user)
+        rows = db.execute(
+            select(SubmissionVersion, Assignment)
+            .join(Submission, and_(Submission.id == SubmissionVersion.submission_id, SubmissionVersion.version_no == Submission.current_version_no))
+            .join(Assignment, Assignment.id == Submission.assignment_id)
+            .where(Assignment.class_id == class_id, Submission.owner_user_id == user.id, Submission.status == "SUBMITTED")
+            .order_by(SubmissionVersion.submitted_at.desc())
+        ).all()
+        items = []
+        for version, assignment in rows:
+            result = submission_grade_result(db, version)
+            if result["final_grade"]:
+                items.append({"id": str(version.id), "assignment_id": str(assignment.id), "assignment_title": assignment.title, "status": "GRADED", **result})
+        new_assignment_ids = {item["assignment_id"] for item in items}
+        legacy_rows = db.execute(
+            select(Grade, Assignment, GradeCoefficient).select_from(Grade).join(Assignment, Assignment.id == Grade.assignment_id).outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
+            .where(Assignment.class_id == class_id, Grade.subject_user_id == user.id, Grade.status == "PUBLISHED")
+        ).all()
+        for grade, assignment, coefficient in legacy_rows:
+            if str(assignment.id) not in new_assignment_ids:
+                items.append({"id": str(grade.id), "assignment_id": str(assignment.id), "assignment_title": assignment.title, "peer_score": grade.peer_score, "coefficient": coefficient.published_value if coefficient else None, "score": grade.score, "status": grade.status})
+        return {"items": items, "total": len(items)}
     query = select(Grade, Assignment, GradeCoefficient).select_from(Grade).join(Assignment, Assignment.id == Grade.assignment_id).outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id).where(Assignment.class_id == class_id)
-    if user.role == "STUDENT": query = query.where(Grade.subject_user_id == user.id, Grade.status == "PUBLISHED")
     rows = db.execute(query.order_by(Grade.updated_at.desc())).all(); items = []
     for g, a, coefficient in rows:
         person = db.get(User, g.subject_user_id)
@@ -1569,7 +1768,8 @@ def submission_board(aid: UUID, user: CurrentUser, db: Db):
         submission = by_owner.get(str(owner_id))
         latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id, SubmissionVersion.version_no == submission.current_version_no)) if submission else None
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == latest.id)).all() if latest and submission.status == "SUBMITTED" else []
-        items.append({"id": str(submission.id) if submission else str(owner_id), "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files]})
+        grade_result = submission_grade_result(db, latest) if latest and submission.status == "SUBMITTED" and assignment.submitter_type == "INDIVIDUAL" else {"teacher_grade": None, "peer_grade": None, "peer_review_count": 0, "final_grade": None, "grade_source": None}
+        items.append({"id": str(submission.id) if submission else str(owner_id), "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
     return {"items": items, "total": len(items)}
 
 
