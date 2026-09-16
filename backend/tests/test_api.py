@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app
 from app.grading import final_score
-from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion
+from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, Team
 from app.worker import process_auto_review, process_due_campaign
 
 
@@ -68,6 +68,8 @@ def test_formal_course_workflow():
     teammate_file = applicant.post(f"/api/v1/assignments/{team_assignment_id}/files", headers=applicant_headers, files={"file": ("design.pdf", b"team draft", "application/pdf")}).json()
     leader_drafts = leader.get(f"/api/v1/assignments/{team_assignment_id}/files").json()["drafts"]
     assert leader_drafts[0]["owner_name"] == "李同学"
+    teammate_submit = applicant.post(f"/api/v1/assignments/{team_assignment_id}/submission", headers={**applicant_headers, "Idempotency-Key": "teammate-submit"}, json={})
+    assert teammate_submit.status_code == 403 and teammate_submit.json()["code"] == "TEAM_LEADER_REQUIRED"
     team_submit = leader.post(f"/api/v1/assignments/{team_assignment_id}/submission", headers={**leader_headers, "Idempotency-Key": "team-submit"}, json={"file_ids": [teammate_file["id"]]})
     assert team_submit.status_code == 201, team_submit.text
 
@@ -189,8 +191,12 @@ def test_assignment_time_window_update_and_review_visibility():
     with SessionLocal() as db:
         stored = db.scalar(select(Submission).where(Submission.assignment_id == UUID(assignment["id"])))
         assert len(db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == stored.id)).all()) == 1
-    dashboard = teacher.get(f"/api/v1/classes/{class_id}/dashboard").json()["summary"]
+    dashboard_response = teacher.get(f"/api/v1/classes/{class_id}/dashboard").json()
+    dashboard = dashboard_response["summary"]
     assert dashboard["submission_assignment_title"] == "可更新作业" and dashboard["submission_rate"] == 100
+    assert dashboard["ungrouped_member_count"] == 0
+    assert dashboard_response["assignment_history"][-1]["title"] == "可更新作业"
+    assert dashboard_response["assignment_history"][-1]["completion_rate"] == 100
 
     late_assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "已截止作业", "description": "测试截止后不可撤回", "submitter_type": "INDIVIDUAL", "due_at": "2020-12-02T12:00:00+08:00", "allow_late": True}).json()
     late_file = student.post(f"/api/v1/assignments/{late_assignment['id']}/files", headers=student_headers, files={"file": ("late.pdf", b"late", "application/pdf")}).json()
@@ -288,7 +294,7 @@ def test_multisheet_roster_and_member_crud():
 
 def test_class_management_and_multi_class_creation_are_atomic():
     teacher, headers = login("teacher", "123456", "teacher")
-    first = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2027 春季", "name": "跨班测试一班", "max_team_members": 5}).json()
+    first = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2027 春季", "name": "跨班测试一班"}).json()
     second = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2027 春季", "name": "跨班测试二班", "max_team_members": 5}).json()
     disposable = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2027 春季", "name": "待删除空班", "max_team_members": 5}).json()
 
@@ -318,16 +324,22 @@ def test_class_management_and_multi_class_creation_are_atomic():
         member = teacher.post(f"/api/v1/classes/{first['id']}/members", headers=headers, json={"student_no": student_no, "name": f"跨班学生{index}"})
         assert member.status_code == 201, member.text
         student_ids.append((student_no, member.json()["id"]))
+    ungrouped_summary = teacher.get(f"/api/v1/classes/{first['id']}/dashboard").json()["summary"]
+    assert ungrouped_summary["ungrouped_member_count"] == 3
     leader, leader_headers = login(student_ids[0][0], student_ids[0][0], "student")
     team = leader.post("/api/v1/teams", headers=leader_headers, json={"class_id": first["id"], "name": "跨班测试小组", "open_recruitment": True}).json()
+    with SessionLocal() as db:
+        stored_team = db.get(Team, UUID(team["id"]))
+        stored_team.max_members = 2
+        db.commit()
     for student_no, _ in student_ids[1:]:
         applicant, applicant_headers = login(student_no, student_no, "student")
         request = applicant.post(f"/api/v1/teams/{team['id']}/applications", headers=applicant_headers)
         assert request.status_code == 201, request.text
         decision = leader.post(f"/api/v1/team-requests/{request.json()['id']}/decision?decision=APPROVED", headers=leader_headers)
         assert decision.status_code == 200, decision.text
-    too_small = teacher.patch(f"/api/v1/classes/{first['id']}", headers=headers, json={"version": restored.json()["version"], "max_team_members": 2})
-    assert too_small.status_code == 409 and too_small.json()["code"] == "TEAM_SIZE_LIMIT_TOO_SMALL"
+    unlimited_team = leader.get(f"/api/v1/teams/{team['id']}").json()
+    assert len(unlimited_team["members"]) == 3
 
     not_empty = teacher.delete(f"/api/v1/classes/{first['id']}", headers=headers)
     assert not_empty.status_code == 409 and not_empty.json()["code"] == "CLASS_NOT_EMPTY"

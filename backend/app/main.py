@@ -141,7 +141,7 @@ def require_team(db: Session, cid: UUID, user: User):
 
 
 def class_json(x: TeachingClass, *, member_count: int | None = None, assignment_count: int | None = None, deletable: bool | None = None):
-    item = {"id": str(x.id), "course": x.course, "semester": x.semester, "name": x.name, "invite_code": x.invite_code, "status": x.status, "team_deadline": x.team_deadline, "max_team_members": x.max_team_members, "topic_public": x.topic_public, "invite_requires_approval": x.invite_requires_approval, "version": x.version}
+    item = {"id": str(x.id), "course": x.course, "semester": x.semester, "name": x.name, "invite_code": x.invite_code, "status": x.status, "team_deadline": x.team_deadline, "topic_public": x.topic_public, "invite_requires_approval": x.invite_requires_approval, "version": x.version}
     if member_count is not None: item["member_count"] = member_count
     if assignment_count is not None: item["assignment_count"] = assignment_count
     if deletable is not None: item["deletable"] = deletable
@@ -156,13 +156,13 @@ def team_json(db: Session, x: Team, viewer: User):
     course = db.get(TeachingClass, x.class_id)
     own_team = membership(db, x.class_id, viewer.id)
     can_view_topic = viewer.role == "TEACHER" or (own_team and own_team[1].id == x.id) or bool(course and course.topic_public)
-    return {"id": str(x.id), "name": x.name, "leader_id": str(x.leader_id), "leader_name": leader.display_name, "member_count": count, "max_members": x.max_members, "open_recruitment": x.open_recruitment, "status": x.status, "is_leader": x.leader_id == viewer.id, "pending_count": pending, "topic": None if not topic or not can_view_topic else {"id": str(topic.id), "name": topic.name, "description": topic.description, "status": topic.review_status, "reason": topic.review_reason}, "version": x.version}
+    return {"id": str(x.id), "name": x.name, "leader_id": str(x.leader_id), "leader_name": leader.display_name, "member_count": count, "open_recruitment": x.open_recruitment, "status": x.status, "is_leader": x.leader_id == viewer.id, "pending_count": pending, "topic": None if not topic or not can_view_topic else {"id": str(topic.id), "name": topic.name, "description": topic.description, "status": topic.review_status, "reason": topic.review_reason}, "version": x.version}
 
 
 class LoginIn(BaseModel):
     account: str; password: str; role: Literal["teacher", "student"] | None = None
 class ClassIn(BaseModel):
-    semester: str = Field(min_length=2, max_length=40); name: str = Field(min_length=2, max_length=100); max_team_members: int = Field(5, ge=2, le=20); team_deadline: datetime | None = None; topic_public: bool = False; invite_requires_approval: bool = True
+    semester: str = Field(min_length=2, max_length=40); name: str = Field(min_length=2, max_length=100); team_deadline: datetime | None = None; topic_public: bool = False; invite_requires_approval: bool = True
 class TeamIn(BaseModel):
     class_id: UUID; name: str = Field(min_length=2, max_length=40); open_recruitment: bool = True
 class TopicIn(BaseModel):
@@ -209,7 +209,6 @@ class ClassUpdateIn(BaseModel):
     semester: str | None = Field(None, min_length=2, max_length=40)
     name: str | None = Field(None, min_length=2, max_length=100)
     team_deadline: datetime | None = None
-    max_team_members: int | None = Field(None, ge=2, le=20)
     topic_public: bool | None = None
     invite_requires_approval: bool | None = None
     status: Literal["ACTIVE", "ARCHIVED"] | None = None
@@ -293,7 +292,7 @@ def classes(user: CurrentUser, db: Db):
 
 @app.post("/api/v1/classes", status_code=201)
 def create_class(data: ClassIn, user: CsrfUser, db: Db):
-    teacher(user); x = TeachingClass(teacher_id=user.id, semester=data.semester.strip(), name=data.name.strip(), invite_code=secrets.token_hex(4).upper(), max_team_members=data.max_team_members, team_deadline=data.team_deadline, topic_public=data.topic_public, invite_requires_approval=data.invite_requires_approval)
+    teacher(user); x = TeachingClass(teacher_id=user.id, semester=data.semester.strip(), name=data.name.strip(), invite_code=secrets.token_hex(4).upper(), team_deadline=data.team_deadline, topic_public=data.topic_public, invite_requires_approval=data.invite_requires_approval)
     db.add(x); db.flush(); audit(db, user, "CLASS_CREATED", "class", str(x.id)); db.commit(); return class_json(x)
 
 
@@ -350,10 +349,40 @@ def dashboard(cid: UUID, user: CurrentUser, db: Db):
     if user.role == "STUDENT": require_team(db, cid, user)
     members = db.scalar(select(func.count()).select_from(ClassMember).where(ClassMember.class_id == cid, ClassMember.status == "ACTIVE")) or 0
     teams = db.scalar(select(func.count()).select_from(Team).where(Team.class_id == cid, Team.status == "ACTIVE")) or 0
+    ungrouped_members = db.scalar(
+        select(func.count()).select_from(ClassMember).where(
+            ClassMember.class_id == cid,
+            ClassMember.status == "ACTIVE",
+            ~select(TeamMember.id).where(
+                TeamMember.class_id == cid,
+                TeamMember.user_id == ClassMember.user_id,
+                TeamMember.status == "ACTIVE",
+            ).exists(),
+        )
+    ) or 0
     active = db.scalar(select(func.count()).select_from(Assignment).where(Assignment.class_id == cid, Assignment.status == "PUBLISHED", Assignment.due_at >= now())) or 0
     latest_assignment = db.scalar(select(Assignment).where(Assignment.class_id == cid, Assignment.status == "PUBLISHED", Assignment.due_at >= now()).order_by(Assignment.created_at.desc()).limit(1))
     assignment_expected = (members if latest_assignment.submitter_type == "INDIVIDUAL" else teams) if latest_assignment else 0
     assignment_submitted = db.scalar(select(func.count()).select_from(Submission).where(Submission.assignment_id == latest_assignment.id, Submission.status == "SUBMITTED")) if latest_assignment else 0
+
+    recent_assignments = list(reversed(db.scalars(
+        select(Assignment)
+        .where(Assignment.class_id == cid, Assignment.status.in_(["PUBLISHED", "CLOSED"]))
+        .order_by(Assignment.due_at.desc())
+        .limit(6)
+    ).all()))
+    assignment_history = []
+    for item in recent_assignments:
+        expected = members if item.submitter_type == "INDIVIDUAL" else teams
+        submitted = db.scalar(select(func.count()).select_from(Submission).where(Submission.assignment_id == item.id, Submission.status == "SUBMITTED")) or 0
+        assignment_history.append({
+            "id": str(item.id),
+            "title": item.title,
+            "due_at": item.due_at,
+            "submitted": submitted,
+            "expected": expected,
+            "completion_rate": round(submitted * 100 / expected, 1) if expected else 0,
+        })
 
     latest_campaign = db.scalar(select(ReviewCampaign).where(ReviewCampaign.class_id == cid, ReviewCampaign.due_at <= now()).order_by(ReviewCampaign.due_at.desc()).limit(1))
     review_expected = review_completed = 0
@@ -371,6 +400,7 @@ def dashboard(cid: UUID, user: CurrentUser, db: Db):
         "summary": {
             "member_count": members,
             "team_count": teams,
+            "ungrouped_member_count": ungrouped_members,
             "active_assignments": active,
             "submission_rate": round((assignment_submitted or 0) * 100 / assignment_expected, 1) if assignment_expected else 0,
             "submission_assignment_title": latest_assignment.title if latest_assignment else None,
@@ -379,6 +409,7 @@ def dashboard(cid: UUID, user: CurrentUser, db: Db):
             "peer_review_assignment_title": latest_campaign_assignment.title if latest_campaign_assignment else None,
             "peer_review_due_at": latest_campaign.due_at if latest_campaign else None,
         },
+        "assignment_history": assignment_history,
     }
 
 
@@ -540,7 +571,7 @@ def create_team(data: TeamIn, user: CsrfUser, db: Db):
     if user.role != "STUDENT": raise ApiError(403, "STUDENT_REQUIRED", "仅学生可创建小组")
     course = require_writable_class(db, user, data.class_id); require_team_window(course, user)
     if membership(db, course.id, user.id): raise ApiError(409, "ALREADY_IN_TEAM", "你已经加入小组")
-    x = Team(class_id=course.id, leader_id=user.id, name=data.name.strip(), normalized_name="".join(data.name.casefold().split()), open_recruitment=data.open_recruitment, max_members=course.max_team_members); db.add(x)
+    x = Team(class_id=course.id, leader_id=user.id, name=data.name.strip(), normalized_name="".join(data.name.casefold().split()), open_recruitment=data.open_recruitment); db.add(x)
     try:
         db.flush(); db.add(TeamMember(team_id=x.id, class_id=course.id, user_id=user.id, role="LEADER")); db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == course.id, TeamRequest.applicant_id == user.id, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); audit(db, user, "TEAM_CREATED", "team", str(x.id)); db.commit()
     except IntegrityError: db.rollback(); raise ApiError(409, "TEAM_NAME_EXISTS", "小组名称已被使用")
@@ -585,8 +616,6 @@ def request_decision(rid: UUID, decision: Literal["APPROVED", "REJECTED"], user:
     course = require_writable_class(db, user, req.class_id); require_team_window(course, user)
     if decision == "APPROVED":
         if membership(db, req.class_id, req.applicant_id): raise ApiError(409, "ALREADY_IN_TEAM", "申请人已加入其他小组")
-        count = db.scalar(select(func.count()).select_from(TeamMember).where(TeamMember.team_id == x.id, TeamMember.status == "ACTIVE")) or 0
-        if count >= x.max_members: raise ApiError(409, "TEAM_FULL", "小组人数已满")
         db.add(TeamMember(team_id=x.id, class_id=req.class_id, user_id=req.applicant_id)); db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == req.class_id, TeamRequest.applicant_id == req.applicant_id, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); req.status = "APPROVED"; notify(db, req.applicant_id, "TEAM_JOINED", f"已加入小组「{x.name}」")
     else: req.status, req.resolved_at = "REJECTED", now(); notify(db, req.applicant_id, "TEAM_REJECTED", f"加入「{x.name}」的申请未通过")
     audit(db, user, "TEAM_REQUEST_DECIDED", "team_request", str(req.id), {"decision": decision}); db.commit(); return {"id": str(req.id), "status": req.status}
@@ -1380,16 +1409,9 @@ def update_class(cid: UUID, data: ClassUpdateIn, user: CsrfUser, db: Db):
     course = db.scalar(select(TeachingClass).where(TeachingClass.id == cid, TeachingClass.teacher_id == user.id).with_for_update())
     if not course: raise ApiError(404, "CLASS_NOT_FOUND", "未找到可管理的教学班")
     if course.version != data.version: raise ApiError(409, "CLASS_VERSION_CONFLICT", "教学班已被修改，请刷新后重试", {"current_version": course.version})
-    metadata_fields = {"semester", "name", "team_deadline", "max_team_members", "topic_public", "invite_requires_approval"} & data.model_fields_set
+    metadata_fields = {"semester", "name", "team_deadline", "topic_public", "invite_requires_approval"} & data.model_fields_set
     if course.status == "ARCHIVED" and metadata_fields: raise ApiError(409, "CLASS_ARCHIVED", "请先恢复教学班再编辑资料")
     changes = {}
-    if data.max_team_members is not None and data.max_team_members != course.max_team_members:
-        team_sizes = db.scalars(select(func.count(TeamMember.id)).join(Team, Team.id == TeamMember.team_id).where(Team.class_id == cid, Team.status == "ACTIVE", TeamMember.status == "ACTIVE").group_by(TeamMember.team_id)).all()
-        largest_team = max(team_sizes, default=0)
-        if data.max_team_members < largest_team: raise ApiError(409, "TEAM_SIZE_LIMIT_TOO_SMALL", "小组人数上限不能低于现有小组人数", {"largest_team_size": largest_team})
-        changes["max_team_members"] = {"from": course.max_team_members, "to": data.max_team_members}
-        course.max_team_members = data.max_team_members
-        for team_item in db.scalars(select(Team).where(Team.class_id == cid, Team.status == "ACTIVE")): team_item.max_members = data.max_team_members
     for field in ("semester", "name"):
         value = getattr(data, field)
         if value is not None:
@@ -1446,8 +1468,6 @@ def respond_invitation(rid: UUID, decision: Literal["APPROVED", "REJECTED"], use
     if req.expires_at and req.expires_at < now(): req.status = "EXPIRED"; db.commit(); raise ApiError(409, "INVITATION_EXPIRED", "邀请已过期")
     if decision == "APPROVED":
         if membership(db, req.class_id, user.id): raise ApiError(409, "ALREADY_IN_TEAM", "你已经加入小组")
-        count = db.scalar(select(func.count()).select_from(TeamMember).where(TeamMember.team_id == team.id, TeamMember.status == "ACTIVE")) or 0
-        if count >= team.max_members: raise ApiError(409, "TEAM_FULL", "小组人数已满")
         db.add(TeamMember(team_id=team.id, class_id=req.class_id, user_id=user.id)); db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == req.class_id, TeamRequest.applicant_id == user.id, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); req.status = "APPROVED"
     else: req.status = "REJECTED"
     req.resolved_at = now(); audit(db, user, "TEAM_INVITATION_RESPONDED", "team_request", str(req.id), {"decision": decision}); db.commit(); return {"id": str(req.id), "status": req.status}
