@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -232,6 +233,7 @@ class ReviewCampaign(Base):
     require_all: Mapped[bool] = mapped_column(Boolean, default=False)
     allow_update: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
+    grades_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -240,6 +242,7 @@ class ReviewAssignment(Base):
     id: Mapped[UUID] = uuid_pk()
     campaign_id: Mapped[UUID] = mapped_column(ForeignKey("review_campaigns.id", ondelete="CASCADE"), index=True)
     reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    participant_team_id: Mapped[UUID | None] = mapped_column(ForeignKey("teams.id"), index=True)
     reviewee_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
     submission_version_id: Mapped[UUID | None] = mapped_column(ForeignKey("submission_versions.id"))
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
@@ -271,18 +274,34 @@ class PeerReview(Base):
 Index("uq_valid_peer_review", PeerReview.campaign_id, PeerReview.reviewer_id, PeerReview.reviewee_id, unique=True, postgresql_where=PeerReview.status == "VALID")
 
 
+class GradeCoefficient(Base):
+    __tablename__ = "grade_coefficients"
+    id: Mapped[UUID] = uuid_pk()
+    assignment_id: Mapped[UUID] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True)
+    team_id: Mapped[UUID] = mapped_column(ForeignKey("teams.id"), index=True)
+    draft_value: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    published_value: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    __table_args__ = (UniqueConstraint("assignment_id", "team_id", name="uq_grade_coefficient_assignment_team"),)
+
+
 class Grade(Base):
     __tablename__ = "grades"
     id: Mapped[UUID] = uuid_pk()
     assignment_id: Mapped[UUID] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True)
-    subject_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
-    subject_team_id: Mapped[UUID | None] = mapped_column(ForeignKey("teams.id"), index=True)
-    score: Mapped[float] = mapped_column(Float)
-    comment: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(16), default="DRAFT")
+    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("review_campaigns.id", ondelete="CASCADE"), index=True)
+    subject_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    coefficient_id: Mapped[UUID | None] = mapped_column(ForeignKey("grade_coefficients.id", ondelete="SET NULL"), index=True)
+    peer_review_id: Mapped[UUID | None] = mapped_column(ForeignKey("peer_reviews.id", ondelete="SET NULL"), unique=True)
+    peer_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    draft_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    status: Mapped[str] = mapped_column(String(16), default="PENDING")
     version: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    __table_args__ = (UniqueConstraint("assignment_id", "subject_user_id", name="uq_personal_grade"), UniqueConstraint("assignment_id", "subject_team_id", name="uq_team_grade"))
+    __table_args__ = (UniqueConstraint("assignment_id", "subject_user_id", name="uq_personal_grade"),)
 
 
 class GradeRevision(Base):
@@ -290,9 +309,9 @@ class GradeRevision(Base):
     id: Mapped[UUID] = uuid_pk()
     grade_id: Mapped[UUID] = mapped_column(ForeignKey("grades.id", ondelete="CASCADE"), index=True)
     changed_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    score: Mapped[float] = mapped_column(Float)
-    comment: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(16))
+    peer_score: Mapped[Decimal] = mapped_column(Numeric(5, 2))
+    coefficient: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    score: Mapped[Decimal] = mapped_column(Numeric(5, 2))
     reason: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

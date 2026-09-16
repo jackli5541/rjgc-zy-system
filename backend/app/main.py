@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv, html, io, mimetypes, os, re, secrets
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
@@ -21,7 +22,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from app.database import get_db
-from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.grading import final_score, finalize_campaign
+from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 
@@ -175,31 +177,28 @@ class AssignmentIn(AssignmentFields):
     class_id: UUID
 class AssignmentBulkIn(AssignmentFields):
     class_ids: list[UUID] = Field(min_length=1)
-class CampaignFields(BaseModel):
-    rubric: list[dict] = Field(min_length=1, max_length=10); comment_min_length: int = Field(20, ge=0, le=1000); due_at: datetime; publish_at: datetime | None = None; require_all: bool = False; allow_update: bool = True
-class CampaignIn(CampaignFields):
-    assignment_id: UUID
 class AllocatedCampaignIn(BaseModel):
     assignment_id: UUID
     mode: Literal["TEAM", "CLASS"]
     criteria_text: str = Field("", max_length=5000)
     criteria_file_ids: list[UUID] = Field(default_factory=list, max_length=10)
     due_at: datetime
-class CampaignTargetIn(BaseModel):
-    class_id: UUID; assignment_id: UUID
-class CampaignBulkIn(CampaignFields):
-    targets: list[CampaignTargetIn] = Field(min_length=1)
-class CampaignUpdateIn(CampaignFields):
-    version: int
 class ReviewIn(BaseModel):
     score: float | None = Field(None, ge=0, le=100)
     comment: str = Field(max_length=2000)
     reviewee_id: UUID | None = None
     scores: dict[str, float] | None = None
-class GradeIn(BaseModel):
-    assignment_id: UUID; subject_user_id: UUID | None = None; subject_team_id: UUID | None = None; score: float = Field(ge=0, le=100); comment: str = Field("", max_length=2000); publish: bool = False; reason: str = Field("", max_length=500)
+class CoefficientIn(BaseModel):
+    coefficient: Decimal = Field(ge=0, decimal_places=2)
+    version: int = Field(ge=1)
+class GradePublishIn(BaseModel):
+    reason: str = Field("", max_length=500)
 class AssignmentUpdateIn(BaseModel):
     title: str | None = Field(None, min_length=2, max_length=100); description: str | None = Field(None, min_length=1, max_length=5000); starts_at: datetime | None = None; due_at: datetime | None = None; allow_late: bool | None = None; submitter_type: Literal["TEAM", "INDIVIDUAL"] | None = None; version: int
+    auto_review_enabled: bool | None = None
+    auto_review_mode: Literal["TEAM", "CLASS"] | None = None
+    auto_review_criteria_text: str | None = Field(None, max_length=5000)
+    auto_review_due_at: datetime | None = None
 class ReasonIn(BaseModel): reason: str = Field(min_length=2, max_length=500)
 class PasswordIn(BaseModel): current_password: str; new_password: str = Field(min_length=8, max_length=128)
 class ClassJoinIn(BaseModel): invite_code: str = Field(min_length=4, max_length=12)
@@ -618,6 +617,18 @@ def topic(tid: UUID, data: TopicIn, user: CsrfUser, db: Db):
 def assignment_json(x: Assignment): return {"id": str(x.id), "class_id": str(x.class_id), "title": x.title, "description": render_description(x.description), "submitter_type": x.submitter_type, "starts_at": x.starts_at, "due_at": x.due_at, "allow_late": x.allow_late, "auto_review_enabled": x.auto_review_enabled, "auto_review_mode": x.auto_review_mode, "auto_review_criteria_text": x.auto_review_criteria_text or "", "auto_review_due_at": x.auto_review_due_at, "auto_review_status": x.auto_review_status, "auto_review_error": x.auto_review_error, "status": x.status, "version": x.version}
 
 
+def assignment_review_campaign(db: Session, assignment_id: UUID) -> ReviewCampaign | None:
+    return db.scalar(select(ReviewCampaign).where(ReviewCampaign.assignment_id == assignment_id))
+
+
+def review_config_editable(db: Session, assignment: Assignment) -> bool:
+    return assignment.status != "CLOSED" and assignment.due_at > now() and assignment_review_campaign(db, assignment.id) is None
+
+
+def has_review_criteria_file(db: Session, assignment_id: UUID) -> bool:
+    return bool(db.scalar(select(FileObject.id).where(FileObject.assignment_id == assignment_id, FileObject.purpose == "REVIEW_CRITERIA", FileObject.active.is_(True)).limit(1)))
+
+
 def file_json(file: FileObject, owner_name: str | None = None, submitted: bool = False) -> dict:
     suffix = Path(file.original_name).suffix.lower()
     previewable = suffix in {".md", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -695,11 +706,36 @@ def update_assignment(aid: UUID, data: AssignmentUpdateIn, user: CsrfUser, db: D
     starts_at = data.starts_at if data.starts_at is not None else assignment.starts_at
     due_at = data.due_at if data.due_at is not None else assignment.due_at
     if starts_at and starts_at >= due_at: raise ApiError(422, "ASSIGNMENT_TIME_INVALID", "开始时间必须早于截止时间")
+
+    review_fields = {"auto_review_enabled", "auto_review_mode", "auto_review_criteria_text", "auto_review_due_at"}
+    changing_review_config = bool(review_fields & data.model_fields_set)
+    campaign = assignment_review_campaign(db, aid)
+    if changing_review_config and (assignment.status == "CLOSED" or assignment.due_at <= now() or campaign):
+        raise ApiError(409, "AUTO_REVIEW_CONFIG_LOCKED", "作业已截止或互评活动已创建，不能修改互评配置")
+
+    auto_review_enabled = data.auto_review_enabled if "auto_review_enabled" in data.model_fields_set else assignment.auto_review_enabled
+    auto_review_mode = data.auto_review_mode if "auto_review_mode" in data.model_fields_set else assignment.auto_review_mode
+    auto_review_criteria_text = data.auto_review_criteria_text if "auto_review_criteria_text" in data.model_fields_set else assignment.auto_review_criteria_text
+    auto_review_due_at = data.auto_review_due_at if "auto_review_due_at" in data.model_fields_set else assignment.auto_review_due_at
+    submitter_type = data.submitter_type or assignment.submitter_type
+    if auto_review_enabled and campaign is None:
+        if submitter_type != "INDIVIDUAL": raise ApiError(422, "INDIVIDUAL_ASSIGNMENT_REQUIRED", "自动互评只能关联个人作业")
+        if not auto_review_mode or not auto_review_due_at: raise ApiError(422, "AUTO_REVIEW_CONFIG_REQUIRED", "请完整配置自动互评模式和截止时间")
+        if auto_review_due_at <= due_at: raise ApiError(422, "AUTO_REVIEW_TIME_INVALID", "互评截止时间必须晚于作业截止时间")
+        if not (auto_review_criteria_text or "").strip() and not has_review_criteria_file(db, aid):
+            raise ApiError(422, "REVIEW_CRITERIA_REQUIRED", "互评标准文字和附件至少提供一种")
     for key in ("title", "description", "starts_at", "due_at", "allow_late", "submitter_type"):
         value = getattr(data, key)
         if value is not None:
             if key == "description": value = clean_html(value)
             setattr(assignment, key, value.strip() if isinstance(value, str) else value)
+    if changing_review_config:
+        assignment.auto_review_enabled = bool(auto_review_enabled)
+        assignment.auto_review_mode = auto_review_mode if auto_review_enabled else None
+        assignment.auto_review_criteria_text = (auto_review_criteria_text or "").strip() if auto_review_enabled else None
+        assignment.auto_review_due_at = auto_review_due_at if auto_review_enabled else None
+        assignment.auto_review_status = "PENDING" if auto_review_enabled else None
+        assignment.auto_review_error = None
     assignment.version += 1; audit(db, user, "ASSIGNMENT_UPDATED", "assignment", str(aid)); db.commit(); return assignment_json(assignment)
 
 
@@ -777,6 +813,9 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
     if not a: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, a.class_id)
     team = None
+    selected_purpose = (purpose or "ATTACHMENT") if user.role == "TEACHER" else "SUBMISSION"
+    if user.role == "TEACHER" and selected_purpose == "REVIEW_CRITERIA" and not review_config_editable(db, a):
+        raise ApiError(409, "AUTO_REVIEW_CONFIG_LOCKED", "作业已截止或互评活动已创建，不能修改互评标准附件")
     if user.role == "STUDENT":
         if a.status == "CLOSED": raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止，不能继续上传附件")
         if a.status != "PUBLISHED": raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "可提交的作业不存在")
@@ -812,7 +851,6 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
         raise
     finally:
         await file.close()
-    selected_purpose = (purpose or "ATTACHMENT") if user.role == "TEACHER" else "SUBMISSION"
     team_id = team.id if team and a.submitter_type == "TEAM" else None
     preview_status = "READY" if suffix in {".md", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"} else "NOT_AVAILABLE"
     x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
@@ -847,7 +885,13 @@ def delete_file(fid: UUID, user: CsrfUser, db: Db):
     if not file or not assignment: raise ApiError(404, "FILE_NOT_FOUND", "文件不存在")
     require_writable_class(db, user, assignment.class_id)
     if file.owner_id != user.id: raise ApiError(403, "FILE_FORBIDDEN", "只能删除自己上传的文件")
-    if file.purpose in {"ATTACHMENT", "REVIEW_CRITERIA"} and assignment.status != "DRAFT": raise ApiError(409, "PUBLISHED_FILE_LOCKED", "已发布作业的教师附件不能删除")
+    if file.purpose == "ATTACHMENT" and assignment.status != "DRAFT": raise ApiError(409, "PUBLISHED_FILE_LOCKED", "已发布作业的教师附件不能删除")
+    if file.purpose == "REVIEW_CRITERIA":
+        if not review_config_editable(db, assignment):
+            raise ApiError(409, "AUTO_REVIEW_CONFIG_LOCKED", "作业已截止或互评活动已创建，不能修改互评标准附件")
+        remaining = db.scalar(select(func.count()).select_from(FileObject).where(FileObject.assignment_id == assignment.id, FileObject.purpose == "REVIEW_CRITERIA", FileObject.active.is_(True), FileObject.id != fid)) or 0
+        if assignment.auto_review_enabled and not (assignment.auto_review_criteria_text or "").strip() and remaining == 0:
+            raise ApiError(409, "REVIEW_CRITERIA_REQUIRED", "启用互评时必须保留标准文字或至少一个附件")
     if db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == fid).limit(1)):
         file.active = False
         db.commit()
@@ -944,15 +988,7 @@ def download(fid: UUID, user: CurrentUser, db: Db):
 
 
 @app.post("/api/v1/review-campaigns", status_code=201)
-def create_campaign(data: AllocatedCampaignIn | CampaignIn, user: CsrfUser, db: Db):
-    if isinstance(data, CampaignIn):
-        assignment = db.get(Assignment, data.assignment_id)
-        if not assignment: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-        courses = writable_teacher_classes(db, user, [assignment.class_id])
-        items = create_campaigns_for_targets(data, [CampaignTargetIn(class_id=courses[0].id, assignment_id=assignment.id)], user, db)
-        try: db.commit()
-        except IntegrityError: db.rollback(); raise ApiError(409, "CAMPAIGN_EXISTS", "该作业已创建互评活动")
-        item = items[0]; return {"id": str(item.id), "assignment_id": str(item.assignment_id), "status": item.status}
+def create_campaign(data: AllocatedCampaignIn, user: CsrfUser, db: Db):
     teacher(user); assignment = db.scalar(select(Assignment).where(Assignment.id == data.assignment_id).with_for_update())
     if not assignment: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     writable_teacher_classes(db, user, [assignment.class_id])
@@ -977,9 +1013,17 @@ def create_campaign(data: AllocatedCampaignIn | CampaignIn, user: CsrfUser, db: 
     if len(frozen_rows) < 2: raise ApiError(409, "REVIEW_CANDIDATES_INSUFFICIENT", "全班已正式提交学生少于 2 人，不能创建互评")
 
     snapshot_at = now()
-    campaign = ReviewCampaign(assignment_id=assignment.id, class_id=assignment.class_id, mode=data.mode, criteria_text=data.criteria_text.strip(), assignment_snapshot_at=snapshot_at, rubric=[{"key": "score", "label": "总分", "weight": 100}], comment_min_length=1, due_at=data.due_at, publish_at=snapshot_at, require_all=False, allow_update=False)
+    campaign = ReviewCampaign(assignment_id=assignment.id, class_id=assignment.class_id, mode=data.mode, criteria_text=data.criteria_text.strip(), assignment_snapshot_at=snapshot_at, rubric=[{"key": "score", "label": "总分", "weight": 100}], comment_min_length=1, due_at=data.due_at, publish_at=snapshot_at, require_all=False, allow_update=True)
     db.add(campaign); db.flush()
     warnings = []
+    team_by_user = {
+        user_id: team_id
+        for user_id, team_id in db.execute(
+            select(TeamMember.user_id, TeamMember.team_id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(TeamMember.class_id == assignment.class_id, TeamMember.status == "ACTIVE", Team.status == "ACTIVE")
+        ).all()
+    }
     if data.mode == "CLASS":
         groups = [("CLASS", "教学班", frozen_rows)]
     else:
@@ -995,47 +1039,17 @@ def create_campaign(data: AllocatedCampaignIn | CampaignIn, user: CsrfUser, db: 
             reason = f"{label} 已正式提交人数少于 2 人"
             warnings.append({"group": label, "reason": reason, "count": len(rows)})
             for person, _ in rows:
-                allocations.append(ReviewAssignment(campaign_id=campaign.id, reviewer_id=person.id, status="SKIPPED", skip_reason=reason))
+                allocations.append(ReviewAssignment(campaign_id=campaign.id, reviewer_id=person.id, participant_team_id=team_by_user.get(person.id), status="SKIPPED", skip_reason=reason))
             continue
         for index, (reviewer, _) in enumerate(rows):
             reviewee, version = rows[(index + 1) % len(rows)]
-            allocations.append(ReviewAssignment(campaign_id=campaign.id, reviewer_id=reviewer.id, reviewee_id=reviewee.id, submission_version_id=version.id))
+            allocations.append(ReviewAssignment(campaign_id=campaign.id, reviewer_id=reviewer.id, participant_team_id=team_by_user.get(reviewer.id), reviewee_id=reviewee.id, submission_version_id=version.id))
             notify(db, reviewer.id, "REVIEW_ASSIGNED", f"新的互评任务：{assignment.title}")
     db.add_all(allocations)
     audit(db, user, "REVIEW_CAMPAIGN_CREATED", "review_campaign", str(campaign.id), {"mode": data.mode, "allocated": sum(x.status == "PENDING" for x in allocations), "skipped": sum(x.status == "SKIPPED" for x in allocations)})
     try: db.commit()
     except IntegrityError: db.rollback(); raise ApiError(409, "CAMPAIGN_EXISTS", "该作业已创建互评活动")
     return {"id": str(campaign.id), "assignment_id": str(campaign.assignment_id), "status": campaign.status, "mode": campaign.mode, "assignment_snapshot_at": campaign.assignment_snapshot_at, "allocated": sum(x.status == "PENDING" for x in allocations), "skipped": sum(x.status == "SKIPPED" for x in allocations), "warnings": warnings}
-
-
-def create_campaigns_for_targets(data: CampaignFields, targets: list[CampaignTargetIn], user: User, db: Session) -> list[ReviewCampaign]:
-    if abs(sum(float(x.get("weight", 0)) for x in data.rubric) - 100) > .01 or any(not x.get("key") or not x.get("label") for x in data.rubric): raise ApiError(422, "RUBRIC_INVALID", "评价维度权重合计必须为 100")
-    class_ids = [x.class_id for x in targets]
-    writable_teacher_classes(db, user, class_ids)
-    assignment_ids = [x.assignment_id for x in targets]
-    if len(set(assignment_ids)) != len(assignment_ids): raise ApiError(422, "DUPLICATE_ASSIGNMENT", "互评作业不能重复选择")
-    assignments = db.scalars(select(Assignment).where(Assignment.id.in_(assignment_ids)).with_for_update()).all()
-    by_id = {x.id: x for x in assignments}
-    if len(by_id) != len(assignment_ids): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "部分作业不存在")
-    for target in targets:
-        assignment = by_id[target.assignment_id]
-        if assignment.class_id != target.class_id: raise ApiError(422, "ASSIGNMENT_CLASS_MISMATCH", "所选作业不属于对应教学班")
-        if assignment.submitter_type != "INDIVIDUAL": raise ApiError(422, "INDIVIDUAL_ASSIGNMENT_REQUIRED", "作品互评只能关联个人作业")
-    existing = db.scalars(select(ReviewCampaign.assignment_id).where(ReviewCampaign.assignment_id.in_(assignment_ids))).all()
-    if existing: raise ApiError(409, "CAMPAIGN_EXISTS", "部分作业已创建互评活动", {"assignment_ids": [str(x) for x in existing]})
-    created = [ReviewCampaign(assignment_id=target.assignment_id, class_id=target.class_id, rubric=data.rubric, comment_min_length=data.comment_min_length, due_at=data.due_at, publish_at=data.publish_at, require_all=data.require_all, allow_update=data.allow_update) for target in targets]
-    db.add_all(created)
-    try: db.flush()
-    except IntegrityError: db.rollback(); raise ApiError(409, "CAMPAIGN_EXISTS", "部分作业已创建互评活动")
-    for item in created: audit(db, user, "REVIEW_CAMPAIGN_CREATED", "review_campaign", str(item.id), {"class_id": str(item.class_id), "assignment_id": str(item.assignment_id)})
-    return created
-
-
-@app.post("/api/v1/review-campaigns/bulk", status_code=201)
-def create_campaigns_bulk(data: CampaignBulkIn, user: CsrfUser, db: Db):
-    items = create_campaigns_for_targets(data, data.targets, user, db)
-    db.commit()
-    return {"items": [{"id": str(x.id), "class_id": str(x.class_id), "assignment_id": str(x.assignment_id), "status": x.status} for x in items], "total": len(items)}
 
 
 @app.get("/api/v1/review-campaigns")
@@ -1046,7 +1060,7 @@ def campaigns(user: CurrentUser, db: Db, class_id: UUID = Query()):
     rows = db.execute(query.order_by(ReviewCampaign.due_at.desc())).all()
     items = []
     for c, a in rows:
-        payload = {"id": str(c.id), "assignment_id": str(a.id), "assignment_title": a.title, "mode": c.mode, "criteria_text": c.criteria_text, "assignment_snapshot_at": c.assignment_snapshot_at, "rubric": c.rubric, "comment_min_length": c.comment_min_length, "due_at": c.due_at, "publish_at": c.publish_at, "require_all": c.require_all, "allow_update": c.allow_update, "status": c.status, "version": c.version, "completed": db.scalar(select(func.count()).select_from(PeerReview).where(PeerReview.campaign_id == c.id, PeerReview.status == "VALID")) or 0}
+        payload = {"id": str(c.id), "assignment_id": str(a.id), "assignment_title": a.title, "mode": c.mode, "criteria_text": c.criteria_text, "assignment_snapshot_at": c.assignment_snapshot_at, "rubric": c.rubric, "comment_min_length": c.comment_min_length, "due_at": c.due_at, "publish_at": c.publish_at, "require_all": c.require_all, "allow_update": c.allow_update, "status": c.status, "grades_generated_at": c.grades_generated_at, "version": c.version, "completed": db.scalar(select(func.count()).select_from(PeerReview).where(PeerReview.campaign_id == c.id, PeerReview.status == "VALID")) or 0}
         if user.role == "STUDENT":
             allocation = db.scalar(select(ReviewAssignment).where(ReviewAssignment.campaign_id == c.id, ReviewAssignment.reviewer_id == user.id))
             payload["pending_count"] = 1 if allocation and allocation.status == "PENDING" else 0
@@ -1054,19 +1068,6 @@ def campaigns(user: CurrentUser, db: Db, class_id: UUID = Query()):
             payload["skip_reason"] = allocation.skip_reason if allocation else None
         items.append(payload)
     return {"items": items, "total": len(items)}
-
-
-@app.get("/api/v1/review-campaigns/{cid}/candidates")
-def candidates(cid: UUID, user: CurrentUser, db: Db):
-    c = db.get(ReviewCampaign, cid)
-    if not c: raise ApiError(404, "CAMPAIGN_NOT_FOUND", "互评活动不存在")
-    if c.status != "ACTIVE" or (c.publish_at and c.publish_at > now()) or c.due_at < now(): raise ApiError(409, "CAMPAIGN_CLOSED", "互评活动未开放或已截止")
-    _, team = require_team(db, c.class_id, user); a = db.get(Assignment, c.assignment_id); people = db.scalars(select(User).join(TeamMember, TeamMember.user_id == User.id).where(TeamMember.team_id == team.id, TeamMember.status == "ACTIVE", User.id != user.id)).all(); items = []
-    for person in people:
-        s = db.scalar(select(Submission).where(Submission.assignment_id == a.id, Submission.owner_user_id == person.id, Submission.status == "SUBMITTED")); v = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s else None
-        files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == v.id)).all() if v else []; reviewed = db.scalar(select(PeerReview).where(PeerReview.campaign_id == c.id, PeerReview.reviewer_id == user.id, PeerReview.reviewee_id == person.id, PeerReview.status == "VALID"))
-        items.append({"user_id": str(person.id), "name": person.display_name, "student_no": person.login_name, "submitted": bool(v), "submitted_at": v.submitted_at if v else None, "files": [{"id": str(f.id), "name": f.original_name, "size": f.size_bytes} for f in files], "reviewed": bool(reviewed), "review": None if not reviewed else {"id": str(reviewed.id), "scores": reviewed.scores, "comment": reviewed.comment, "total_score": reviewed.total_score}})
-    return {"items": items, "campaign": {"id": str(c.id), "assignment_title": a.title, "rubric": c.rubric, "comment_min_length": c.comment_min_length, "due_at": c.due_at, "allow_update": c.allow_update}}
 
 
 @app.get("/api/v1/review-campaigns/{cid}/assignment")
@@ -1099,47 +1100,35 @@ def review(cid: UUID, data: ReviewIn, user: CsrfUser, db: Db):
     c = db.get(ReviewCampaign, cid)
     if not c or c.status != "ACTIVE" or (c.publish_at and c.publish_at > now()) or c.due_at < now(): raise ApiError(409, "CAMPAIGN_CLOSED", "互评活动未开放或已截止")
     require_writable_class(db, user, c.class_id)
-    if c.assignment_snapshot_at is not None:
-        allocation = db.scalar(select(ReviewAssignment).where(ReviewAssignment.campaign_id == c.id, ReviewAssignment.reviewer_id == user.id).with_for_update())
-        if not allocation: raise ApiError(403, "REVIEW_NOT_ASSIGNED", "当前活动没有分配给你的互评任务")
-        if allocation.status == "SKIPPED": raise ApiError(409, "REVIEW_ASSIGNMENT_SKIPPED", allocation.skip_reason or "该互评任务已跳过")
-        if allocation.status != "PENDING": raise ApiError(409, "REVIEW_DUPLICATE", "该互评任务已提交")
-        if data.score is None: raise ApiError(422, "SCORE_REQUIRED", "请填写 0 至 100 的总分")
-        comment = data.comment.strip()
-        if not comment: raise ApiError(422, "COMMENT_REQUIRED", "评语不能为空")
-        existing = db.scalar(select(PeerReview).where(PeerReview.allocation_id == allocation.id))
-        scores = {"score": data.score}
-        if existing:
-            existing.reviewer_id, existing.reviewee_id, existing.submission_version_id = allocation.reviewer_id, allocation.reviewee_id, allocation.submission_version_id
-            existing.scores, existing.total_score, existing.comment, existing.status, existing.invalid_reason = scores, data.score, comment, "VALID", None
-            item = existing
-        else:
-            item = PeerReview(allocation_id=allocation.id, campaign_id=c.id, reviewer_id=allocation.reviewer_id, reviewee_id=allocation.reviewee_id, submission_version_id=allocation.submission_version_id, scores=scores, total_score=data.score, comment=comment)
-            db.add(item)
-        allocation.status = "COMPLETED"
-        notify(db, allocation.reviewee_id, "REVIEW_RECEIVED", f"收到来自 {user.display_name} 的作品评价")
-        db.flush(); audit(db, user, "PEER_REVIEW_SUBMITTED", "peer_review", str(item.id), {"allocation_id": str(allocation.id)}); db.commit()
-        return {"id": str(item.id), "allocation_id": str(allocation.id), "total_score": data.score, "status": item.status}
-    if data.reviewee_id is None or data.scores is None: raise ApiError(422, "LEGACY_REVIEW_INVALID", "旧互评活动需要评价对象和评分维度")
-    if data.reviewee_id == user.id: raise ApiError(422, "SELF_REVIEW_FORBIDDEN", "不能评价自己")
-    _, mine = require_team(db, c.class_id, user); other = membership(db, c.class_id, data.reviewee_id)
-    if not other or other[1].id != mine.id: raise ApiError(403, "CROSS_TEAM_REVIEW_FORBIDDEN", "只能评价本组其他成员")
-    a = db.get(Assignment, c.assignment_id); s = db.scalar(select(Submission).where(Submission.assignment_id == a.id, Submission.owner_user_id == data.reviewee_id, Submission.status == "SUBMITTED")); v = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s else None
-    if not v: raise ApiError(409, "SUBMISSION_REQUIRED", "该成员尚未正式提交作品")
-    if len(data.comment.strip()) < c.comment_min_length: raise ApiError(422, "COMMENT_TOO_SHORT", f"评语至少需要 {c.comment_min_length} 个字")
-    keys = {str(x["key"]) for x in c.rubric}
-    if set(data.scores) != keys or any(n < 0 or n > 100 for n in data.scores.values()): raise ApiError(422, "SCORES_INVALID", "评分维度不完整或超出 0 至 100")
-    total = round(sum(data.scores[str(x["key"])] * float(x["weight"]) / 100 for x in c.rubric), 2); x = db.scalar(select(PeerReview).where(PeerReview.campaign_id == c.id, PeerReview.reviewer_id == user.id, PeerReview.reviewee_id == data.reviewee_id, PeerReview.status == "VALID"))
-    if x and not c.allow_update: raise ApiError(409, "REVIEW_DUPLICATE", "已提交对该成员的评价")
-    if x: x.scores, x.total_score, x.comment, x.submission_version_id = data.scores, total, data.comment.strip(), v.id
-    else: x = PeerReview(campaign_id=c.id, reviewer_id=user.id, reviewee_id=data.reviewee_id, submission_version_id=v.id, scores=data.scores, total_score=total, comment=data.comment.strip()); db.add(x)
-    notify(db, data.reviewee_id, "REVIEW_RECEIVED", f"收到来自 {user.display_name} 的作品评价"); db.flush(); audit(db, user, "PEER_REVIEW_SUBMITTED", "peer_review", str(x.id)); db.commit(); return {"id": str(x.id), "total_score": total, "status": x.status}
+    allocation = db.scalar(select(ReviewAssignment).where(ReviewAssignment.campaign_id == c.id, ReviewAssignment.reviewer_id == user.id).with_for_update())
+    if not allocation: raise ApiError(403, "REVIEW_NOT_ASSIGNED", "当前活动没有分配给你的互评任务")
+    if allocation.status == "SKIPPED": raise ApiError(409, "REVIEW_ASSIGNMENT_SKIPPED", allocation.skip_reason or "该互评任务已跳过")
+    if allocation.status not in {"PENDING", "COMPLETED"}: raise ApiError(409, "REVIEW_DUPLICATE", "该互评任务已提交")
+    if allocation.status == "COMPLETED" and not c.allow_update: raise ApiError(409, "REVIEW_UPDATE_DISABLED", "当前互评活动不允许修改已提交评价")
+    if data.score is None: raise ApiError(422, "SCORE_REQUIRED", "请填写 0 至 100 的总分")
+    comment = data.comment.strip()
+    if not comment: raise ApiError(422, "COMMENT_REQUIRED", "评语不能为空")
+    existing = db.scalar(select(PeerReview).where(PeerReview.allocation_id == allocation.id))
+    updating = allocation.status == "COMPLETED"
+    if updating and not existing: raise ApiError(409, "REVIEW_UPDATE_INVALID", "已提交评价记录不存在，请联系教师处理")
+    scores = {"score": data.score}
+    if existing:
+        existing.reviewer_id, existing.reviewee_id, existing.submission_version_id = allocation.reviewer_id, allocation.reviewee_id, allocation.submission_version_id
+        existing.scores, existing.total_score, existing.comment, existing.status, existing.invalid_reason = scores, data.score, comment, "VALID", None
+        item = existing
+    else:
+        item = PeerReview(allocation_id=allocation.id, campaign_id=c.id, reviewer_id=allocation.reviewer_id, reviewee_id=allocation.reviewee_id, submission_version_id=allocation.submission_version_id, scores=scores, total_score=data.score, comment=comment)
+        db.add(item)
+    allocation.status = "COMPLETED"
+    if not updating: notify(db, allocation.reviewee_id, "REVIEW_RECEIVED", f"收到来自 {user.display_name} 的作品评价")
+    db.flush(); audit(db, user, "PEER_REVIEW_UPDATED" if updating else "PEER_REVIEW_SUBMITTED", "peer_review", str(item.id), {"allocation_id": str(allocation.id)}); db.commit()
+    return {"id": str(item.id), "allocation_id": str(allocation.id), "total_score": data.score, "status": item.status, "updated": updating}
 
 
 @app.get("/api/v1/peer-reviews/received")
 def received(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id); reviewer = aliased(User)
-    result_visible = or_(and_(ReviewCampaign.assignment_snapshot_at.is_not(None), ReviewCampaign.due_at <= now()), and_(ReviewCampaign.assignment_snapshot_at.is_(None), or_(ReviewCampaign.publish_at.is_(None), ReviewCampaign.publish_at <= now())))
+    result_visible = or_(ReviewCampaign.due_at <= now(), ReviewCampaign.status == "CLOSED")
     rows = db.execute(select(PeerReview, Assignment, reviewer).join(ReviewCampaign, ReviewCampaign.id == PeerReview.campaign_id).join(Assignment, Assignment.id == ReviewCampaign.assignment_id).join(reviewer, reviewer.id == PeerReview.reviewer_id).where(PeerReview.reviewee_id == user.id, PeerReview.status == "VALID", ReviewCampaign.class_id == class_id, result_visible)).all()
     return {"items": [{"id": str(r.id), "campaign_id": str(r.campaign_id), "assignment_title": a.title, "reviewer_name": p.display_name, "scores": r.scores, "total_score": r.total_score, "comment": r.comment, "created_at": r.created_at} for r, a, p in rows]}
 
@@ -1158,10 +1147,15 @@ def invalidate(rid: UUID, data: ReasonIn, user: CsrfUser, db: Db):
     campaign = db.get(ReviewCampaign, x.campaign_id)
     if not campaign or not user_class(db, user, campaign.class_id): raise ApiError(404, "REVIEW_NOT_FOUND", "评价不存在")
     require_writable_class(db, user, campaign.class_id)
+    grade = db.scalar(select(Grade).where(Grade.peer_review_id == x.id))
+    if grade and grade.status == "PUBLISHED": raise ApiError(409, "PUBLISHED_GRADE_LOCKED", "该评价已形成发布成绩，不能再作废")
     x.status, x.invalid_reason = "INVALID", data.reason
     if x.allocation_id:
         allocation = db.get(ReviewAssignment, x.allocation_id)
         if allocation: allocation.status = "PENDING"
+    if grade:
+        grade.peer_review_id, grade.peer_score, grade.draft_score, grade.status = None, None, None, "PENDING"
+        grade.version += 1
     audit(db, user, "PEER_REVIEW_INVALIDATED", "peer_review", str(x.id), {"reason": data.reason}); db.commit(); return Response(status_code=204)
 
 
@@ -1178,37 +1172,129 @@ def campaign_reviews(cid: UUID, user: CurrentUser, db: Db):
 def grades(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id)
     if user.role == "STUDENT": require_team(db, class_id, user)
-    rows = db.execute(select(Grade, Assignment).join(Assignment).where(Assignment.class_id == class_id).order_by(Grade.updated_at.desc())).all(); items = []
-    team = membership(db, class_id, user.id)[1] if user.role == "STUDENT" else None
-    for g, a in rows:
-        if user.role == "STUDENT" and (g.status != "PUBLISHED" or (g.subject_user_id != user.id and g.subject_team_id != team.id)): continue
-        subject = db.get(User, g.subject_user_id) if g.subject_user_id else db.get(Team, g.subject_team_id)
-        items.append({"id": str(g.id), "assignment_id": str(a.id), "assignment_title": a.title, "subject_id": str(subject.id), "subject_type": "USER" if isinstance(subject, User) else "TEAM", "subject_name": subject.display_name if isinstance(subject, User) else subject.name, "score": g.score, "comment": g.comment, "status": g.status, "version": g.version})
+    query = select(Grade, Assignment, GradeCoefficient).select_from(Grade).join(Assignment, Assignment.id == Grade.assignment_id).outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id).where(Assignment.class_id == class_id)
+    if user.role == "STUDENT": query = query.where(Grade.subject_user_id == user.id, Grade.status == "PUBLISHED")
+    rows = db.execute(query.order_by(Grade.updated_at.desc())).all(); items = []
+    for g, a, coefficient in rows:
+        person = db.get(User, g.subject_user_id)
+        team_item = db.get(Team, coefficient.team_id) if coefficient else None
+        items.append({"id": str(g.id), "assignment_id": str(a.id), "assignment_title": a.title, "subject_id": str(person.id), "subject_name": person.display_name, "student_no": person.login_name, "team_name": team_item.name if team_item else "未分组", "peer_score": g.peer_score, "coefficient": coefficient.published_value if coefficient else None, "score": g.score, "status": g.status, "version": g.version})
     return {"items": items, "total": len(items)}
 
 
-@app.post("/api/v1/grades", status_code=201)
-def save_grade(data: GradeIn, user: CsrfUser, db: Db):
-    teacher(user); a = db.get(Assignment, data.assignment_id)
-    if not a or not user_class(db, user, a.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-    require_writable_class(db, user, a.class_id)
-    if bool(data.subject_user_id) == bool(data.subject_team_id): raise ApiError(422, "GRADE_SUBJECT_INVALID", "评分对象必须是一个学生或一个小组")
-    if a.submitter_type == "INDIVIDUAL":
-        valid = data.subject_user_id and db.scalar(select(ClassMember.id).where(ClassMember.class_id == a.class_id, ClassMember.user_id == data.subject_user_id, ClassMember.status == "ACTIVE"))
-    else:
-        valid = data.subject_team_id and db.scalar(select(Team.id).where(Team.id == data.subject_team_id, Team.class_id == a.class_id, Team.status == "ACTIVE"))
-    if not valid: raise ApiError(422, "GRADE_SUBJECT_INVALID", "评分对象与作业提交类型不匹配")
-    q = select(Grade).where(Grade.assignment_id == a.id); q = q.where(Grade.subject_user_id == data.subject_user_id) if data.subject_user_id else q.where(Grade.subject_team_id == data.subject_team_id); g = db.scalar(q)
-    if g:
-        if g.status == "PUBLISHED" and (g.score != data.score or g.comment != data.comment) and len(data.reason.strip()) < 2: raise ApiError(422, "GRADE_CHANGE_REASON_REQUIRED", "修改已发布成绩时必须填写原因")
-        db.add(GradeRevision(grade_id=g.id, changed_by=user.id, score=g.score, comment=g.comment, status=g.status, reason=data.reason.strip()))
-        g.score, g.comment, g.status, g.version = data.score, data.comment, "PUBLISHED" if data.publish else "DRAFT", g.version + 1
-    else: g = Grade(assignment_id=a.id, subject_user_id=data.subject_user_id, subject_team_id=data.subject_team_id, score=data.score, comment=data.comment, status="PUBLISHED" if data.publish else "DRAFT"); db.add(g)
-    db.flush();
-    recipients = [data.subject_user_id] if data.subject_user_id else list(db.scalars(select(TeamMember.user_id).where(TeamMember.team_id == data.subject_team_id, TeamMember.status == "ACTIVE")))
-    if data.publish:
-        for recipient in recipients: notify(db, recipient, "GRADE_PUBLISHED", f"成绩已发布：{a.title}")
-    audit(db, user, "GRADE_SAVED", "grade", str(g.id), {"reason": data.reason.strip(), "published": data.publish}); db.commit(); return {"id": str(g.id), "score": g.score, "status": g.status, "version": g.version}
+@app.get("/api/v1/grades/assignments")
+def grade_assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
+    teacher(user); require_class(db, user, class_id)
+    rows = db.execute(
+        select(ReviewCampaign, Assignment)
+        .join(Assignment, Assignment.id == ReviewCampaign.assignment_id)
+        .where(ReviewCampaign.class_id == class_id, ReviewCampaign.assignment_snapshot_at.is_not(None))
+        .order_by(ReviewCampaign.due_at.desc())
+    ).all()
+    items = []
+    for campaign, assignment in rows:
+        grade_rows = db.scalars(select(Grade).where(Grade.campaign_id == campaign.id)).all()
+        items.append({
+            "id": str(assignment.id), "title": assignment.title, "campaign_id": str(campaign.id), "due_at": campaign.due_at,
+            "campaign_status": campaign.status, "grades_generated_at": campaign.grades_generated_at,
+            "total": len(grade_rows), "published": sum(x.status == "PUBLISHED" for x in grade_rows),
+            "pending": sum(x.peer_score is None for x in grade_rows),
+            "ready": sum(x.peer_score is not None and x.draft_score is not None for x in grade_rows),
+        })
+    return {"items": items, "total": len(items)}
+
+
+def require_grade_assignment(db: Session, user: User, assignment_id: UUID) -> tuple[Assignment, ReviewCampaign]:
+    assignment = db.get(Assignment, assignment_id)
+    if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    campaign = db.scalar(select(ReviewCampaign).where(ReviewCampaign.assignment_id == assignment_id, ReviewCampaign.assignment_snapshot_at.is_not(None)))
+    if not campaign: raise ApiError(404, "GRADEBOOK_NOT_FOUND", "该作业没有一对一互评成绩")
+    return assignment, campaign
+
+
+@app.get("/api/v1/grades/assignments/{assignment_id}")
+def grade_assignment_detail(assignment_id: UUID, user: CurrentUser, db: Db):
+    teacher(user); assignment, campaign = require_grade_assignment(db, user, assignment_id)
+    rows = db.execute(
+        select(Grade, User, GradeCoefficient, Team)
+        .join(User, User.id == Grade.subject_user_id)
+        .outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
+        .outerjoin(Team, Team.id == GradeCoefficient.team_id)
+        .where(Grade.assignment_id == assignment_id)
+        .order_by(Team.name, User.login_name)
+    ).all()
+    items = []
+    for grade, person, coefficient, team_item in rows:
+        changed = bool(grade.status == "PUBLISHED" and grade.draft_score is not None and grade.draft_score != grade.score)
+        if grade.peer_score is None: display_status = "PENDING_REVIEW"
+        elif not coefficient or coefficient.draft_value is None: display_status = "PENDING_COEFFICIENT"
+        elif changed: display_status = "CHANGED"
+        else: display_status = grade.status
+        items.append({
+            "id": str(grade.id), "user_id": str(person.id), "student_no": person.login_name, "student_name": person.display_name,
+            "team_id": str(team_item.id) if team_item else None, "team_name": team_item.name if team_item else "未分组",
+            "peer_score": grade.peer_score, "draft_coefficient": coefficient.draft_value if coefficient else None,
+            "published_coefficient": coefficient.published_value if coefficient else None, "draft_score": grade.draft_score,
+            "score": grade.score, "status": display_status, "has_unpublished_changes": changed,
+        })
+    coefficients = db.execute(
+        select(GradeCoefficient, Team).join(Team, Team.id == GradeCoefficient.team_id)
+        .where(GradeCoefficient.assignment_id == assignment_id).order_by(Team.name)
+    ).all()
+    groups = [{"team_id": str(team_item.id), "team_name": team_item.name, "draft_value": item.draft_value, "published_value": item.published_value, "version": item.version, "member_count": sum(row[0].coefficient_id == item.id for row in rows)} for item, team_item in coefficients]
+    return {
+        "assignment": {"id": str(assignment.id), "title": assignment.title, "campaign_status": campaign.status, "grades_generated_at": campaign.grades_generated_at},
+        "groups": groups, "items": items, "total": len(items),
+        "summary": {"publishable": sum(item["peer_score"] is not None and item["draft_score"] is not None for item in items), "pending": sum(item["peer_score"] is None for item in items), "changed": sum(item["has_unpublished_changes"] for item in items), "published": sum(item["score"] is not None for item in items)},
+    }
+
+
+@app.patch("/api/v1/grades/assignments/{assignment_id}/teams/{team_id}/coefficient")
+def update_grade_coefficient(assignment_id: UUID, team_id: UUID, data: CoefficientIn, user: CsrfUser, db: Db):
+    teacher(user); assignment, campaign = require_grade_assignment(db, user, assignment_id); require_writable_class(db, user, assignment.class_id)
+    if campaign.grades_generated_at is None: raise ApiError(409, "GRADES_NOT_GENERATED", "互评结束后才能设置成绩系数")
+    coefficient = db.scalar(select(GradeCoefficient).where(GradeCoefficient.assignment_id == assignment_id, GradeCoefficient.team_id == team_id).with_for_update())
+    if not coefficient: raise ApiError(404, "GRADE_COEFFICIENT_NOT_FOUND", "该作业没有此小组的系数记录")
+    if coefficient.version != data.version: raise ApiError(409, "GRADE_COEFFICIENT_VERSION_CONFLICT", "小组系数已被修改，请刷新后重试", {"current_version": coefficient.version})
+    coefficient.draft_value, coefficient.updated_by, coefficient.version = data.coefficient, user.id, coefficient.version + 1
+    grade_rows = db.scalars(select(Grade).where(Grade.coefficient_id == coefficient.id).with_for_update()).all()
+    for grade in grade_rows:
+        grade.draft_score = final_score(grade.peer_score, data.coefficient) if grade.peer_score is not None else None
+        if grade.status != "PUBLISHED": grade.status = "DRAFT" if grade.draft_score is not None else "PENDING"
+        grade.version += 1
+    audit(db, user, "GRADE_COEFFICIENT_UPDATED", "assignment", str(assignment_id), {"team_id": str(team_id), "coefficient": str(data.coefficient)}); db.commit()
+    return {"team_id": str(team_id), "draft_value": coefficient.draft_value, "published_value": coefficient.published_value, "version": coefficient.version}
+
+
+@app.post("/api/v1/grades/assignments/{assignment_id}/publish")
+def publish_assignment_grades(assignment_id: UUID, data: GradePublishIn, user: CsrfUser, db: Db):
+    teacher(user); assignment, campaign = require_grade_assignment(db, user, assignment_id); require_writable_class(db, user, assignment.class_id)
+    if campaign.grades_generated_at is None: raise ApiError(409, "GRADES_NOT_GENERATED", "互评结束后才能发布成绩")
+    rows = db.execute(
+        select(Grade, GradeCoefficient)
+        .join(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
+        .where(Grade.assignment_id == assignment_id, Grade.peer_score.is_not(None), Grade.draft_score.is_not(None))
+        .with_for_update()
+    ).all()
+    changed = [(grade, coefficient) for grade, coefficient in rows if grade.status == "PUBLISHED" and grade.score != grade.draft_score]
+    if changed and len(data.reason.strip()) < 2: raise ApiError(422, "GRADE_CHANGE_REASON_REQUIRED", "修改已发布成绩时必须填写原因")
+    if not rows: raise ApiError(409, "NO_PUBLISHABLE_GRADES", "当前没有可发布的成绩")
+    published = 0
+    touched_coefficients = set()
+    for grade, coefficient in rows:
+        if grade.status == "PUBLISHED" and grade.score == grade.draft_score: continue
+        if grade.status == "PUBLISHED":
+            db.add(GradeRevision(grade_id=grade.id, changed_by=user.id, peer_score=grade.peer_score, coefficient=coefficient.published_value, score=grade.score, reason=data.reason.strip()))
+        grade.score, grade.status, grade.version = grade.draft_score, "PUBLISHED", grade.version + 1
+        touched_coefficients.add(coefficient.id)
+        notify(db, grade.subject_user_id, "GRADE_PUBLISHED", f"成绩已发布：{assignment.title}")
+        published += 1
+    for coefficient in {item for _, item in rows if item.id in touched_coefficients}:
+        coefficient.published_value = coefficient.draft_value
+        coefficient.version += 1
+    audit(db, user, "GRADES_PUBLISHED", "assignment", str(assignment_id), {"published": published, "reason": data.reason.strip()}); db.commit()
+    pending = db.scalar(select(func.count()).select_from(Grade).where(Grade.assignment_id == assignment_id, or_(Grade.peer_score.is_(None), Grade.draft_score.is_(None)))) or 0
+    return {"published": published, "pending": pending, "changed": len(changed)}
 
 
 @app.get("/api/v1/grades/{gid}/revisions")
@@ -1216,7 +1302,7 @@ def grade_revisions(gid: UUID, user: CurrentUser, db: Db):
     teacher(user); grade = db.get(Grade, gid); assignment = db.get(Assignment, grade.assignment_id) if grade else None
     if not grade or not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "GRADE_NOT_FOUND", "成绩不存在")
     rows = db.scalars(select(GradeRevision).where(GradeRevision.grade_id == gid).order_by(GradeRevision.created_at.desc())).all()
-    return {"items": [{"id": str(item.id), "score": item.score, "comment": item.comment, "status": item.status, "reason": item.reason, "created_at": item.created_at} for item in rows]}
+    return {"items": [{"id": str(item.id), "peer_score": item.peer_score, "coefficient": item.coefficient, "score": item.score, "reason": item.reason, "created_at": item.created_at} for item in rows]}
 
 
 @app.get("/api/v1/notifications")
@@ -1234,7 +1320,7 @@ def audit_logs(user: CurrentUser, db: Db, page: int = Query(1, ge=1), page_size:
     teacher(user); total = db.scalar(select(func.count()).select_from(AuditLog)) or 0; rows = db.execute(select(AuditLog, User).outerjoin(User).order_by(AuditLog.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).all(); return {"items": [{"id": str(x.id), "actor": p.display_name if p else "系统", "action": x.action, "object_type": x.object_type, "object_id": x.object_id, "changes": x.changes, "created_at": x.created_at} for x, p in rows], "page": page, "page_size": page_size, "total": total}
 
 
-def export_rows(kind: str, class_id: UUID, user: User, db: Session) -> list[list]:
+def export_rows(kind: str, class_id: UUID, user: User, db: Session, assignment_id: UUID | None = None) -> list[list]:
     rows: list[list] = []
     if kind == "members":
         rows.append(["学号", "姓名", "状态", "小组"])
@@ -1246,10 +1332,25 @@ def export_rows(kind: str, class_id: UUID, user: User, db: Session) -> list[list
         for team in db.scalars(select(Team).where(Team.class_id == class_id)):
             item = team_json(db, team, user); rows.append([item["name"], item["leader_name"], item["member_count"], item["topic"]["name"] if item["topic"] else "", item["status"]])
     elif kind == "grades":
-        rows.append(["作业", "评分对象", "分数", "状态", "评语"])
-        for grade, assignment in db.execute(select(Grade, Assignment).join(Assignment).where(Assignment.class_id == class_id)):
-            subject = db.get(User, grade.subject_user_id) if grade.subject_user_id else db.get(Team, grade.subject_team_id)
-            rows.append([assignment.title, subject.display_name if isinstance(subject, User) else subject.name, grade.score, grade.status, grade.comment])
+        if assignment_id is None: raise ApiError(422, "ASSIGNMENT_REQUIRED", "导出成绩时必须选择单次作业")
+        assignment = db.get(Assignment, assignment_id)
+        if not assignment or assignment.class_id != class_id: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+        rows.append(["作业", "学号", "姓名", "小组", "互评分", "小组系数", "最终分", "状态"])
+        grade_rows = db.execute(
+            select(Grade, User, GradeCoefficient, Team)
+            .join(User, User.id == Grade.subject_user_id)
+            .outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
+            .outerjoin(Team, Team.id == GradeCoefficient.team_id)
+            .where(Grade.assignment_id == assignment_id)
+            .order_by(Team.name, User.login_name)
+        ).all()
+        for grade, person, coefficient, team_item in grade_rows:
+            if grade.peer_score is None: status = "待处理"
+            elif not coefficient or coefficient.draft_value is None: status = "待填系数"
+            elif grade.status == "PUBLISHED" and grade.draft_score != grade.score: status = "有未发布修改"
+            elif grade.status == "PUBLISHED": status = "已发布"
+            else: status = "待发布"
+            rows.append([assignment.title, person.login_name, person.display_name, team_item.name if team_item else "未分组", grade.peer_score, coefficient.draft_value if coefficient else None, grade.draft_score, status])
     else:
         rows.append(["作业", "评价人", "被评价人", "总分", "状态", "评语"])
         for review, assignment in db.execute(select(PeerReview, Assignment).join(ReviewCampaign, ReviewCampaign.id == PeerReview.campaign_id).join(Assignment).where(ReviewCampaign.class_id == class_id)):
@@ -1258,17 +1359,19 @@ def export_rows(kind: str, class_id: UUID, user: User, db: Session) -> list[list
 
 
 @app.get("/api/v1/exports/{kind}.csv")
-def export_csv(kind: Literal["members", "teams", "grades", "reviews"], user: CurrentUser, db: Db, class_id: UUID = Query()):
-    teacher(user); require_class(db, user, class_id); out = io.StringIO(); writer = csv.writer(out); writer.writerows(export_rows(kind, class_id, user, db))
-    return PlainTextResponse("\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{kind}.csv"'})
+def export_csv(kind: Literal["members", "teams", "grades", "reviews"], user: CurrentUser, db: Db, class_id: UUID = Query(), assignment_id: UUID | None = Query(None)):
+    teacher(user); require_class(db, user, class_id); out = io.StringIO(); writer = csv.writer(out); writer.writerows(export_rows(kind, class_id, user, db, assignment_id))
+    suffix = f"-{assignment_id}" if kind == "grades" else ""
+    return PlainTextResponse("\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{kind}{suffix}.csv"'})
 
 
 @app.get("/api/v1/exports/{kind}.xlsx")
-def export_xlsx(kind: Literal["members", "teams", "grades", "reviews"], user: CurrentUser, db: Db, class_id: UUID = Query()):
+def export_xlsx(kind: Literal["members", "teams", "grades", "reviews"], user: CurrentUser, db: Db, class_id: UUID = Query(), assignment_id: UUID | None = Query(None)):
     teacher(user); require_class(db, user, class_id); workbook = Workbook(); sheet = workbook.active; sheet.title = "导出数据"
-    for row in export_rows(kind, class_id, user, db): sheet.append(row)
-    target = settings.file_root / "exports" / f"{kind}-{class_id}.xlsx"; target.parent.mkdir(parents=True, exist_ok=True); workbook.save(target)
-    return FileResponse(target, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=f"{kind}.xlsx")
+    for row in export_rows(kind, class_id, user, db, assignment_id): sheet.append(row)
+    suffix = f"-{assignment_id}" if kind == "grades" else ""
+    target = settings.file_root / "exports" / f"{kind}-{class_id}{suffix}.xlsx"; target.parent.mkdir(parents=True, exist_ok=True); workbook.save(target)
+    return FileResponse(target, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=f"{kind}{suffix}.xlsx")
 
 
 @app.patch("/api/v1/classes/{cid}")
@@ -1431,38 +1534,22 @@ def submission_board(aid: UUID, user: CurrentUser, db: Db):
     return {"items": items, "total": len(items)}
 
 
-@app.patch("/api/v1/review-campaigns/{cid}")
-def update_campaign(cid: UUID, data: CampaignUpdateIn, user: CsrfUser, db: Db):
-    teacher(user); campaign = db.scalar(select(ReviewCampaign).where(ReviewCampaign.id == cid).with_for_update())
-    if not campaign or not user_class(db, user, campaign.class_id): raise ApiError(404, "CAMPAIGN_NOT_FOUND", "互评活动不存在")
-    require_writable_class(db, user, campaign.class_id)
-    if campaign.version != data.version: raise ApiError(409, "CAMPAIGN_VERSION_CONFLICT", "互评活动已被修改，请刷新后重试", {"current_version": campaign.version})
-    if data.publish_at and data.publish_at >= data.due_at: raise ApiError(422, "CAMPAIGN_TIME_INVALID", "公开时间必须早于截止时间")
-    if abs(sum(float(x.get("weight", 0)) for x in data.rubric) - 100) > .01 or any(not x.get("key") or not x.get("label") for x in data.rubric): raise ApiError(422, "RUBRIC_INVALID", "评价维度权重合计必须为 100")
-    has_reviews = bool(db.scalar(select(PeerReview.id).where(PeerReview.campaign_id == cid, PeerReview.status == "VALID").limit(1)))
-    if has_reviews and data.rubric != campaign.rubric: raise ApiError(409, "CAMPAIGN_RUBRIC_LOCKED", "已有评价后不能修改评分维度或权重")
-    campaign.rubric, campaign.comment_min_length = data.rubric, data.comment_min_length
-    campaign.due_at, campaign.publish_at = data.due_at, data.publish_at
-    campaign.require_all, campaign.allow_update = data.require_all, data.allow_update
-    campaign.version += 1
-    audit(db, user, "REVIEW_CAMPAIGN_UPDATED", "review_campaign", str(cid)); db.commit()
-    return {"id": str(campaign.id), "version": campaign.version, "status": campaign.status}
-
-
 @app.post("/api/v1/review-campaigns/{cid}/close")
 def close_campaign(cid: UUID, user: CsrfUser, db: Db):
     teacher(user); campaign = db.scalar(select(ReviewCampaign).where(ReviewCampaign.id == cid).with_for_update())
     if not campaign or not user_class(db, user, campaign.class_id): raise ApiError(404, "CAMPAIGN_NOT_FOUND", "互评活动不存在")
     require_writable_class(db, user, campaign.class_id)
     if campaign.status == "CLOSED":
-        return {"id": str(campaign.id), "due_at": campaign.due_at, "status": campaign.status, "version": campaign.version}
+        if campaign.grades_generated_at is None:
+            finalize_campaign(db, campaign, now())
+            db.commit()
+        return {"id": str(campaign.id), "assignment_id": str(campaign.assignment_id), "due_at": campaign.due_at, "status": campaign.status, "grades_generated_at": campaign.grades_generated_at, "version": campaign.version}
     if campaign.status != "ACTIVE": raise ApiError(409, "CAMPAIGN_NOT_ACTIVE", "当前互评活动不能提前截止")
-    campaign.status = "CLOSED"
     campaign.due_at = now()
-    campaign.version += 1
+    finalize_campaign(db, campaign, campaign.due_at)
     audit(db, user, "REVIEW_CAMPAIGN_CLOSED", "review_campaign", str(cid), {"due_at": campaign.due_at.isoformat()})
     db.commit()
-    return {"id": str(campaign.id), "due_at": campaign.due_at, "status": campaign.status, "version": campaign.version}
+    return {"id": str(campaign.id), "assignment_id": str(campaign.assignment_id), "due_at": campaign.due_at, "status": campaign.status, "grades_generated_at": campaign.grades_generated_at, "version": campaign.version}
 
 
 @app.get("/api/v1/files/{fid}/preview")

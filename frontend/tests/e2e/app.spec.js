@@ -56,7 +56,6 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   const campaigns = { 'class-1': [], 'class-2': [], 'class-3': [] }
   let assignmentPayload
   let assignmentPatch
-  let campaignPayload
   let classPatch
   let assignmentClosed = false
   let assignmentRetracted = false
@@ -86,7 +85,7 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
     if (/^\/assignments\/[^/]+\/submissions$/.test(path)) return json({ items: [], total: 0 })
     if (path === '/assignments/bulk' && request.method() === 'POST') {
       assignmentPayload = request.postDataJSON()
-      const items = assignmentPayload.class_ids.map((classId, index) => ({ id: `assignment-${index + 1}`, class_id: classId, title: assignmentPayload.title, description: assignmentPayload.description, submitter_type: assignmentPayload.submitter_type, due_at: assignmentPayload.due_at, status: 'DRAFT', version: 1 }))
+      const items = assignmentPayload.class_ids.map((classId, index) => ({ id: `assignment-${index + 1}`, class_id: classId, title: assignmentPayload.title, description: assignmentPayload.description, submitter_type: assignmentPayload.submitter_type, due_at: assignmentPayload.due_at, auto_review_enabled: assignmentPayload.auto_review_enabled, auto_review_mode: assignmentPayload.auto_review_mode, auto_review_criteria_text: assignmentPayload.auto_review_criteria_text, auto_review_due_at: assignmentPayload.auto_review_due_at, auto_review_status: 'PENDING', status: 'DRAFT', version: 1 }))
       items.forEach(item => { assignments[item.class_id].push(item); classes.find(course => course.id === item.class_id).assignment_count += 1 })
       return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ items, total: items.length }) })
     }
@@ -96,7 +95,9 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
     }
     const closeAssignmentMatch = path.match(/^\/assignments\/([^/]+)\/close$/)
     if (closeAssignmentMatch && request.method() === 'POST') {
-      const item = Object.values(assignments).flat().find(row => row.id === closeAssignmentMatch[1]); Object.assign(item, { status: 'CLOSED', due_at: new Date().toISOString(), version: item.version + 1 }); assignmentClosed = true; return json(item)
+      const item = Object.values(assignments).flat().find(row => row.id === closeAssignmentMatch[1]); Object.assign(item, { status: 'CLOSED', due_at: new Date().toISOString(), version: item.version + 1 }); assignmentClosed = true
+      if (!campaigns[item.class_id].some(record => record.assignment_id === item.id)) campaigns[item.class_id].push({ id: 'campaign-1', assignment_id: item.id, assignment_title: item.title, mode: item.auto_review_mode, criteria_text: item.auto_review_criteria_text, due_at: item.auto_review_due_at, status: 'ACTIVE', grades_generated_at: null, version: 1 })
+      return json(item)
     }
     const retractAssignmentMatch = path.match(/^\/assignments\/([^/]+)\/retract$/)
     if (retractAssignmentMatch && request.method() === 'POST') {
@@ -112,12 +113,6 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
         if (index >= 0) items.splice(index, 1)
       }
       assignmentDeleted = true; return route.fulfill({ status: 204 })
-    }
-    if (path === '/review-campaigns' && request.method() === 'POST') {
-      campaignPayload = request.postDataJSON()
-      const item = { id: 'campaign-1', ...campaignPayload, assignment_title: Object.values(assignments).flat().find(row => row.id === campaignPayload.assignment_id).title, status: 'ACTIVE', version: 1 }
-      campaigns['class-1'].push(item)
-      return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ...item, allocated: 20, skipped: 0, warnings: [] }) })
     }
     if (path === '/review-campaigns/campaign-1/stats') return json({ assigned_count: 20, completed_count: 0, skipped_count: 0, completion_rate: 0 })
     if (path === '/review-campaigns/campaign-1/reviews') return json({ items: [], total: 0 })
@@ -155,7 +150,7 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await assignmentDialog.locator('.ant-form-item').filter({ hasText: '标题' }).locator('input').fill('跨班需求报告')
   await assignmentDialog.locator('.ant-form-item').filter({ hasText: '截止时间' }).locator('input').fill('2027-12-01T12:00')
   await assignmentDialog.locator('.tiptap').fill('完成需求分析并提交。')
-  await assignmentDialog.locator('.ant-form-item').filter({ hasText: '截止后自动发布互评' }).getByRole('switch').click()
+  await assignmentDialog.locator('.ant-form-item').filter({ hasText: '启用互评' }).getByRole('switch').click()
   await assignmentDialog.locator('.ant-form-item').filter({ hasText: '互评标准' }).locator('textarea').fill('按完整性与清晰度评分。')
   await assignmentDialog.locator('.ant-form-item').filter({ hasText: '互评截止时间' }).locator('input').fill('2027-12-10T12:00')
   await assignmentDialog.locator('.modal-actions .ant-btn-primary').click()
@@ -169,6 +164,9 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await expect(assignmentDetail).toBeVisible()
   await expect(assignmentDetail.getByRole('tab', { name: '详情' })).toBeVisible()
   await expect(assignmentDetail.getByRole('tab', { name: '提交情况' })).toBeVisible()
+  await expect(assignmentDetail.getByRole('tab', { name: '互评管理' })).toBeVisible()
+  await expect(assignmentDetail.getByRole('tab', { name: '成绩管理' })).toBeVisible()
+  await expect(page.locator('nav.top-nav').getByRole('button', { name: '互评管理' })).toHaveCount(0)
   await assignmentDetail.getByRole('tab', { name: '提交情况' }).click()
   await expect(assignmentDetail.getByText('提交概览')).toBeVisible()
   await assignmentDetail.getByRole('tab', { name: '详情' }).click()
@@ -183,21 +181,10 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await page.getByRole('button', { name: '确认截止' }).click()
   await expect.poll(() => assignmentClosed).toBe(true)
 
-  await page.getByRole('button', { name: '互评管理' }).click()
-  await page.getByRole('button', { name: '开启互评' }).click()
-  const campaignDialog = page.getByRole('dialog', { name: '创建一对一互评' })
-  await campaignDialog.locator('.ant-form-item').filter({ hasText: '个人作业' }).locator('.ant-select-selector').click()
-  await page.locator('.ant-select-dropdown:visible .ant-select-item-option').first().click()
-  await campaignDialog.locator('.ant-form-item').filter({ hasText: '互评标准' }).locator('textarea').fill('按完整性与清晰度评分。')
-  await campaignDialog.locator('.ant-form-item').filter({ hasText: '互评截止时间' }).locator('input').fill('2027-12-10T12:00')
-  await campaignDialog.locator('.ant-modal-footer .ant-btn-primary').click()
-  await expect.poll(() => campaignPayload?.mode).toBe('TEAM')
-  await page.locator('.review-card').filter({ hasText: '跨班需求报告' }).getByRole('button', { name: '查看统计' }).click()
-  await expect(page).toHaveURL(/\/reviews\/campaign-/)
-  const campaignDetail = page.locator('.assignment-workspace')
-  await expect(page.getByRole('heading', { name: '互评概览' })).toBeVisible()
-  await expect(page.locator('.ant-modal-wrap:visible').filter({ hasText: '已分配' })).toHaveCount(0)
-  await campaignDetail.getByRole('button', { name: '提前截止' }).click()
+  await assignmentDetail.getByRole('tab', { name: '互评管理' }).click()
+  await expect(page).toHaveURL(/tab=reviews/)
+  await expect(assignmentDetail).toContainText('完成情况')
+  await assignmentDetail.getByRole('button', { name: '提前截止互评' }).click()
   await page.getByRole('button', { name: '确认截止' }).click()
   await expect.poll(() => campaignClosed).toBe(true)
 
@@ -216,6 +203,78 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await disposableRow.getByRole('button').last().click()
   await page.getByRole('button', { name: '确认删除' }).click()
   await expect(page.locator('.class-list-panel')).not.toContainText('待删除空班')
+})
+
+test('teacher exports centrally and manages grades from assignment detail', async ({ page }) => {
+  let coefficientPayload
+  let publishPayload
+  const group = { team_id: 'team-1', team_name: '第一小组', draft_value: null, published_value: null, version: 1, member_count: 2 }
+  const detail = {
+    assignment: { id: 'assignment-grade', title: '需求分析报告', campaign_status: 'CLOSED', grades_generated_at: '2026-09-16T08:00:00Z' },
+    groups: [group],
+    items: [
+      { id: 'grade-1', student_no: '20260001', student_name: '张同学', team_id: 'team-1', team_name: '第一小组', peer_score: 90, draft_coefficient: null, published_coefficient: null, draft_score: null, score: null, status: 'PENDING_COEFFICIENT', has_unpublished_changes: false },
+      { id: 'grade-2', student_no: '20260002', student_name: '李同学', team_id: 'team-1', team_name: '第一小组', peer_score: null, draft_coefficient: null, published_coefficient: null, draft_score: null, score: null, status: 'PENDING_REVIEW', has_unpublished_changes: false }
+    ],
+    total: 2,
+    summary: { publishable: 0, pending: 1, changed: 0, published: 0 }
+  }
+
+  await page.route('**/api/v1/**', async route => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const path = url.pathname.replace('/api/v1', '')
+    const json = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+    if (path === '/auth/session') return json({ user: { id: 'teacher-1', account: 'teacher', name: '王老师', role: 'TEACHER' }, csrf_token: 'test-csrf' })
+    if (path === '/classes') return json({ items: [{ id: 'class-1', semester: '2026 秋季', name: '软件工程 1 班', status: 'ACTIVE' }], total: 1 })
+    if (path === '/classes/current/context') return json({ user: { id: 'teacher-1', role: 'TEACHER' }, current_class: { id: 'class-1', semester: '2026 秋季', name: '软件工程 1 班', status: 'ACTIVE' }, team_gate_required: false })
+    if (path === '/notifications') return json({ items: [], total: 0 })
+    if (path === '/grades/assignments' && request.method() === 'GET') return json({ items: [{ id: 'assignment-grade', title: '需求分析报告', campaign_status: 'CLOSED', total: 2, pending: 1, ready: 0, published: 0 }], total: 1 })
+    if (path === '/assignments' && request.method() === 'GET') return json({ items: [{ id: 'assignment-grade', class_id: 'class-1', title: '需求分析报告', description: '<p>完成需求分析。</p>', submitter_type: 'INDIVIDUAL', due_at: '2026-09-15T08:00:00Z', status: 'CLOSED', version: 2 }], total: 1 })
+    if (path === '/assignments/assignment-grade/files') return json({ attachments: [], review_criteria: [], drafts: [] })
+    if (path === '/assignments/assignment-grade/submissions') return json({ items: [], total: 0 })
+    if (path === '/teams') return json({ items: [], total: 0 })
+    if (path === '/review-campaigns') return json({ items: [{ id: 'campaign-grade', assignment_id: 'assignment-grade', assignment_title: '需求分析报告', mode: 'TEAM', criteria_text: '按完整性评分', due_at: '2026-09-16T08:00:00Z', status: 'CLOSED', grades_generated_at: '2026-09-16T08:00:00Z' }], total: 1 })
+    if (path === '/review-campaigns/campaign-grade/stats') return json({ assigned_count: 2, completed_count: 1, skipped_count: 0, completion_rate: 50 })
+    if (path === '/review-campaigns/campaign-grade/reviews') return json({ items: [], total: 0 })
+    if (path === '/grades/assignments/assignment-grade' && request.method() === 'GET') return json(detail)
+    if (path === '/grades/assignments/assignment-grade/teams/team-1/coefficient' && request.method() === 'PATCH') {
+      coefficientPayload = request.postDataJSON()
+      Object.assign(group, { draft_value: coefficientPayload.coefficient, version: 2 })
+      Object.assign(detail.items[0], { draft_coefficient: coefficientPayload.coefficient, draft_score: 99, status: 'DRAFT' })
+      detail.summary.publishable = 1
+      return json(group)
+    }
+    if (path === '/grades/assignments/assignment-grade/publish' && request.method() === 'POST') {
+      publishPayload = request.postDataJSON()
+      Object.assign(detail.items[0], { score: 99, status: 'PUBLISHED' })
+      detail.summary.published = 1
+      return json({ published: 1, pending: 1, changed: 0 })
+    }
+    if (path === '/exports/grades.csv') return route.fulfill({ status: 200, headers: { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename="grades.csv"' }, body: '作业,学号,姓名\n需求分析报告,20260001,张同学' })
+    return json({ items: [], total: 0 })
+  })
+
+  await page.goto('/grades')
+  await expect(page.getByRole('heading', { name: '成绩与导出' })).toBeVisible()
+  await expect(page.locator('.export-item')).toHaveCount(4)
+  await expect(page.locator('.export-item')).toContainText(['成员名单', '小组名单', '互评记录', '作业成绩'])
+  await page.locator('.export-grade-item .ant-select-selector').click()
+  await page.locator('.ant-select-dropdown:visible .ant-select-item-option').filter({ hasText: '需求分析报告' }).click()
+  const download = page.waitForEvent('download')
+  await page.locator('.export-grade-item').getByRole('button', { name: /CSV/ }).click()
+  await download
+
+  await page.goto('/grades/assignment-grade')
+  await expect(page).toHaveURL(/\/assignments\/assignment-grade\?tab=grades$/)
+  const workspace = page.locator('.assignment-workspace')
+  await expect(workspace.getByRole('tab', { name: '成绩管理', selected: true })).toBeVisible()
+  await workspace.locator('.grade-section').first().locator('.ant-input-number-input').fill('1.10')
+  await workspace.locator('.grade-section').first().getByRole('button', { name: '保存' }).click()
+  await expect.poll(() => coefficientPayload).toEqual({ coefficient: 1.1, version: 1 })
+  await workspace.getByRole('button', { name: /发布成绩/ }).click()
+  await page.getByRole('dialog', { name: '确认发布成绩' }).getByRole('button', { name: '确认发布' }).click()
+  await expect.poll(() => publishPayload).toEqual({ reason: '' })
 })
 
 test('logout removes the protected view and shows login without a reload', async ({ page }) => {
@@ -269,7 +328,7 @@ test('expired session switches from the protected view to login', async ({ page 
 })
 
 test('student sees one frozen review assignment and submits only score and comment', async ({ page }) => {
-  let reviewPayload
+  const reviewPayloads = []
   const campaign = { id: 'campaign-frozen', assignment_id: 'assignment-frozen', assignment_title: '需求分析报告', mode: 'CLASS', criteria_text: '按完整性与清晰度评分。', assignment_snapshot_at: '2026-09-15T08:00:00Z', due_at: '2099-01-01T00:00:00Z', status: 'ACTIVE', pending_count: 1, allocation_status: 'PENDING' }
   const endedCampaign = { ...campaign, id: 'campaign-ended', assignment_title: '原型评审', due_at: '2020-01-01T00:00:00Z', pending_count: 0, allocation_status: 'COMPLETED' }
   const overdueCampaign = { ...campaign, id: 'campaign-overdue', assignment_title: '架构评审', due_at: '2020-01-02T00:00:00Z', pending_count: 1, allocation_status: 'PENDING' }
@@ -289,7 +348,7 @@ test('student sees one frozen review assignment and submits only score and comme
     if (path === '/peer-reviews/sent') return json({ items: [], total: 0 })
     if (path === '/review-campaigns/campaign-frozen/assignment') return json(task)
     if (path === '/review-campaigns/campaign-frozen/reviews' && request.method() === 'POST') {
-      reviewPayload = request.postDataJSON(); task.status = 'COMPLETED'; return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ id: 'review-1', total_score: reviewPayload.score, status: 'VALID' }) })
+      const payload = request.postDataJSON(); reviewPayloads.push(payload); task.status = 'COMPLETED'; task.review = { id: 'review-1', score: payload.score, comment: payload.comment, status: 'VALID' }; return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ id: 'review-1', total_score: payload.score, status: 'VALID', updated: reviewPayloads.length > 1 }) })
     }
     return json({ items: [], total: 0 })
   })
@@ -299,18 +358,27 @@ test('student sees one frozen review assignment and submits only score and comme
   await expect(page.locator('.assignment-row').filter({ hasText: '架构评审' })).toHaveClass(/task-overdue/)
   await page.locator('.assignment-row').filter({ hasText: '原型评审' }).click()
   await expect(page).toHaveURL(/\/reviews\/campaign-ended$/)
-  await expect(page.locator('.review-detail-page')).toContainText('94')
-  await expect(page.locator('.review-detail-page')).toContainText('反馈具体。')
+  await expect(page.locator('.review-workspace')).toContainText('94')
+  await expect(page.locator('.review-workspace')).toContainText('反馈具体。')
   await page.getByRole('button', { name: '返回互评列表' }).click()
   await page.locator('.assignment-row').filter({ hasText: '需求分析报告' }).click()
   await expect(page).toHaveURL(/\/reviews\/campaign-frozen$/)
-  const detail = page.locator('.review-detail-page')
-  await expect(detail).toContainText('李同学（20260002）')
+  const detail = page.locator('.review-workspace')
+  await expect(detail).toContainText('李同学')
+  await expect(detail).toContainText('20260002')
   await expect(detail).not.toContainText('其他候选人')
   await detail.locator('.ant-input-number-input').fill('91')
   await detail.locator('textarea').fill('结构完整，论证清晰。')
   await detail.getByRole('button', { name: '提交评价' }).click()
-  await expect.poll(() => reviewPayload).toEqual({ score: 91, comment: '结构完整，论证清晰。' })
+  await expect.poll(() => reviewPayloads).toEqual([{ score: 91, comment: '结构完整，论证清晰。' }])
+  await expect(detail.getByRole('button', { name: '更新评价' })).toBeVisible()
+  await detail.locator('.ant-input-number-input').fill('93')
+  await detail.locator('textarea').fill('补充检查后，论证也很充分。')
+  await detail.getByRole('button', { name: '更新评价' }).click()
+  await expect.poll(() => reviewPayloads).toEqual([
+    { score: 91, comment: '结构完整，论证清晰。' },
+    { score: 93, comment: '补充检查后，论证也很充分。' }
+  ])
 })
 
 test('student assignment detail submits every uploaded file without selection controls', async ({ page }) => {

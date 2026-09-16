@@ -9,6 +9,7 @@ const router = createRouter({
     { path: '/login', name: 'login', component: LoginView },
     { path: '/assignments/:id', name: 'assignment-detail', component: ShellView },
     { path: '/reviews/:id', name: 'review-detail', component: ShellView },
+    { path: '/grades/:id', name: 'grade-detail', component: ShellView },
     { path: '/:view(overview|classes|teams|assignments|reviews|grades|system)?', name: 'app', component: ShellView }
   ]
 })

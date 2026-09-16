@@ -19,9 +19,10 @@ def upgrade() -> None:
         op.create_foreign_key("fk_file_objects_team_id", "file_objects", "teams", ["team_id"], ["id"])
     if "purpose" not in file_columns:
         op.add_column("file_objects", sa.Column("purpose", sa.String(length=16), nullable=False, server_default="SUBMISSION"))
+    grade_columns = {column["name"] for column in inspector.get_columns("grades")}
     grade_constraints = {item["name"] for item in inspector.get_unique_constraints("grades")}
     if "uq_personal_grade" not in grade_constraints: op.create_unique_constraint("uq_personal_grade", "grades", ["assignment_id", "subject_user_id"])
-    if "uq_team_grade" not in grade_constraints: op.create_unique_constraint("uq_team_grade", "grades", ["assignment_id", "subject_team_id"])
+    if "subject_team_id" in grade_columns and "uq_team_grade" not in grade_constraints: op.create_unique_constraint("uq_team_grade", "grades", ["assignment_id", "subject_team_id"])
     if "grade_revisions" not in inspector.get_table_names():
         op.create_table(
             "grade_revisions",

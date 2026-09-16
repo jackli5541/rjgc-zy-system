@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import and_, delete, select
 
 from app.database import SessionLocal
+from app.grading import finalize_campaign
 from app.models import Assignment, AuditLog, BackgroundJob, ClassMember, FileObject, ImportBatch, LoginSession, Notification, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, User
 from app.settings import settings
 
@@ -56,9 +57,17 @@ def process_auto_review(db, current: datetime) -> None:
         assignment.auto_review_status, assignment.auto_review_error = "FAILED", "全班已正式提交学生少于 2 人"
         return
 
-    campaign = ReviewCampaign(assignment_id=assignment.id, class_id=assignment.class_id, mode=assignment.auto_review_mode, criteria_text=(assignment.auto_review_criteria_text or "").strip(), assignment_snapshot_at=current, rubric=[{"key": "score", "label": "总分", "weight": 100}], comment_min_length=1, due_at=assignment.auto_review_due_at, publish_at=current, require_all=False, allow_update=False)
+    campaign = ReviewCampaign(assignment_id=assignment.id, class_id=assignment.class_id, mode=assignment.auto_review_mode, criteria_text=(assignment.auto_review_criteria_text or "").strip(), assignment_snapshot_at=current, rubric=[{"key": "score", "label": "总分", "weight": 100}], comment_min_length=1, due_at=assignment.auto_review_due_at, publish_at=current, require_all=False, allow_update=True)
     db.add(campaign)
     db.flush()
+    team_by_user = {
+        user_id: team_id
+        for user_id, team_id in db.execute(
+            select(TeamMember.user_id, TeamMember.team_id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(TeamMember.class_id == assignment.class_id, TeamMember.status == "ACTIVE", Team.status == "ACTIVE")
+        ).all()
+    }
     if assignment.auto_review_mode == "CLASS":
         groups = [("教学班", frozen_rows)]
     else:
@@ -72,15 +81,30 @@ def process_auto_review(db, current: datetime) -> None:
         if len(rows) < 2:
             reason = f"{label} 已正式提交人数少于 2 人"
             for person, _ in rows:
-                db.add(ReviewAssignment(campaign_id=campaign.id, reviewer_id=person.id, status="SKIPPED", skip_reason=reason))
+                db.add(ReviewAssignment(campaign_id=campaign.id, reviewer_id=person.id, participant_team_id=team_by_user.get(person.id), status="SKIPPED", skip_reason=reason))
             continue
         for index, (reviewer, _) in enumerate(rows):
             reviewee, version = rows[(index + 1) % len(rows)]
-            db.add(ReviewAssignment(campaign_id=campaign.id, reviewer_id=reviewer.id, reviewee_id=reviewee.id, submission_version_id=version.id))
+            db.add(ReviewAssignment(campaign_id=campaign.id, reviewer_id=reviewer.id, participant_team_id=team_by_user.get(reviewer.id), reviewee_id=reviewee.id, submission_version_id=version.id))
             db.add(Notification(user_id=reviewer.id, kind="REVIEW_ASSIGNED", title=f"新的互评任务：{assignment.title}", object_type="review_campaign", object_id=str(campaign.id)))
     course = db.get(TeachingClass, assignment.class_id)
     assignment.auto_review_status, assignment.auto_review_error = "CREATED", None
     db.add(AuditLog(actor_id=course.teacher_id if course else None, action="REVIEW_CAMPAIGN_AUTO_CREATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(assignment.id), "mode": assignment.auto_review_mode}))
+
+
+def process_due_campaign(db, current: datetime) -> None:
+    campaign = db.scalar(
+        select(ReviewCampaign)
+        .where(ReviewCampaign.status.in_(["ACTIVE", "CLOSED"]), ReviewCampaign.due_at <= current, ReviewCampaign.assignment_snapshot_at.is_not(None), ReviewCampaign.grades_generated_at.is_(None))
+        .order_by(ReviewCampaign.due_at)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+    if not campaign:
+        return
+    finalize_campaign(db, campaign, current)
+    course = db.get(TeachingClass, campaign.class_id)
+    db.add(AuditLog(actor_id=course.teacher_id if course else None, action="PEER_GRADES_GENERATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(campaign.assignment_id)}))
 
 
 def run_once() -> None:
@@ -89,6 +113,7 @@ def run_once() -> None:
         db.execute(delete(LoginSession).where(LoginSession.expires_at < current))
         db.execute(delete(ImportBatch).where(ImportBatch.status == "PREVIEWED", ImportBatch.created_at < current - timedelta(days=1)))
         process_auto_review(db, current)
+        process_due_campaign(db, current)
         job = db.scalar(select(BackgroundJob).where(BackgroundJob.status == "PENDING", BackgroundJob.available_at <= current).with_for_update(skip_locked=True).limit(1))
         if not job:
             return
