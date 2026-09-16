@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -228,10 +228,37 @@ class SubmissionAssessment(Base):
     kind: Mapped[str] = mapped_column(String(16))
     grade: Mapped[str] = mapped_column(String(1))
     comment: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="PUBLISHED")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    draft_payload: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     __table_args__ = (
         UniqueConstraint("submission_version_id", "evaluator_id", "kind", name="uq_submission_assessment_evaluator"),
+    )
+
+
+class SubmissionAnnotation(Base):
+    __tablename__ = "submission_annotations"
+    id: Mapped[UUID] = uuid_pk()
+    assessment_id: Mapped[UUID] = mapped_column(ForeignKey("submission_assessments.id", ondelete="CASCADE"), index=True)
+    submission_version_id: Mapped[UUID] = mapped_column(index=True)
+    file_id: Mapped[UUID] = mapped_column(index=True)
+    author_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    mark_type: Mapped[str] = mapped_column(String(20), default="COMMENT")
+    color: Mapped[str] = mapped_column(String(10), default="YELLOW")
+    anchor: Mapped[dict] = mapped_column(JSON)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["submission_version_id", "file_id"],
+            ["version_files.version_id", "version_files.file_id"],
+            ondelete="CASCADE",
+        ),
     )
 
 

@@ -11,6 +11,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if "submission_assessments" in sa.inspect(op.get_bind()).get_table_names():
+        return
     op.create_table(
         "submission_assessments",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),

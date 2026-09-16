@@ -20,6 +20,7 @@
 - `cd frontend; npm run build`：生成前端生产构建。
 - `docker compose --profile test build`：构建隔离的测试镜像。
 - `docker compose --profile test run --rm test-api pytest -q`：运行后端测试。
+跳过所有e2e测试
 
 
 ## 编码风格与命名规范

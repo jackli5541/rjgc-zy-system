@@ -585,6 +585,64 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
     assert class_mode.status_code == 422
 
 
+def test_rich_preview_feedback_annotations_and_resubmission_history():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2035 春季", "name": "在线批注测试班"}).json()
+    class_id = course["id"]
+    teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": "20350001", "name": "批注测试学生"})
+    student, student_headers = login("20350001", "20350001", "student")
+    student.post("/api/v1/teams", headers=student_headers, json={"class_id": class_id, "name": "批注测试组", "open_recruitment": True})
+    assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "富文本报告", "description": "验证安全预览和批注", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
+
+    markdown_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("report.md", b"# Heading\n\n- [x] Done\n\n| A | B |\n|---|---|\n| 1 | 2 |", "text/markdown")}).json()
+    pdf_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("diagram.pdf", b"%PDF-1.4", "application/pdf")}).json()
+    html_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("appendix.html", b'<h2>Safe</h2><script>alert(1)</script><img src="/private.png"><img src="https://example.com/ok.png"><a href="javascript:alert(1)">bad</a>', "text/html")})
+    assert html_file.status_code == 201 and html_file.json()["render_type"] == "RICH_TEXT"
+    submitted = student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "annotation-v1"}, json={})
+    assert submitted.status_code == 201, submitted.text
+    board_item = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"][0]
+    version_id = board_item["submission_version_id"]
+
+    rendered = teacher.get(f"/api/v1/files/{html_file.json()['id']}/render")
+    assert rendered.status_code == 200 and rendered.json()["render_type"] == "RICH_TEXT"
+    assert "<script" not in rendered.json()["html"] and "javascript:" not in rendered.json()["html"]
+    assert 'src="/private.png"' not in rendered.json()["html"] and "https://example.com/ok.png" in rendered.json()["html"]
+
+    annotation = {"file_id": markdown_file["id"], "kind": "RICH_TEXT_RANGE", "mark_type": "COMMENT", "color": "BLUE", "anchor": {"start": {"block_id": "b0", "offset": 0}, "end": {"block_id": "b0", "offset": 7}, "exact": "Heading", "prefix": "", "suffix": "Done"}, "comment": "<p><strong>重点</strong><script>bad()</script></p>"}
+    pure_mark = {"file_id": markdown_file["id"], "kind": "RICH_TEXT_RANGE", "mark_type": "UNDERLINE", "color": "GREEN", "anchor": {"start": {"block_id": "b1", "offset": 0}, "end": {"block_id": "b1", "offset": 4}, "exact": "Done", "prefix": "", "suffix": ""}, "comment": ""}
+    legacy_mark = {"file_id": markdown_file["id"], "kind": "RICH_TEXT_RANGE", "anchor": {"start": {"block_id": "b1", "offset": 0}, "end": {"block_id": "b1", "offset": 4}, "exact": "Done", "prefix": "", "suffix": ""}, "comment": ""}
+    draft = teacher.put(f"/api/v1/submission-versions/{version_id}/feedback/draft", headers=teacher_headers, json={"revision": 0, "grade": "A", "comment": "<p>总评草稿</p>", "annotations": [annotation, pure_mark, legacy_mark]})
+    assert draft.status_code == 200 and draft.json()["status"] == "DRAFT"
+    assert student.get(f"/api/v1/submission-versions/{version_id}/feedback").json()["status"] is None
+    forbidden = student.put(f"/api/v1/submission-versions/{version_id}/feedback/draft", headers=student_headers, json={"revision": 0, "grade": "A", "comment": "", "annotations": []})
+    assert forbidden.status_code == 403
+
+    published = teacher.post(f"/api/v1/submission-versions/{version_id}/feedback/publish", headers=teacher_headers, json={"revision": draft.json()["revision"], "grade": "A", "comment": "<p>已发布总评</p>", "annotations": [annotation, pure_mark, legacy_mark]})
+    assert published.status_code == 200 and published.json()["status"] == "PUBLISHED"
+    student_feedback = student.get(f"/api/v1/submission-versions/{version_id}/feedback").json()
+    assert student_feedback["grade"] == "A" and len(student_feedback["annotations"]) == 3
+    assert student_feedback["annotations"][0]["mark_type"] == "COMMENT" and student_feedback["annotations"][0]["color"] == "BLUE"
+    assert student_feedback["annotations"][1]["mark_type"] == "UNDERLINE" and student_feedback["annotations"][1]["comment"] == ""
+    assert student_feedback["annotations"][2]["mark_type"] == "HIGHLIGHT" and student_feedback["annotations"][2]["color"] == "YELLOW"
+    assert "<script" not in student_feedback["annotations"][0]["comment"]
+    invalid_region = {"file_id": pdf_file["id"], "kind": "PDF_TEXT_OR_REGION", "mark_type": "UNDERLINE", "color": "RED", "anchor": {"page": 1, "rects": [{"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1}], "quote": ""}, "comment": ""}
+    invalid = teacher.put(f"/api/v1/submission-versions/{version_id}/feedback/draft", headers=teacher_headers, json={"revision": published.json()["revision"], "grade": "A", "comment": "", "annotations": [invalid_region]})
+    assert invalid.status_code == 422 and invalid.json()["code"] == "ANNOTATION_MARK_TYPE_INVALID"
+    stale = teacher.post(f"/api/v1/submission-versions/{version_id}/feedback/publish", headers=teacher_headers, json={"revision": draft.json()["revision"], "grade": "B", "comment": "", "annotations": []})
+    assert stale.status_code == 409 and stale.json()["code"] == "FEEDBACK_VERSION_CONFLICT"
+
+    student.delete(f"/api/v1/files/{markdown_file['id']}", headers=student_headers)
+    student.delete(f"/api/v1/files/{pdf_file['id']}", headers=student_headers)
+    student.delete(f"/api/v1/files/{html_file.json()['id']}", headers=student_headers)
+    replacement = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("report-v2.md", b"# Version 2", "text/markdown")}).json()
+    updated = student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "annotation-v2"}, json={})
+    assert updated.status_code == 201
+    refreshed = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"][0]
+    assert refreshed["submission_version_no"] == 2 and refreshed["submission_version_id"] != version_id
+    assert refreshed["teacher_grade"] is None and refreshed["files"][0]["id"] == replacement["id"]
+    assert student.get(f"/api/v1/submission-versions/{version_id}/feedback").json()["status"] == "PUBLISHED"
+
+
 def test_teacher_assignment_and_review_lifecycle_controls():
     teacher, teacher_headers = login("teacher", "123456", "teacher")
     course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2032 春季", "name": "作业生命周期测试班", "max_team_members": 5}).json()

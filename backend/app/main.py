@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import csv, html, io, mimetypes, os, re, secrets
+import csv, hashlib, html, io, mimetypes, os, re, secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -23,19 +23,51 @@ from sqlalchemy.orm import Session, aliased
 
 from app.database import get_db
 from app.grading import final_score, finalize_campaign
-from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAssessment, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 
 app = FastAPI(title="软件工程作业系统 API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-SAFE_HTML_TAGS = ["p", "br", "h1", "h2", "h3", "h4", "strong", "em", "s", "ul", "ol", "li", "blockquote", "pre", "code", "a"]
-SAFE_HTML_ATTRIBUTES = {"a": ["href", "title", "target", "rel"]}
+SAFE_HTML_TAGS = ["p", "br", "h1", "h2", "h3", "h4", "strong", "em", "s", "ul", "ol", "li", "blockquote", "pre", "code", "a", "table", "thead", "tbody", "tr", "th", "td", "img", "hr", "input"]
+SAFE_HTML_ATTRIBUTES = {
+    "a": ["href", "title", "target", "rel"],
+    "img": ["src", "alt", "title", "width", "height"],
+    "input": ["type", "checked", "disabled"],
+}
 
 
 def clean_html(value: str) -> str:
-    return bleach.clean(value, tags=SAFE_HTML_TAGS, attributes=SAFE_HTML_ATTRIBUTES, protocols=["http", "https", "mailto"], strip=True)
+    cleaned = bleach.clean(value, tags=SAFE_HTML_TAGS, attributes=SAFE_HTML_ATTRIBUTES, protocols=["http", "https", "mailto"], strip=True)
+    return re.sub(r'<a\s+([^>]*href="(?:https?://|mailto:)[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
+
+
+def clean_file_html(value: str) -> str:
+    def allowed_attribute(tag: str, name: str, attribute_value: str) -> bool:
+        if tag == "a" and name in {"title", "target", "rel"}: return True
+        if tag == "a" and name == "href": return attribute_value.startswith(("https://", "mailto:"))
+        if tag == "img" and name in {"alt", "title", "width", "height"}: return True
+        if tag == "img" and name == "src": return attribute_value.startswith("https://")
+        if tag == "input" and name in {"type", "checked", "disabled"}: return name != "type" or attribute_value == "checkbox"
+        if tag == "code" and name == "class": return attribute_value.startswith("language-")
+        return False
+
+    cleaned = bleach.clean(value, tags=SAFE_HTML_TAGS, attributes=allowed_attribute, protocols=["https", "mailto"], strip=True)
+    return re.sub(r'<a\s+([^>]*href="[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
+
+
+def render_rich_file(path: Path) -> tuple[str, str]:
+    if path.stat().st_size > 5 * 1024 * 1024:
+        raise ApiError(413, "RICH_TEXT_PREVIEW_TOO_LARGE", "Markdown 或 HTML 文件超过 5 MB，请下载原文件查看")
+    try:
+        source = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        raise ApiError(422, "RICH_TEXT_ENCODING_INVALID", "Markdown 或 HTML 文件必须使用 UTF-8 编码")
+    if path.suffix.lower() == ".md":
+        source = re.sub(r"(?m)^(\s*[-*]\s+)\[([ xX])\]\s+", lambda match: f'{match.group(1)}<input type="checkbox" disabled{" checked" if match.group(2).lower() == "x" else ""}> ', source)
+        source = markdown.markdown(source, extensions=["fenced_code", "tables", "sane_lists"])
+    return clean_file_html(source), hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def render_description(value: str) -> str:
@@ -193,6 +225,19 @@ class ReviewIn(BaseModel):
 class SubmissionAssessmentIn(BaseModel):
     grade: Literal["A", "B", "C", "D", "E"]
     comment: str = Field("", max_length=2000)
+class SubmissionAnnotationIn(BaseModel):
+    id: UUID | None = None
+    file_id: UUID
+    kind: Literal["PDF_TEXT_OR_REGION", "RICH_TEXT_RANGE"]
+    mark_type: Literal["HIGHLIGHT", "UNDERLINE", "STRIKETHROUGH", "COMMENT"] | None = None
+    color: Literal["YELLOW", "GREEN", "RED", "BLUE"] = "YELLOW"
+    anchor: dict
+    comment: str = Field("", max_length=20000)
+class SubmissionFeedbackIn(BaseModel):
+    revision: int = Field(ge=0)
+    grade: Literal["A", "B", "C", "D", "E"]
+    comment: str = Field("", max_length=20000)
+    annotations: list[SubmissionAnnotationIn] = Field(default_factory=list, max_length=500)
 class PeerSubmissionAssessmentIn(SubmissionAssessmentIn):
     reviewee_id: UUID
 class CoefficientIn(BaseModel):
@@ -701,8 +746,9 @@ def has_review_criteria_file(db: Session, assignment_id: UUID) -> bool:
 
 def file_json(file: FileObject, owner_name: str | None = None, submitted: bool = False) -> dict:
     suffix = Path(file.original_name).suffix.lower()
-    previewable = suffix in {".md", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
-    return {"id": str(file.id), "name": file.original_name, "size": file.size_bytes, "preview_status": file.preview_status, "preview_error": file.preview_error, "previewable": previewable, "download_only": not previewable, "purpose": file.purpose, "owner_name": owner_name, "created_at": file.created_at, "submitted": submitted}
+    render_type = "PDF" if suffix == ".pdf" else "RICH_TEXT" if suffix in {".md", ".html", ".htm"} else "IMAGE" if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"} else "DOWNLOAD_ONLY"
+    previewable = render_type != "DOWNLOAD_ONLY"
+    return {"id": str(file.id), "name": file.original_name, "size": file.size_bytes, "render_type": render_type, "preview_status": file.preview_status, "preview_error": file.preview_error, "previewable": previewable, "download_only": not previewable, "purpose": file.purpose, "owner_name": owner_name, "created_at": file.created_at, "submitted": submitted}
 
 
 def writable_teacher_classes(db: Session, user: User, class_ids: list[UUID]) -> list[TeachingClass]:
@@ -902,10 +948,12 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
         if a.starts_at and a.starts_at > now(): raise ApiError(409, "ASSIGNMENT_NOT_STARTED", "作业尚未开始")
         _, team = require_team(db, a.class_id, user)
     suffix = Path(file.filename or "file").suffix.lower()
-    supported = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".md", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
-    if suffix not in supported: raise ApiError(422, "FILE_TYPE_INVALID", "仅支持 Markdown、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包")
+    supported = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".md", ".html", ".htm", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
+    if suffix not in supported: raise ApiError(422, "FILE_TYPE_INVALID", "仅支持 Markdown、HTML、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包")
     expected_mimes = {
-        ".md": {"text/markdown", "text/plain", "application/octet-stream"}, ".pdf": {"application/pdf"},
+        ".md": {"text/markdown", "text/plain", "application/octet-stream"},
+        ".html": {"text/html", "text/plain", "application/octet-stream"}, ".htm": {"text/html", "text/plain", "application/octet-stream"},
+        ".pdf": {"application/pdf"},
         ".png": {"image/png"}, ".jpg": {"image/jpeg"}, ".jpeg": {"image/jpeg"}, ".gif": {"image/gif"}, ".webp": {"image/webp"},
         ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
         ".pptx": {"application/vnd.openxmlformats-officedocument.presentationml.presentation"},
@@ -932,7 +980,7 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
     finally:
         await file.close()
     team_id = team.id if team and a.submitter_type == "TEAM" else None
-    preview_status = "READY" if suffix in {".md", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"} else "NOT_AVAILABLE"
+    preview_status = "READY" if suffix in {".md", ".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"} else "NOT_AVAILABLE"
     x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
     db.add(x)
     db.commit()
@@ -1014,18 +1062,12 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
         rows = db.execute(select(TeamMember, User).join(User).where(TeamMember.team_id == team.id, TeamMember.status == "ACTIVE").order_by(User.login_name)).all()
         snapshot = {"members": [{"id": str(person.id), "student_no": person.login_name, "name": person.display_name, "role": member.role} for member, person in rows]}
     submitted_at = now()
-    if current:
-        db.execute(delete(VersionFile).where(VersionFile.version_id == current.id))
-        current.submitted_by, current.submitted_at = user.id, submitted_at
-        current.member_snapshot, current.is_late, current.idempotency_key = snapshot, a.due_at < submitted_at, idempotency_key
-        v = current
-    else:
-        s.current_version_no = 1
-        v = SubmissionVersion(submission_id=s.id, version_no=1, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key)
-        db.add(v); db.flush()
+    s.current_version_no = (current.version_no + 1) if current else 1
+    v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key)
+    db.add(v); db.flush()
     old_versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.id != v.id)).all()
     for old in old_versions:
-        frozen = db.scalar(select(ReviewAssignment.id).where(ReviewAssignment.submission_version_id == old.id).limit(1)) or db.scalar(select(PeerReview.id).where(PeerReview.submission_version_id == old.id).limit(1))
+        frozen = db.scalar(select(ReviewAssignment.id).where(ReviewAssignment.submission_version_id == old.id).limit(1)) or db.scalar(select(PeerReview.id).where(PeerReview.submission_version_id == old.id).limit(1)) or db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == old.id).limit(1))
         if not frozen: db.delete(old)
     s.status = "SUBMITTED"
     for f in files: db.add(VersionFile(version_id=v.id, file_id=f.id))
@@ -1053,7 +1095,8 @@ def latest_personal_submission(db: Session, assignment_id: UUID, user_id: UUID):
 def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
     evaluator = db.get(User, item.evaluator_id)
     return {
-        "id": str(item.id), "kind": item.kind, "grade": item.grade, "comment": item.comment,
+        "id": str(item.id), "kind": item.kind, "grade": item.grade, "comment": item.comment, "comment_html": item.comment,
+        "status": item.status, "version": item.version, "published_at": item.published_at,
         "evaluator_id": str(item.evaluator_id), "evaluator_name": evaluator.display_name,
         "subject_user_id": str(item.subject_user_id), "submission_version_id": str(item.submission_version_id),
         "created_at": item.created_at, "updated_at": item.updated_at,
@@ -1066,7 +1109,7 @@ POINT_GRADES = {value: key for key, value in GRADE_POINTS.items()}
 
 def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
     assessments = db.scalars(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id)).all()
-    teacher_assessment = next((item for item in assessments if item.kind == "TEACHER"), None)
+    teacher_assessment = next((item for item in assessments if item.kind == "TEACHER" and item.status == "PUBLISHED"), None)
     peer_assessments = [item for item in assessments if item.kind == "PEER"]
     peer_grade = None
     if peer_assessments:
@@ -1146,9 +1189,10 @@ def save_peer_submission_assessment(aid: UUID, data: PeerSubmissionAssessmentIn,
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
     updating = item is not None
     if item:
-        item.grade, item.comment = data.grade, data.comment.strip()
+        item.grade, item.comment, item.status, item.published_at = data.grade, data.comment.strip(), "PUBLISHED", now()
+        item.version += 1
     else:
-        item = SubmissionAssessment(assignment_id=aid, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=data.reviewee_id, kind="PEER", grade=data.grade, comment=data.comment.strip())
+        item = SubmissionAssessment(assignment_id=aid, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=data.reviewee_id, kind="PEER", grade=data.grade, comment=data.comment.strip(), status="PUBLISHED", published_at=now())
         db.add(item)
     db.flush(); audit(db, user, "PEER_ASSESSMENT_UPDATED" if updating else "PEER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(data.reviewee_id)}); db.commit()
     return {**assessment_json(db, item), "updated": updating}
@@ -1165,9 +1209,10 @@ def save_teacher_submission_assessment(aid: UUID, student_id: UUID, data: Submis
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     updating = item is not None
     if item:
-        item.grade, item.comment = data.grade, data.comment.strip()
+        item.grade, item.comment, item.status, item.published_at = data.grade, clean_html(data.comment), "PUBLISHED", now()
+        item.version += 1
     else:
-        item = SubmissionAssessment(assignment_id=aid, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=student_id, kind="TEACHER", grade=data.grade, comment=data.comment.strip())
+        item = SubmissionAssessment(assignment_id=aid, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=student_id, kind="TEACHER", grade=data.grade, comment=clean_html(data.comment), status="PUBLISHED", published_at=now())
         db.add(item)
     db.flush(); audit(db, user, "TEACHER_ASSESSMENT_UPDATED" if updating else "TEACHER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(student_id)}); db.commit()
     return {**assessment_json(db, item), "updated": updating, "result": submission_grade_result(db, version)}
@@ -1186,6 +1231,132 @@ def delete_teacher_submission_assessment(aid: UUID, student_id: UUID, user: Csrf
         item_id = str(item.id); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
     result = submission_grade_result(db, version); db.commit()
     return result
+
+
+def feedback_context(db: Session, version_id: UUID, user: User):
+    row = db.execute(
+        select(SubmissionVersion, Submission, Assignment)
+        .join(Submission, Submission.id == SubmissionVersion.submission_id)
+        .join(Assignment, Assignment.id == Submission.assignment_id)
+        .where(SubmissionVersion.id == version_id)
+    ).first()
+    if not row: raise ApiError(404, "SUBMISSION_VERSION_NOT_FOUND", "提交版本不存在")
+    version, submission_item, assignment = row
+    if user.role == "TEACHER":
+        if not user_class(db, user, assignment.class_id): raise ApiError(404, "SUBMISSION_VERSION_NOT_FOUND", "提交版本不存在")
+    elif submission_item.owner_user_id != user.id:
+        raise ApiError(403, "FEEDBACK_FORBIDDEN", "无权查看该提交反馈")
+    return version, submission_item, assignment
+
+
+def annotation_json(item: SubmissionAnnotation) -> dict:
+    mark_type = item.mark_type or ("COMMENT" if item.comment else "HIGHLIGHT")
+    return {"id": str(item.id), "file_id": str(item.file_id), "kind": item.kind, "mark_type": mark_type, "color": item.color or "YELLOW", "anchor": item.anchor, "comment": item.comment, "created_at": item.created_at, "updated_at": item.updated_at}
+
+
+def assessment_annotations(db: Session, assessment_id: UUID) -> list[dict]:
+    items = db.scalars(select(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == assessment_id).order_by(SubmissionAnnotation.created_at)).all()
+    return [annotation_json(item) for item in items]
+
+
+def feedback_json(db: Session, item: SubmissionAssessment | None, include_draft: bool = False) -> dict:
+    if not item:
+        return {"status": None, "revision": 0, "grade": "A", "comment": "", "annotations": [], "published_at": None, "has_draft": False}
+    published = {"grade": item.grade, "comment": item.comment, "annotations": assessment_annotations(db, item.id)}
+    draft = item.draft_payload if include_draft and item.draft_payload else None
+    payload = draft or published
+    return {
+        "id": str(item.id), "status": "DRAFT" if draft or item.status == "DRAFT" else "PUBLISHED",
+        "published_status": item.status, "revision": item.version, "published_at": item.published_at,
+        "has_draft": bool(draft), "grade": payload["grade"], "comment": payload.get("comment", ""),
+        "annotations": payload.get("annotations", []),
+    }
+
+
+def validate_feedback_annotations(db: Session, version_id: UUID, annotations: list[SubmissionAnnotationIn]) -> list[dict]:
+    payload = []
+    for annotation in annotations:
+        linked = db.scalar(select(VersionFile.file_id).where(VersionFile.version_id == version_id, VersionFile.file_id == annotation.file_id))
+        file = db.get(FileObject, annotation.file_id) if linked else None
+        if not file: raise ApiError(422, "ANNOTATION_FILE_INVALID", "批注文件不属于该提交版本")
+        suffix = Path(file.original_name).suffix.lower()
+        anchor = annotation.anchor
+        cleaned_comment = clean_html(annotation.comment)
+        mark_type = annotation.mark_type or ("COMMENT" if annotation.comment.strip() else "HIGHLIGHT")
+        if annotation.kind == "PDF_TEXT_OR_REGION":
+            rects = anchor.get("rects") if isinstance(anchor, dict) else None
+            if suffix != ".pdf" or not isinstance(anchor.get("page"), int) or anchor["page"] < 1 or not isinstance(rects, list) or not rects or len(rects) > 100:
+                raise ApiError(422, "ANNOTATION_ANCHOR_INVALID", "PDF 批注锚点无效")
+            for rect in rects:
+                if not isinstance(rect, dict) or any(not isinstance(rect.get(key), (int, float)) for key in ("x", "y", "width", "height")) or rect["width"] <= 0 or rect["height"] <= 0 or any(rect[key] < 0 or rect[key] > 1 for key in ("x", "y", "width", "height")) or rect["x"] + rect["width"] > 1.001 or rect["y"] + rect["height"] > 1.001:
+                    raise ApiError(422, "ANNOTATION_ANCHOR_INVALID", "PDF 批注坐标无效")
+            if not str(anchor.get("quote", "")).strip() and mark_type not in {"HIGHLIGHT", "COMMENT"}:
+                raise ApiError(422, "ANNOTATION_MARK_TYPE_INVALID", "PDF 区域批注仅支持高亮或评论")
+        else:
+            start, end = anchor.get("start") if isinstance(anchor, dict) else None, anchor.get("end") if isinstance(anchor, dict) else None
+            valid_point = lambda point: isinstance(point, dict) and isinstance(point.get("block_id"), str) and bool(re.fullmatch(r"b\d+", point["block_id"])) and isinstance(point.get("offset"), int) and point["offset"] >= 0
+            if suffix not in {".md", ".html", ".htm"} or not valid_point(start) or not valid_point(end) or len(str(anchor.get("exact", ""))) > 4000:
+                raise ApiError(422, "ANNOTATION_ANCHOR_INVALID", "富文本批注锚点无效")
+        payload.append({"id": str(annotation.id) if annotation.id else None, "file_id": str(annotation.file_id), "kind": annotation.kind, "mark_type": mark_type, "color": annotation.color, "anchor": anchor, "comment": cleaned_comment})
+    return payload
+
+
+def replace_feedback_annotations(db: Session, item: SubmissionAssessment, annotations: list[dict], user: User) -> None:
+    db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id))
+    for annotation in annotations:
+        db.add(SubmissionAnnotation(assessment_id=item.id, submission_version_id=item.submission_version_id, file_id=UUID(annotation["file_id"]), author_id=user.id, kind=annotation["kind"], mark_type=annotation.get("mark_type") or ("COMMENT" if annotation.get("comment") else "HIGHLIGHT"), color=annotation.get("color") or "YELLOW", anchor=annotation["anchor"], comment=annotation["comment"]))
+
+
+def save_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user: User, db: Session, publish: bool) -> dict:
+    teacher(user)
+    version, submission_item, assignment = feedback_context(db, version_id, user)
+    require_writable_class(db, user, assignment.class_id)
+    if assignment.submitter_type != "INDIVIDUAL" or submission_item.owner_user_id is None: raise ApiError(422, "INDIVIDUAL_SUBMISSION_REQUIRED", "当前仅支持个人作业教师批注")
+    if submission_item.current_version_no != version.version_no: raise ApiError(409, "SUBMISSION_VERSION_READ_ONLY", "历史提交版本只能查看")
+    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER").with_for_update())
+    current_revision = item.version if item else 0
+    if data.revision != current_revision: raise ApiError(409, "FEEDBACK_VERSION_CONFLICT", "反馈已在其他页面更新，请刷新后重试")
+    annotations = validate_feedback_annotations(db, version.id, data.annotations)
+    payload = {"grade": data.grade, "comment": clean_html(data.comment), "annotations": annotations}
+    if not item:
+        item = SubmissionAssessment(assignment_id=assignment.id, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=submission_item.owner_user_id, kind="TEACHER", grade=data.grade, comment=payload["comment"], status="PUBLISHED" if publish else "DRAFT", published_at=now() if publish else None)
+        db.add(item); db.flush()
+        replace_feedback_annotations(db, item, annotations, user)
+    elif publish:
+        item.grade, item.comment, item.status, item.published_at, item.draft_payload = data.grade, payload["comment"], "PUBLISHED", now(), None
+        item.version += 1
+        replace_feedback_annotations(db, item, annotations, user)
+    elif item.status == "PUBLISHED":
+        item.draft_payload = payload
+        item.version += 1
+    else:
+        item.grade, item.comment = data.grade, payload["comment"]
+        item.version += 1
+        replace_feedback_annotations(db, item, annotations, user)
+    action = "TEACHER_FEEDBACK_PUBLISHED" if publish else "TEACHER_FEEDBACK_DRAFT_SAVED"
+    audit(db, user, action, "submission_assessment", str(item.id), {"submission_version_id": str(version.id), "annotation_count": len(annotations)})
+    db.commit(); db.refresh(item)
+    return {**feedback_json(db, item, True), "result": submission_grade_result(db, version)}
+
+
+@app.get("/api/v1/submission-versions/{version_id}/feedback")
+def get_submission_feedback(version_id: UUID, user: CurrentUser, db: Db):
+    version, _, _ = feedback_context(db, version_id, user)
+    query = select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.kind == "TEACHER")
+    if user.role == "TEACHER": query = query.where(SubmissionAssessment.evaluator_id == user.id)
+    else: query = query.where(SubmissionAssessment.status == "PUBLISHED")
+    item = db.scalar(query.order_by(SubmissionAssessment.updated_at.desc()))
+    return feedback_json(db, item, user.role == "TEACHER")
+
+
+@app.put("/api/v1/submission-versions/{version_id}/feedback/draft")
+def save_submission_feedback_draft(version_id: UUID, data: SubmissionFeedbackIn, user: CsrfUser, db: Db):
+    return save_submission_feedback(version_id, data, user, db, False)
+
+
+@app.post("/api/v1/submission-versions/{version_id}/feedback/publish")
+def publish_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user: CsrfUser, db: Db):
+    return save_submission_feedback(version_id, data, user, db, True)
 
 
 @app.get("/api/v1/files/{fid}")
@@ -1409,7 +1580,8 @@ def grades(user: CurrentUser, db: Db, class_id: UUID = Query()):
         for version, assignment in rows:
             result = submission_grade_result(db, version)
             if result["final_grade"]:
-                items.append({"id": str(version.id), "assignment_id": str(assignment.id), "assignment_title": assignment.title, "status": "GRADED", **result})
+                files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
+                items.append({"id": str(version.id), "submission_version_id": str(version.id), "submission_version_no": version.version_no, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "status": "GRADED", "files": [file_json(file) for file in files], **result})
         new_assignment_ids = {item["assignment_id"] for item in items}
         legacy_rows = db.execute(
             select(Grade, Assignment, GradeCoefficient).select_from(Grade).join(Assignment, Assignment.id == Grade.assignment_id).outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
@@ -1769,7 +1941,7 @@ def submission_board(aid: UUID, user: CurrentUser, db: Db):
         latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id, SubmissionVersion.version_no == submission.current_version_no)) if submission else None
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == latest.id)).all() if latest and submission.status == "SUBMITTED" else []
         grade_result = submission_grade_result(db, latest) if latest and submission.status == "SUBMITTED" and assignment.submitter_type == "INDIVIDUAL" else {"teacher_grade": None, "peer_grade": None, "peer_review_count": 0, "final_grade": None, "grade_source": None}
-        items.append({"id": str(submission.id) if submission else str(owner_id), "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
+        items.append({"id": str(submission.id) if submission else str(owner_id), "submission_version_id": str(latest.id) if latest and submission.status == "SUBMITTED" else None, "submission_version_no": latest.version_no if latest and submission.status == "SUBMITTED" else None, "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
     return {"items": items, "total": len(items)}
 
 
@@ -1797,14 +1969,26 @@ def preview_file(fid: UUID, user: CurrentUser, db: Db):
     if not file: raise ApiError(404, "FILE_NOT_FOUND", "文件不存在")
     response = download(fid, user, db)
     path = settings.file_root / file.storage_path
-    if path.suffix.lower() == ".md":
-        html = markdown.markdown(path.read_text(encoding="utf-8"), extensions=["fenced_code"])
-        return HTMLResponse(clean_html(html))
+    if path.suffix.lower() in {".md", ".html", ".htm"}:
+        rendered, _ = render_rich_file(path)
+        return HTMLResponse(rendered)
     if path.suffix.lower() in {".docx", ".pptx", ".xlsx"}:
         return response
     # Preview endpoints must render in the browser; the download endpoint keeps
     # the original filename and attachment disposition.
     return FileResponse(path, media_type=file.detected_mime, headers={"Content-Disposition": "inline"})
+
+
+@app.get("/api/v1/files/{fid}/render")
+def render_file(fid: UUID, user: CurrentUser, db: Db):
+    file = db.get(FileObject, fid)
+    if not file: raise ApiError(404, "FILE_NOT_FOUND", "文件不存在")
+    download(fid, user, db)
+    path = settings.file_root / file.storage_path
+    if path.suffix.lower() not in {".md", ".html", ".htm"}:
+        raise ApiError(422, "FILE_RENDER_TYPE_INVALID", "该文件不使用富文本渲染接口")
+    rendered, content_hash = render_rich_file(path)
+    return {"render_type": "RICH_TEXT", "html": rendered, "content_hash": content_hash}
 
 
 @app.get("/api/v1/assignments/{aid}/download.zip")

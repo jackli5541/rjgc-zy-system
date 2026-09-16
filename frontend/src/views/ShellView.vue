@@ -6,6 +6,7 @@ import { ArrowLeftOutlined, BellOutlined, BoldOutlined, BookOutlined, CheckCircl
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { api } from '../api'
+import FileReviewDrawer from '../components/FileReviewDrawer.vue'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
@@ -63,11 +64,10 @@ const passwordForm = reactive({ current_password: '', new_password: '' })
 const gradePublishReason = ref('')
 const inviteTarget = ref('')
 const importState = reactive({ file: null, preview: null, result: null, step: 0, loading: false })
-const filePreview = reactive({ open: false, files: [], index: 0, url: '', loading: false, error: '' })
+const filePreview = reactive({ open: false, files: [], index: 0 })
 const currentTime = ref(Date.now())
 let gateTimer
 let clockTimer
-let previewLoadSequence = 0
 
 const descriptionEditor = useEditor({
   content: '',
@@ -148,11 +148,10 @@ const canSubmitAssignment = computed(() => {
 const campaignEnded = computed(() => Boolean(selectedCampaign.value && (selectedCampaign.value.status !== 'ACTIVE' || new Date(selectedCampaign.value.due_at) <= new Date())))
 const currentCampaignReviews = computed(() => receivedReviews.value.filter(item => item.campaign_id === selectedCampaign.value?.id))
 const selectedReviewCandidate = computed(() => reviewTask.value?.candidates?.find(item => item.user_id === reviewForm.reviewee_id) || null)
-const activePreviewFile = computed(() => filePreview.files[filePreview.index] || null)
-const activePreviewIsImage = computed(() => /\.(png|jpe?g|gif|webp)$/i.test(activePreviewFile.value?.name || ''))
 const reviewConfigEditable = computed(() => Boolean(selectedAssignment.value && selectedAssignment.value.status !== 'CLOSED' && new Date(selectedAssignment.value.due_at) > new Date() && !selectedCampaign.value))
 const studentLatestGrade = computed(() => grades.value[0])
 const assignmentHistory = computed(() => dashboard.value?.assignment_history || [])
+const latestOverviewAssignment = computed(() => assignmentHistory.value.at(-1))
 const assignmentChartPoints = computed(() => {
   const items = assignmentHistory.value
   if (!items.length) return []
@@ -250,7 +249,7 @@ async function loadView({ silent = false } = {}) {
     }
     if (view.value === 'assignments') assignments.value = (await api(`/assignments?class_id=${classId.value}`)).items
     if (view.value === 'assignment-detail') {
-      if (!assignments.value.length) assignments.value = (await api(`/assignments?class_id=${classId.value}`)).items
+      assignments.value = (await api(`/assignments?class_id=${classId.value}`)).items
       const assignment = assignments.value.find(item => item.id === detailId.value)
       if (!assignment) { message.error('作业不存在或无权查看'); await router.replace('/assignments') }
       else {
@@ -445,10 +444,7 @@ async function createAssignment(publishRequested = false) {
 }
 async function loadAssignmentDetail(item) {
   selectedAssignment.value = item; selectedSubmission.value = null; selectedCampaign.value = null; campaignStats.value = null; campaignReviews.value = []; gradeDetail.value = null; boardFilter.value = 'ALL'; boardTeamFilter.value = 'ALL'; boardQuery.value = ''
-  const [files, campaignData] = await Promise.all([
-    api(`/assignments/${item.id}/files`),
-    role.value === 'TEACHER' ? api(`/review-campaigns?class_id=${item.class_id}`) : Promise.resolve({ items: [] })
-  ])
+  const files = await api(`/assignments/${item.id}/files`)
   assignmentAttachments.value = files.attachments; reviewCriteriaFiles.value = files.review_criteria || []; draftFiles.value = files.drafts
   if (role.value === 'STUDENT') {
     item.submission = await api(`/assignments/${item.id}/submission`)
@@ -456,12 +452,6 @@ async function loadAssignmentDetail(item) {
   else {
     const [boardData, teamData] = await Promise.all([api(`/assignments/${item.id}/submissions`), api(`/teams?class_id=${item.class_id}`)])
     item.board = boardData.items; teams.value = teamData.items
-    campaigns.value = campaignData.items
-    const campaign = campaigns.value.find(record => record.assignment_id === item.id)
-    if (campaign) {
-      await loadCampaignDetail(campaign)
-      if (campaign.grades_generated_at) await loadGradeAssignment(item.id)
-    }
   }
 }
 function changeAssignmentDetailTab(key) {
@@ -510,6 +500,14 @@ function openSubmissionDetail(record) {
   Object.assign(teacherGradeForm, { grade: record.teacher_grade?.grade || 'A', comment: record.teacher_grade?.comment || '' })
   if (record.files?.length) openFilePreview(record.files[0], record.files)
 }
+function openStudentFeedback(record) {
+  selectedSubmission.value = { ...record, owner: record.assignment_title }
+  if (record.files?.length) openFilePreview(record.files[0], record.files)
+}
+async function handleFeedbackPublished(result) {
+  if (selectedSubmission.value && result) Object.assign(selectedSubmission.value, result)
+  if (role.value === 'TEACHER' && selectedAssignment.value) await refreshSubmissionBoard()
+}
 async function saveTeacherGrade() {
   try {
     const saved = await api(`/assignments/${selectedAssignment.value.id}/submissions/${selectedSubmission.value.user_id}/grade`, { method: 'POST', body: JSON.stringify(teacherGradeForm) })
@@ -524,6 +522,7 @@ async function clearTeacherGrade() {
     Object.assign(selectedSubmission.value, result)
     await refreshSubmissionBoard()
     Object.assign(teacherGradeForm, { grade: 'A', comment: '' })
+    closeFilePreview()
     message.success(result.final_grade ? '已恢复由互评成绩决定' : '教师评分已清除，当前暂无互评成绩')
   } catch (error) { message.error(error.message) }
 }
@@ -597,68 +596,14 @@ function downloadExport(kind, format = 'xlsx') {
   const assignment = kind === 'grades' && selectedGradeAssignmentId.value ? `&assignment_id=${selectedGradeAssignmentId.value}` : ''
   window.location.href = `/api/v1/exports/${kind}.${format}?class_id=${classId.value}${assignment}`
 }
-function clearPreviewUrl() {
-  if (filePreview.url) URL.revokeObjectURL(filePreview.url)
-  filePreview.url = ''
-}
-async function loadFilePreview() {
-  const requestSequence = ++previewLoadSequence
-  clearPreviewUrl()
-  filePreview.error = ''
-  const file = activePreviewFile.value
-  if (!file) return
-  if (!file.previewable || file.download_only || (file.preview_status && file.preview_status !== 'READY')) {
-    filePreview.loading = false
-    filePreview.error = file.preview_error || '该文件格式暂不支持在线预览，可下载原文件查看。'
-    return
-  }
-  filePreview.loading = true
-  try {
-    const response = await fetch(`/api/v1/files/${file.id}/preview`, { credentials: 'include' })
-    if (response.status === 401) window.dispatchEvent(new CustomEvent('auth-expired'))
-    if (!response.ok) {
-      const type = response.headers.get('content-type') || ''
-      const body = type.includes('json') ? await response.json() : await response.text()
-      throw new Error(body?.message || body?.detail?.message || '文件预览加载失败')
-    }
-    const contentType = response.headers.get('content-type') || ''
-    if (!contentType.startsWith('image/') && !contentType.includes('application/pdf') && !contentType.includes('text/html')) {
-      throw new Error('该文件内容无法在浏览器中预览')
-    }
-    const objectUrl = URL.createObjectURL(await response.blob())
-    if (requestSequence !== previewLoadSequence || !filePreview.open) { URL.revokeObjectURL(objectUrl); return }
-    filePreview.url = objectUrl
-  } catch (error) {
-    if (requestSequence === previewLoadSequence) filePreview.error = error.message || '文件预览加载失败，请下载原文件查看。'
-  } finally {
-    if (requestSequence === previewLoadSequence) filePreview.loading = false
-  }
-}
 function openFilePreview(file, files) {
   filePreview.files = [...(files || [])]
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file.id))
   filePreview.open = true
-  loadFilePreview()
-}
-function switchFilePreview(step) {
-  const next = filePreview.index + step
-  if (next < 0 || next >= filePreview.files.length) return
-  filePreview.index = next
-  loadFilePreview()
 }
 function closeFilePreview() {
-  previewLoadSequence += 1
   filePreview.open = false
-  filePreview.loading = false
-  filePreview.error = ''
-  clearPreviewUrl()
   selectedSubmission.value = null
-}
-function selectFilePreview(fileId) {
-  const index = filePreview.files.findIndex(item => item.id === fileId)
-  if (index < 0) return
-  filePreview.index = index
-  loadFilePreview()
 }
 
 async function pollGate() {
@@ -669,7 +614,7 @@ async function pollGate() {
 }
 
 watch(() => route.path, (path, previousPath) => {
-  const opensTeacherDrawer = role.value === 'TEACHER' && previousPath === '/assignments' && path.startsWith('/assignments/')
+  const opensTeacherDrawer = role.value === 'TEACHER' && ['/assignments', '/overview', '/'].includes(previousPath) && path.startsWith('/assignments/')
   const closesTeacherDrawer = role.value === 'TEACHER' && path === '/assignments' && previousPath?.startsWith('/assignments/')
   loadView({ silent: opensTeacherDrawer || closesTeacherDrawer })
 })
@@ -696,7 +641,7 @@ onBeforeUnmount(() => { clearInterval(gateTimer); clearInterval(clockTimer); win
       <template v-if="view==='overview'">
         <div class="page-title"><div><div class="eyebrow">{{ role==='TEACHER'?'教师工作台':'学生学习台' }}</div><h1>{{ session.context?.current_class?.name || '还没有教学班' }}</h1><p>{{ classId ? (role==='TEACHER'?'掌握教学班、小组和课程任务的整体进展。':'查看我的小组、待完成作业和课程反馈。') : (role==='TEACHER'?'创建教学班后即可导入学生并开展课程。':'请联系教师加入教学班。') }}</p></div><a-button v-if="role==='TEACHER'&&!classId" type="primary" @click="openClassCreate"><PlusOutlined /> 创建教学班</a-button></div>
         <a-empty v-if="!classId" description="暂无教学班"/>
-        <div v-else-if="role==='TEACHER'" class="stat-grid"><div class="stat-card"><UserOutlined class="stat-icon blue"/><div class="stat-body"><span>教学班人数</span><strong>{{ dashboard?.summary.member_count||0 }}<small>人</small></strong></div></div><div class="stat-card"><TeamOutlined class="stat-icon purple"/><div class="stat-body"><span>当前小组</span><strong>{{ dashboard?.summary.team_count||0 }}<small>组</small></strong></div></div><div class="stat-card"><UserOutlined class="stat-icon orange"/><div class="stat-body"><span>未进入小组</span><strong>{{ dashboard?.summary.ungrouped_member_count||0 }}<small>人</small></strong></div></div><div class="stat-card"><FileTextOutlined class="stat-icon green"/><div class="stat-body"><span>进行中作业</span><strong>{{ dashboard?.summary.active_assignments||0 }}<small>项</small></strong></div></div><div class="stat-card"><FormOutlined class="stat-icon blue"/><div class="stat-body"><span>最近结束互评</span><strong>{{ dashboard?.summary.peer_review_rate||0 }}<small>%</small></strong><em>{{dashboard?.summary.peer_review_assignment_title||'暂无互评'}}</em></div></div></div>
+        <div v-else-if="role==='TEACHER'" class="stat-grid"><div class="stat-card"><UserOutlined class="stat-icon blue"/><div class="stat-body"><span>教学班人数</span><strong>{{ dashboard?.summary.member_count||0 }}<small>人</small></strong></div></div><div class="stat-card"><TeamOutlined class="stat-icon purple"/><div class="stat-body"><span>当前小组</span><strong>{{ dashboard?.summary.team_count||0 }}<small>组</small></strong></div></div><div class="stat-card"><UserOutlined class="stat-icon orange"/><div class="stat-body"><span>未进入小组</span><strong>{{ dashboard?.summary.ungrouped_member_count||0 }}<small>人</small></strong></div></div><div class="stat-card assignment-stat-card"><FileTextOutlined class="stat-icon green"/><div class="stat-body"><span>进行中作业</span><strong>{{ dashboard?.summary.active_assignments||0 }}<small>项</small></strong></div><button class="overview-submission-shortcut" :disabled="loading||!latestOverviewAssignment" :title="latestOverviewAssignment?`查看 ${latestOverviewAssignment.title} 的提交情况`:`暂无作业`" @click="router.push(`/assignments/${latestOverviewAssignment.id}?tab=submission`)"><span>最近作业提交情况</span><RightOutlined/></button></div></div>
         <section v-if="role==='TEACHER'&&classId" class="completion-chart-panel"><div class="completion-chart-heading"><div><h2>最近作业完成情况</h2><span>按截止时间展示最近 6 次作业的提交完成率</span></div><strong v-if="assignmentHistory.length">{{assignmentHistory.at(-1).completion_rate}}%</strong></div><a-empty v-if="!assignmentHistory.length" description="暂无作业完成数据"/><div v-else class="completion-chart-scroll"><div class="completion-chart"><div class="chart-y-axis"><span>100%</span><span>50%</span><span>0%</span></div><svg viewBox="0 0 920 200" preserveAspectRatio="none" role="img" aria-label="最近作业完成率折线图"><line v-for="y in [18,100,182]" :key="y" x1="0" :y1="y" x2="920" :y2="y" class="chart-grid-line"/><polyline :points="assignmentChartLine" class="chart-line"/><g v-for="point in assignmentChartPoints" :key="point.id"><circle :cx="point.x" :cy="point.y" r="6" class="chart-point"/><text :x="point.x" :y="Math.max(13,point.y-12)" text-anchor="middle" class="chart-value">{{point.completion_rate}}%</text></g></svg><div class="chart-labels"><span v-for="(point,index) in assignmentChartPoints" :key="point.id" :class="{first:index===0,last:index===assignmentChartPoints.length-1}" :title="point.title" :style="{left:`${point.x/9.2}%`}">{{point.title}}</span></div></div></div></section>
         <div v-else class="student-overview"><a-card class="student-focus" :bordered="false"><TeamOutlined class="student-focus-icon purple"/><div><span>当前小组与选题</span><strong>{{currentTeam?.name||'尚未加入小组'}}</strong><p>{{currentTeam?.topic?.name||'暂未提交选题'}}</p></div></a-card><div class="stat-grid"><div class="stat-card"><FileTextOutlined class="stat-icon blue"/><div class="stat-body"><span>待提交作业</span><strong>{{studentPendingAssignments.length}}<small>项</small></strong></div></div><div class="stat-card"><CheckCircleOutlined class="stat-icon orange"/><div class="stat-body"><span>72 小时内截止</span><strong>{{studentUpcomingAssignments.length}}<small>项</small></strong></div></div><div class="stat-card"><FormOutlined class="stat-icon purple"/><div class="stat-body"><span>待完成互评</span><strong>{{studentPendingReviews}}<small>份</small></strong></div></div><div class="stat-card"><TrophyOutlined class="stat-icon green"/><div class="stat-body"><span>最新成绩</span><strong>{{studentLatestGrade?(studentLatestGrade.final_grade||studentLatestGrade.score):'-' }}</strong></div></div></div><a-card class="panel-card student-todo-card" :bordered="false"><div class="card-toolbar"><strong>近期待办</strong></div><a-empty v-if="!needsTopicSubmission&&!studentPendingAssignments.length&&!studentPendingReviews" description="当前没有待完成事项"/><div v-if="needsTopicSubmission" class="student-todo-row actionable" @click="router.push(`/teams?team=${currentTeam.id}`)"><TeamOutlined/><div><strong>提交小组选题</strong><span>小组已创建，请完善选题并提交审核</span></div><a-tag color="orange">待提交</a-tag></div><div v-for="item in studentPendingAssignments.slice(0,3)" :key="item.id" class="student-todo-row actionable" @click="router.push(`/assignments/${item.id}`)"><FileTextOutlined/><div><strong>{{item.title}}</strong><span>截止 {{formatTime(item.due_at)}}</span></div><a-tag v-if="item.starts_at&&new Date(item.starts_at)>new Date()">未开始</a-tag><a-tag v-else color="orange">待提交</a-tag></div><div v-if="studentPendingReviews" class="student-todo-row actionable" @click="router.push('/reviews')"><FormOutlined/><div><strong>组内作品互评</strong><span>还有 {{studentPendingReviews}} 份评价待完成</span></div><a-tag color="blue">待互评</a-tag></div></a-card></div>
       </template>
@@ -718,7 +663,7 @@ onBeforeUnmount(() => { clearInterval(gateTimer); clearInterval(clockTimer); win
 
       <template v-else-if="view==='assignments'||(view==='assignment-detail'&&role==='TEACHER')">
         <div class="page-title"><div><div class="eyebrow">{{role==='TEACHER'?'教学任务':'学习任务'}}</div><h1>{{role==='TEACHER'?'作业管理':'我的作业'}}</h1><p>{{role==='TEACHER'?'发布作业、维护附件并查看全班提交情况。':'查看作业要求，管理草稿并完成正式提交。'}}</p></div><a-button v-if="role==='TEACHER'" type="primary" :disabled="!activeClasses.length" @click="openAssignmentCreate"><PlusOutlined /> 新建作业</a-button></div>
-        <a-empty v-if="!assignments.length" description="暂无作业"/><a-card v-for="item in assignments" :key="item.id" class="assignment-row" :class="assignmentStateClass(item)" :bordered="false" @click="openAssignment(item)"><div class="assignment-icon blue"><FileTextOutlined/></div><div class="assignment-main"><div class="assignment-heading"><h3>{{item.title}}</h3><a-tag v-if="role==='STUDENT'&&item.submission_status==='SUBMITTED'">已完成</a-tag><a-tag v-else-if="role==='STUDENT'&&new Date(item.due_at)<=new Date()" color="error">已逾期</a-tag></div><div class="rich-text compact" v-html="item.description"></div><span>截止 {{formatTime(item.due_at)}}</span></div><div class="assignment-end"><strong class="assignment-countdown" :class="assignmentCountdown(item).state">{{assignmentCountdown(item).label}}</strong><div class="assignment-tags"><a-tag>{{item.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="item.status==='PUBLISHED'?'green':'default'">{{statusLabel(item.status)}}</a-tag></div><div v-if="role==='TEACHER'" class="assignment-entry-actions" @click.stop><a-button type="link" @click="openAssignment(item,'details')">详情</a-button><a-button type="link" @click="openAssignment(item,'submission')">查看与评分</a-button></div></div></a-card>
+        <a-empty v-if="!assignments.length" description="暂无作业"/><a-card v-for="item in assignments" :key="item.id" class="assignment-row" :class="assignmentStateClass(item)" :bordered="false" @click="openAssignment(item)"><div class="assignment-icon blue"><FileTextOutlined/></div><div class="assignment-main"><div class="assignment-heading"><h3>{{item.title}}</h3><a-tag v-if="role==='STUDENT'&&item.submission_status==='SUBMITTED'">已完成</a-tag><a-tag v-else-if="role==='STUDENT'&&new Date(item.due_at)<=new Date()" color="error">已逾期</a-tag></div><div class="rich-text compact" v-html="item.description"></div><span>截止 {{formatTime(item.due_at)}}</span></div><div class="assignment-end"><strong class="assignment-countdown" :class="assignmentCountdown(item).state">{{assignmentCountdown(item).label}}</strong><div class="assignment-tags"><a-tag>{{item.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="item.status==='PUBLISHED'?'green':'default'">{{statusLabel(item.status)}}</a-tag></div><div v-if="role==='TEACHER'" class="assignment-entry-actions" @click.stop><a-button @click="openAssignment(item,'details')"><EyeOutlined/> 详情</a-button><a-button type="primary" @click="openAssignment(item,'submission')"><InboxOutlined/> 提交情况</a-button></div></div></a-card>
       </template>
 
       <template v-if="view==='assignment-detail'&&selectedAssignment">
@@ -726,9 +671,9 @@ onBeforeUnmount(() => { clearInterval(gateTimer); clearInterval(clockTimer); win
           <div class="assignment-drawer-mask" @click="closeAssignmentDrawer"></div>
         </template>
         <div :class="{'assignment-detail-drawer':role==='TEACHER'}">
-        <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag color="blue">{{selectedAssignment.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="router.push('/assignments')"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
-        <section class="assignment-workspace">
-          <a-tabs :active-key="assignmentDetailTab" class="assignment-detail-tabs" @change="changeAssignmentDetailTab">
+         <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag color="blue">{{selectedAssignment.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="router.push('/assignments')"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
+         <section class="assignment-workspace">
+           <a-tabs :active-key="assignmentDetailTab" class="assignment-detail-tabs" @change="changeAssignmentDetailTab">
             <a-tab-pane key="details" :tab="role==='TEACHER'?'详情':'作业详情'">
               <section class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业说明</h2></div>
@@ -754,7 +699,7 @@ onBeforeUnmount(() => { clearInterval(gateTimer); clearInterval(clockTimer); win
                   <div class="assignment-pane-heading"><h2>提交明细</h2></div>
                   <div class="board-toolbar"><a-input-search v-model:value="boardQuery" allow-clear placeholder="搜索姓名或学号"/><a-select v-model:value="boardTeamFilter" :options="boardTeamOptions"/><a-segmented v-model:value="boardFilter" :options="[{label:'全部',value:'ALL'},{label:'未提交',value:'NOT_SUBMITTED'},{label:'已提交',value:'SUBMITTED'},{label:'迟交',value:'LATE'}]"/></div>
                   <a-empty v-if="!groupedBoard.length" class="detail-empty" description="没有符合条件的提交记录"/>
-                  <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false" :scroll="{x:860}"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="最终成绩"><template #default="{record}"><a-tag v-if="record.final_grade" :color="record.grade_source==='TEACHER'?'green':'blue'">{{record.final_grade}} · {{record.grade_source==='TEACHER'?'教师':'互评'}}</a-tag><span v-else>-</span></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看评分</a-button><span v-else>-</span></template></a-table-column></a-table></section>
+                  <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="最终成绩"><template #default="{record}"><a-tag v-if="record.final_grade" :color="record.grade_source==='TEACHER'?'green':'blue'">{{record.final_grade}} · {{record.grade_source==='TEACHER'?'教师':'互评'}}</a-tag><span v-else>-</span></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
                 </section>
               </template>
               <template v-else>
@@ -838,32 +783,22 @@ onBeforeUnmount(() => { clearInterval(gateTimer); clearInterval(clockTimer); win
             <section class="export-item export-grade-item"><div class="export-item-icon green"><TrophyOutlined/></div><div><h2>作业成绩</h2><p>选择一项已生成成绩记录的互评作业。</p><a-select v-model:value="selectedGradeAssignmentId" allow-clear placeholder="选择作业" :options="gradeAssignments.map(item=>({value:item.id,label:item.title}))"/></div><a-space><a-button :disabled="!selectedGradeAssignmentId" @click="downloadExport('grades')"><DownloadOutlined/> XLSX</a-button><a-button :disabled="!selectedGradeAssignmentId" @click="downloadExport('grades','csv')"><DownloadOutlined/> CSV</a-button></a-space></section>
           </div>
         </template>
-        <template v-else><a-empty v-if="!grades.length" description="暂无成绩"/><a-table v-else :data-source="grades" row-key="id"><a-table-column title="作业" data-index="assignment_title"/><a-table-column title="互评成绩"><template #default="{record}">{{record.peer_grade||'-'}}<span v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</span></template></a-table-column><a-table-column title="教师评分"><template #default="{record}">{{record.teacher_grade?.grade||'-'}}</template></a-table-column><a-table-column title="最终成绩"><template #default="{record}"><a-tag color="green">{{record.final_grade}}</a-tag></template></a-table-column><a-table-column title="来源"><template #default="{record}">{{record.grade_source==='TEACHER'?'教师评分':'组内互评'}}</template></a-table-column></a-table></template>
+        <template v-else><a-empty v-if="!grades.length" description="暂无成绩"/><a-table v-else :data-source="grades" row-key="id"><a-table-column title="作业" data-index="assignment_title"/><a-table-column title="互评成绩"><template #default="{record}">{{record.peer_grade||'-'}}<span v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</span></template></a-table-column><a-table-column title="教师评分"><template #default="{record}">{{record.teacher_grade?.grade||'-'}}</template></a-table-column><a-table-column title="最终成绩"><template #default="{record}"><a-tag color="green">{{record.final_grade}}</a-tag></template></a-table-column><a-table-column title="来源"><template #default="{record}">{{record.grade_source==='TEACHER'?'教师评分':'组内互评'}}</template></a-table-column><a-table-column title="反馈"><template #default="{record}"><a-button v-if="record.teacher_grade&&record.files?.length" type="link" @click="openStudentFeedback(record)"><EyeOutlined/> 查看教师反馈</a-button><span v-else>-</span></template></a-table-column></a-table></template>
       </template>
       <template v-else-if="view==='system'&&role==='TEACHER'"><div class="page-title"><div><div class="eyebrow">运行管理</div><h1>系统与审计</h1><p>关键业务操作不可修改。</p></div></div><a-empty v-if="!audits.length" description="暂无审计记录"/><a-table v-else :data-source="audits" row-key="id"><a-table-column title="时间"><template #default="{record}">{{formatTime(record.created_at)}}</template></a-table-column><a-table-column title="操作者" data-index="actor"/><a-table-column title="操作"><template #default="{record}">{{actionLabel(record.action)}}</template></a-table-column><a-table-column title="对象"><template #default="{record}">{{objectLabel(record.object_type)}}</template></a-table-column></a-table></template>
     </a-spin></div></a-layout-content>
 
-    <a-drawer :open="filePreview.open" :width="'min(100vw, 1040px)'" placement="right" root-class-name="file-preview-drawer" :title="activePreviewFile?.name||'文件预览'" @close="closeFilePreview">
-      <div class="file-preview-toolbar">
-        <a-space>
-          <a-tooltip title="上一个文件"><span><a-button shape="circle" :disabled="filePreview.index<=0" @click="switchFilePreview(-1)"><LeftOutlined/></a-button></span></a-tooltip>
-          <span>{{filePreview.files.length ? `${filePreview.index+1} / ${filePreview.files.length}` : '0 / 0'}}</span>
-          <a-tooltip title="下一个文件"><span><a-button shape="circle" :disabled="filePreview.index>=filePreview.files.length-1" @click="switchFilePreview(1)"><RightOutlined/></a-button></span></a-tooltip>
-          <a-select v-if="filePreview.files.length>1" :value="activePreviewFile?.id" style="min-width:220px" :options="filePreview.files.map(item=>({value:item.id,label:item.name}))" @change="selectFilePreview"/>
-        </a-space>
-        <a-button v-if="activePreviewFile" :href="`/api/v1/files/${activePreviewFile.id}`"><DownloadOutlined/> 下载原文件</a-button>
-      </div>
-      <div class="file-preview-stage">
-        <a-spin v-if="filePreview.loading" size="large" tip="正在加载文件"/>
-        <a-result v-else-if="filePreview.error" status="warning" title="无法在线预览" :sub-title="filePreview.error"><template #extra><a-button v-if="activePreviewFile" type="primary" :href="`/api/v1/files/${activePreviewFile.id}`"><DownloadOutlined/> 下载原文件</a-button></template></a-result>
-        <img v-else-if="filePreview.url&&activePreviewIsImage" :src="filePreview.url" :alt="activePreviewFile?.name" @error="filePreview.error='图片加载失败，请下载原文件查看。'"/>
-        <iframe v-else-if="filePreview.url" :src="filePreview.url" :title="activePreviewFile?.name"/>
-      </div>
-      <section v-if="selectedSubmission&&role==='TEACHER'&&selectedAssignment?.submitter_type==='INDIVIDUAL'" class="preview-grade-panel">
-        <div class="assignment-pane-heading"><div><h2>{{selectedSubmission.owner}} · 教师评分</h2><span>教师评分可选；未评分时最终成绩取组内互评汇总</span></div><a-tag v-if="selectedSubmission.final_grade" :color="selectedSubmission.grade_source==='TEACHER'?'green':'blue'">最终 {{selectedSubmission.final_grade}} · {{selectedSubmission.grade_source==='TEACHER'?'教师':'互评'}}</a-tag></div>
-        <a-form layout="vertical"><a-form-item label="教师等级"><a-segmented v-model:value="teacherGradeForm.grade" block :options="['A','B','C','D','E']"/></a-form-item><a-form-item label="评语"><a-textarea v-model:value="teacherGradeForm.comment" :rows="3" :maxlength="2000" show-count/></a-form-item><div class="modal-actions"><a-button v-if="selectedSubmission.teacher_grade" danger @click="clearTeacherGrade">清除教师评分</a-button><a-button type="primary" @click="saveTeacherGrade">{{selectedSubmission.teacher_grade?'更新教师评分':'保存教师评分'}}</a-button></div></a-form>
-      </section>
-    </a-drawer>
+    <FileReviewDrawer
+      :open="filePreview.open"
+      :files="filePreview.files"
+      :initial-index="filePreview.index"
+      :submission-version-id="selectedSubmission?.submission_version_id||''"
+      :owner="selectedSubmission?.owner||''"
+      :editable="role==='TEACHER'&&selectedAssignment?.submitter_type==='INDIVIDUAL'&&Boolean(selectedSubmission)"
+      @close="closeFilePreview"
+      @feedback-published="handleFeedbackPublished"
+      @clear-feedback="clearTeacherGrade"
+    />
 
     <a-modal v-model:open="noticesOpen" title="站内通知" :footer="null" width="520px" centered><div class="notification-toolbar"><span>{{notifications.filter(x=>!x.read).length ? `${notifications.filter(x=>!x.read).length} 条未读消息` : '消息已全部阅读'}}</span><a-button v-if="notifications.some(x=>!x.read)" type="link" @click="readAll">全部标为已读</a-button></div><a-empty v-if="!notifications.length" description="暂无通知"/><div v-else class="notification-list"><div v-for="item in notifications" :key="item.id" class="notification-item" :class="{unread:!item.read,actionable:item.link}" @click="openNotification(item)"><span class="notification-dot"/><div><strong>{{item.title}}</strong><span>{{formatTime(item.created_at)}}</span></div><RightOutlined v-if="item.link" class="notification-link-icon"/></div></div></a-modal>
 

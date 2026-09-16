@@ -157,7 +157,7 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await expect(page.getByText('PUBLISHED', { exact: true })).toHaveCount(0)
   const assignmentRow = page.locator('.assignment-row').filter({ hasText: '跨班需求报告' }).first()
   await expect(assignmentRow.getByRole('button', { name: '详情', exact: true })).toBeVisible()
-  await expect(assignmentRow.getByRole('button', { name: '查看与评分', exact: true })).toBeVisible()
+  await expect(assignmentRow.getByRole('button', { name: '提交情况', exact: true })).toBeVisible()
   await assignmentRow.getByRole('button', { name: '详情', exact: true }).click()
   await expect(page).toHaveURL(/\/assignments\/assignment-1$/)
   const assignmentDetail = page.locator('.assignment-workspace')
@@ -208,6 +208,7 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
 
 test('teacher opens submission preview directly and can override the peer grade', async ({ page }) => {
   let teacherGradePayload
+  const peerReviewRequests = []
   const group = { team_id: 'team-1', team_name: '第一小组', draft_value: null, published_value: null, version: 1, member_count: 2 }
   const detail = {
     assignment: { id: 'assignment-grade', title: '需求分析报告', campaign_status: 'CLOSED', grades_generated_at: '2026-09-16T08:00:00Z' },
@@ -224,6 +225,7 @@ test('teacher opens submission preview directly and can override the peer grade'
     const request = route.request()
     const url = new URL(request.url())
     const path = url.pathname.replace('/api/v1', '')
+    if (path.includes('/peer-review')) peerReviewRequests.push(path)
     const json = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/auth/session') return json({ user: { id: 'teacher-1', account: 'teacher', name: '老师', role: 'TEACHER' }, csrf_token: 'test-csrf' })
     if (path === '/classes') return json({ items: [{ id: 'class-1', semester: '2026 秋季', name: '软件工程 1 班', status: 'ACTIVE' }], total: 1 })
@@ -271,14 +273,16 @@ test('teacher opens submission preview directly and can override the peer grade'
   await download
 
   await page.goto('/assignments/assignment-grade?tab=submission')
+  expect(peerReviewRequests).toEqual([])
   const workspace = page.locator('.assignment-workspace')
   await expect(workspace.getByRole('tab', { name: '提交情况', selected: true })).toBeVisible()
-  await workspace.getByRole('button', { name: '查看评分' }).click()
+  await workspace.getByRole('button', { name: '查看作业' }).click()
   const preview = page.locator('.file-preview-drawer')
   await expect(preview).toBeVisible()
   await expect(preview.getByText('1 / 2')).toBeVisible()
   await expect(preview.locator('.ant-select')).toContainText('报告.pdf')
-  await preview.getByText('B', { exact: true }).click()
+  await preview.locator('.preview-grade-form .ant-select').click()
+  await page.getByRole('option', { name: 'B', exact: true }).click()
   await preview.locator('textarea').fill('教师复核后评级。')
   await preview.getByRole('button', { name: '保存教师评分' }).click()
   await expect.poll(() => teacherGradePayload).toEqual({ grade: 'B', comment: '教师复核后评级。' })
