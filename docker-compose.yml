@@ -18,6 +18,8 @@ services:
   api:
     profiles: ["container-app"]
     build: ./backend
+    ports:
+      - "8000:8000"
     environment:
       DATABASE_URL: postgresql+psycopg://coursework:coursework@postgres:5432/coursework
       CORS_ORIGINS: http://localhost:8080
