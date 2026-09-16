@@ -360,14 +360,19 @@ def dashboard(cid: UUID, user: CurrentUser, db: Db):
             ).exists(),
         )
     ) or 0
-    active = db.scalar(select(func.count()).select_from(Assignment).where(Assignment.class_id == cid, Assignment.status == "PUBLISHED", Assignment.due_at >= now())) or 0
-    latest_assignment = db.scalar(select(Assignment).where(Assignment.class_id == cid, Assignment.status == "PUBLISHED", Assignment.due_at >= now()).order_by(Assignment.created_at.desc()).limit(1))
+    visible_assignment = or_(Assignment.starts_at.is_(None), Assignment.starts_at <= now())
+    active_filters = [Assignment.class_id == cid, Assignment.status == "PUBLISHED", Assignment.due_at >= now()]
+    if user.role == "STUDENT": active_filters.append(visible_assignment)
+    active = db.scalar(select(func.count()).select_from(Assignment).where(*active_filters)) or 0
+    latest_assignment = db.scalar(select(Assignment).where(*active_filters).order_by(Assignment.created_at.desc()).limit(1))
     assignment_expected = (members if latest_assignment.submitter_type == "INDIVIDUAL" else teams) if latest_assignment else 0
     assignment_submitted = db.scalar(select(func.count()).select_from(Submission).where(Submission.assignment_id == latest_assignment.id, Submission.status == "SUBMITTED")) if latest_assignment else 0
 
+    history_filters = [Assignment.class_id == cid, Assignment.status.in_(["PUBLISHED", "CLOSED"])]
+    if user.role == "STUDENT": history_filters.append(visible_assignment)
     recent_assignments = list(reversed(db.scalars(
         select(Assignment)
-        .where(Assignment.class_id == cid, Assignment.status.in_(["PUBLISHED", "CLOSED"]))
+        .where(*history_filters)
         .order_by(Assignment.due_at.desc())
         .limit(6)
     ).all()))
@@ -703,7 +708,11 @@ def assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id)
     if user.role == "STUDENT": require_team(db, class_id, user)
     q = select(Assignment).where(Assignment.class_id == class_id)
-    if user.role == "STUDENT": q = q.where(Assignment.status.in_(["PUBLISHED", "CLOSED"]))
+    if user.role == "STUDENT":
+        q = q.where(
+            Assignment.status.in_(["PUBLISHED", "CLOSED"]),
+            or_(Assignment.starts_at.is_(None), Assignment.starts_at <= now()),
+        )
     items = db.scalars(q.order_by(Assignment.created_at.desc())).all()
     result = []
     for item in items:

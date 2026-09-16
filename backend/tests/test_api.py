@@ -172,7 +172,13 @@ def test_assignment_time_window_update_and_review_visibility():
 
     future = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "未开始作业", "description": "测试开始时间限制", "submitter_type": "INDIVIDUAL", "starts_at": "2099-12-01T12:00:00+08:00", "due_at": "2099-12-02T12:00:00+08:00"})
     assert future.status_code == 201, future.text
-    assert student.get(f"/api/v1/assignments?class_id={class_id}").json()["items"][0]["submission_status"] == "NOT_SUBMITTED"
+    teacher_assignments = teacher.get(f"/api/v1/assignments?class_id={class_id}").json()["items"]
+    assert future.json()["id"] in {item["id"] for item in teacher_assignments}
+    assert student.get(f"/api/v1/assignments?class_id={class_id}").json()["items"] == []
+    student_dashboard = student.get(f"/api/v1/classes/{class_id}/dashboard").json()
+    assert student_dashboard["summary"]["active_assignments"] == 0
+    assert student_dashboard["summary"]["submission_assignment_title"] is None
+    assert student_dashboard["assignment_history"] == []
     blocked_upload = student.post(f"/api/v1/assignments/{future.json()['id']}/files", headers=student_headers, files={"file": ("future.pdf", b"future", "application/pdf")})
     assert blocked_upload.status_code == 409 and blocked_upload.json()["code"] == "ASSIGNMENT_NOT_STARTED"
 
@@ -202,8 +208,9 @@ def test_assignment_time_window_update_and_review_visibility():
     dashboard = dashboard_response["summary"]
     assert dashboard["submission_assignment_title"] == "可更新作业" and dashboard["submission_rate"] == 100
     assert dashboard["ungrouped_member_count"] == 0
-    assert dashboard_response["assignment_history"][-1]["title"] == "可更新作业"
-    assert dashboard_response["assignment_history"][-1]["completion_rate"] == 100
+    assignment_history = next(item for item in dashboard_response["assignment_history"] if item["id"] == assignment["id"])
+    assert assignment_history["title"] == "可更新作业"
+    assert assignment_history["completion_rate"] == 100
 
     late_assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "已截止作业", "description": "测试截止后不可撤回", "submitter_type": "INDIVIDUAL", "due_at": "2020-12-02T12:00:00+08:00", "allow_late": True}).json()
     late_file = student.post(f"/api/v1/assignments/{late_assignment['id']}/files", headers=student_headers, files={"file": ("late.pdf", b"late", "application/pdf")}).json()
