@@ -1478,7 +1478,9 @@ def feedback_context(db: Session, version_id: UUID, user: User):
     if user.role == "TEACHER":
         if not user_class(db, user, assignment.class_id): raise ApiError(404, "SUBMISSION_VERSION_NOT_FOUND", "提交版本不存在")
     elif submission_item.owner_user_id != user.id:
-        raise ApiError(403, "FEEDBACK_FORBIDDEN", "无权查看该提交反馈")
+        team_row = membership(db, assignment.class_id, user.id) if submission_item.owner_team_id else None
+        if not team_row or team_row[1].id != submission_item.owner_team_id:
+            raise ApiError(403, "FEEDBACK_FORBIDDEN", "无权查看该提交反馈")
     return version, submission_item, assignment
 
 
@@ -1596,7 +1598,7 @@ def save_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user:
     teacher(user)
     version, submission_item, assignment = feedback_context(db, version_id, user)
     require_writable_class(db, user, assignment.class_id)
-    if assignment.submitter_type != "INDIVIDUAL" or submission_item.owner_user_id is None: raise ApiError(422, "INDIVIDUAL_SUBMISSION_REQUIRED", "当前仅支持个人作业教师批注")
+    subject_user_id = submission_item.owner_user_id or version.submitted_by
     if submission_item.current_version_no != version.version_no: raise ApiError(409, "SUBMISSION_VERSION_READ_ONLY", "历史提交版本只能查看")
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER").with_for_update())
     current_revision = item.version if item else 0
@@ -1604,7 +1606,7 @@ def save_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user:
     annotations = validate_feedback_annotations(db, version.id, data.annotations)
     payload = {"grade": data.grade, "comment": clean_html(data.comment), "annotations": annotations}
     if not item:
-        item = SubmissionAssessment(assignment_id=assignment.id, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=submission_item.owner_user_id, kind="TEACHER", grade=data.grade, comment=payload["comment"], status="PUBLISHED" if publish else "DRAFT", published_at=now() if publish else None)
+        item = SubmissionAssessment(assignment_id=assignment.id, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=subject_user_id, kind="TEACHER", grade=data.grade, comment=payload["comment"], status="PUBLISHED" if publish else "DRAFT", published_at=now() if publish else None)
         db.add(item); db.flush()
         replace_feedback_annotations(db, item, annotations, user)
     elif publish:
@@ -1642,6 +1644,18 @@ def save_submission_feedback_draft(version_id: UUID, data: SubmissionFeedbackIn,
 @app.post("/api/v1/submission-versions/{version_id}/feedback/publish")
 def publish_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user: CsrfUser, db: Db):
     return save_submission_feedback(version_id, data, user, db, True)
+
+
+@app.delete("/api/v1/submission-versions/{version_id}/feedback")
+def delete_submission_feedback(version_id: UUID, user: CsrfUser, db: Db):
+    teacher(user)
+    version, _, assignment = feedback_context(db, version_id, user)
+    require_writable_class(db, user, assignment.class_id)
+    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
+    if item:
+        item_id = str(item.id); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
+    result = submission_grade_result(db, version); db.commit()
+    return result
 
 
 @app.get("/api/v1/files/{fid}")
@@ -2265,7 +2279,7 @@ def submission_board(aid: UUID, user: CurrentUser, db: Db):
         submission = by_owner.get(str(owner_id))
         latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id, SubmissionVersion.version_no == submission.current_version_no)) if submission else None
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == latest.id)).all() if latest and submission.status == "SUBMITTED" else []
-        grade_result = submission_grade_result(db, latest) if latest and submission.status == "SUBMITTED" and assignment.submitter_type == "INDIVIDUAL" else missing_submission_grade_result(assignment) if assignment.submitter_type == "INDIVIDUAL" else {"teacher_grade": None, "peer_grade": None, "peer_review_count": 0, "peer_feedbacks": [], "final_grade": None, "grade_source": None, "grading_status": "PENDING_SUBMISSION"}
+        grade_result = submission_grade_result(db, latest) if latest and submission.status == "SUBMITTED" else missing_submission_grade_result(assignment)
         items.append({"id": str(submission.id) if submission else str(owner_id), "submission_version_id": str(latest.id) if latest and submission.status == "SUBMITTED" else None, "submission_version_no": latest.version_no if latest and submission.status == "SUBMITTED" else None, "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
     return {"items": items, "total": len(items)}
 
@@ -2328,6 +2342,82 @@ def download_submissions(aid: UUID, user: CurrentUser, db: Db):
             owner = db.get(User, submission.owner_user_id) if submission.owner_user_id else db.get(Team, submission.owner_team_id)
             for file in files: archive.write(settings.file_root / file.storage_path, arcname=f"{owner.login_name if isinstance(owner, User) else owner.name}/{file.original_name}")
     audit(db, user, "SUBMISSIONS_EXPORTED", "assignment", str(aid)); db.commit(); return FileResponse(target, media_type="application/zip", filename=f"{assignment.title}.zip")
+
+
+@app.get("/api/v1/teams/{tid}/coursework.zip")
+def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
+    teacher(user)
+    team_item = db.get(Team, tid)
+    if not team_item or team_item.status != "ACTIVE" or not user_class(db, user, team_item.class_id):
+        raise ApiError(404, "TEAM_NOT_FOUND", "小组不存在")
+
+    assignments = db.scalars(select(Assignment).where(
+        Assignment.class_id == team_item.class_id,
+        Assignment.submitter_type == "TEAM",
+        Assignment.status.in_(["PUBLISHED", "CLOSED"]),
+    ).order_by(Assignment.due_at.desc())).all()
+    personal_assignments = db.scalars(select(Assignment).where(
+        Assignment.class_id == team_item.class_id,
+        Assignment.submitter_type == "INDIVIDUAL",
+        Assignment.status.in_(["PUBLISHED", "CLOSED"]),
+    ).order_by(Assignment.due_at.desc())).all()
+    if not assignments and not personal_assignments:
+        raise ApiError(409, "NO_COURSEWORK_TO_EXPORT", "暂无作业可导出")
+    members = db.execute(select(TeamMember, User).join(User).where(
+        TeamMember.team_id == tid, TeamMember.status == "ACTIVE"
+    ).order_by(User.login_name)).all()
+
+    def csv_bytes(rows):
+        output = io.StringIO()
+        csv.writer(output).writerows([[export_cell(value) for value in row] for row in rows])
+        return ("\ufeff" + output.getvalue()).encode("utf-8")
+
+    homework_rows = [["作业", "截止时间", "提交状态", "提交时间", "是否迟交", "附件数"]]
+    archive_file = TemporaryFile()
+    try:
+        with zipfile.ZipFile(archive_file, "w", zipfile.ZIP_DEFLATED) as archive:
+            for assignment in assignments:
+                submission = db.scalar(select(Submission).where(
+                    Submission.assignment_id == assignment.id, Submission.owner_team_id == tid
+                ))
+                version = db.scalar(select(SubmissionVersion).where(
+                    SubmissionVersion.submission_id == submission.id,
+                    SubmissionVersion.version_no == submission.current_version_no,
+                )) if submission and submission.status == "SUBMITTED" else None
+                files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(
+                    VersionFile.version_id == version.id
+                )).all() if version else []
+                homework_rows.append([assignment.title, assignment.due_at, "已提交" if version else "未提交", version.submitted_at if version else None, "是" if version and version.is_late else "否", len(files)])
+                for file in files:
+                    archive.write(settings.file_root / file.storage_path, arcname=f"小组作业/{assignment.id}/{file.id}-{Path(file.original_name).name}")
+            archive.writestr("小组作业提交记录.csv", csv_bytes(homework_rows))
+
+            grade_rows = [["作业", "学号", "姓名", "提交状态", "最终成绩", "成绩来源", "评分状态"]]
+            for assignment in personal_assignments:
+                for _, person in members:
+                    submitted = latest_personal_submission(db, assignment.id, person.id)
+                    result = submission_grade_result(db, submitted[1]) if submitted else missing_submission_grade_result(assignment)
+                    legacy = db.scalar(select(Grade).where(Grade.assignment_id == assignment.id, Grade.subject_user_id == person.id))
+                    score = result["final_grade"] or (legacy.score if legacy and legacy.status == "PUBLISHED" else None)
+                    source = result["grade_source"]
+                    grade_rows.append([
+                        assignment.title, person.login_name, person.display_name, "已提交" if submitted else "未提交",
+                        score, {"TEACHER": "教师评分", "PEER": "学生互评", "SYSTEM": "系统判定"}.get(source, "历史成绩" if score is not None else ""),
+                        "已评分" if score is not None else "待评分",
+                    ])
+            archive.writestr("本组成员成绩.csv", csv_bytes(grade_rows))
+
+        archive_file.seek(0)
+        def stream():
+            try:
+                while chunk := archive_file.read(1024 * 1024):
+                    yield chunk
+            finally:
+                archive_file.close()
+        return StreamingResponse(stream(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="team-{tid}-coursework.zip"'})
+    except Exception:
+        archive_file.close()
+        raise
 
 
 @app.get("/api/v1/review-campaigns/{cid}/stats")

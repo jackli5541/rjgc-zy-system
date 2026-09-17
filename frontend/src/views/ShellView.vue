@@ -17,6 +17,7 @@ import ReviewDetailPage from './shell/ReviewDetailPage.vue'
 import ReviewsPage from './shell/ReviewsPage.vue'
 import SystemPage from './shell/SystemPage.vue'
 import TeamsPage from './shell/TeamsPage.vue'
+import TeamAssignmentChart from '../components/TeamAssignmentChart.vue'
 import { useSessionStore } from '../stores/session'
 import { shellContextKey } from '../shellContext'
 
@@ -41,6 +42,10 @@ const selectedGradeAssignmentId = ref('')
 const notifications = ref([])
 const audits = ref([])
 const selectedTeam = ref(null)
+const selectedTeamAssignments = ref([])
+const teamDrawerLoading = ref(false)
+const exportingTeamIds = reactive(new Set())
+let teamRequestGeneration = 0
 const selectedAssignment = ref(null)
 const selectedSubmission = ref(null)
 const openedSubmissionPreview = ref('')
@@ -428,7 +433,32 @@ async function createTeam() {
 async function applyTeam(item) { await action(() => api(`/teams/${item.id}/applications`, { method: 'POST' }), '申请已提交') }
 async function cancelRequest(item) { await action(() => api(`/team-requests/${item.id}`, { method: 'DELETE' }), '申请已取消') }
 async function decideRequest(item, decision) { await action(() => api(`/team-requests/${item.id}/decision?decision=${decision}`, { method: 'POST' }), decision === 'APPROVED' ? '已同意申请' : '已拒绝申请') }
-async function openTeam(item) { selectedTeam.value = await api(`/teams/${item.id}`); topicForm.name = item.topic?.name || ''; topicForm.description = item.topic?.description || ''; if (item.is_leader || role.value === 'TEACHER') members.value = (await api(`/classes/${classId.value}/members`)).items }
+async function openTeam(item) {
+  const generation = ++teamRequestGeneration
+  teamDrawerLoading.value = true
+  selectedTeamAssignments.value = []
+  try {
+    selectedTeam.value = await api(`/teams/${item.id}`)
+    topicForm.name = item.topic?.name || ''
+    topicForm.description = item.topic?.description || ''
+    if (item.is_leader || role.value === 'TEACHER') members.value = (await api(`/classes/${classId.value}/members`)).items
+    if (role.value === 'TEACHER') {
+      const assignmentData = await api(`/assignments?class_id=${classId.value}`)
+      const recentAssignments = assignmentData.items.filter(assignment => assignment.submitter_type === 'TEAM' && assignment.status !== 'DRAFT').slice(0, 5)
+      const history = await Promise.all(recentAssignments.map(async assignment => {
+        const board = await api(`/assignments/${assignment.id}/submissions`)
+        const submission = board.items.find(record => record.team_id === item.id)
+        return { ...assignment, submission: submission || { status: 'NOT_SUBMITTED', files: [] } }
+      }))
+      if (generation === teamRequestGeneration) selectedTeamAssignments.value = history
+    }
+  } catch (e) {
+    if (generation === teamRequestGeneration) { selectedTeam.value = null; message.error(e.message) }
+  } finally {
+    if (generation === teamRequestGeneration) teamDrawerLoading.value = false
+  }
+}
+function closeTeamDrawer() { teamRequestGeneration++; selectedTeam.value = null; selectedTeamAssignments.value = []; teamDrawerLoading.value = false }
 async function saveTopic() { await action(async () => { await api(`/teams/${selectedTeam.value.id}/topic`, { method: 'POST', body: JSON.stringify(topicForm) }); selectedTeam.value = null }, '选题已提交审核') }
 async function decideTopic(item, decision) {
   if (decision === 'REJECTED') { Object.assign(topicDecisionForm, { id: item.topic.id, reason: '' }); modals.topicDecision = true; return }
@@ -613,7 +643,6 @@ function pendingTeacherReviewTargets(board = selectedAssignment.value?.board || 
   return board.filter(item => item.status === 'SUBMITTED' && item.files?.length && !item.teacher_grade)
 }
 async function continueGrading(item) {
-  if (item.submitter_type !== 'INDIVIDUAL') return message.info('小组作业暂不支持逐人批改')
   try {
     const board = await api(`/assignments/${item.id}/submissions`)
     const targets = pendingTeacherReviewTargets(board.items)
@@ -672,7 +701,10 @@ async function handleFeedbackPublished(result) {
 }
 async function clearTeacherGrade() {
   try {
-    const result = await api(`/assignments/${selectedAssignment.value.id}/submissions/${selectedSubmission.value.user_id}/grade`, { method: 'DELETE' })
+    const path = selectedAssignment.value.submitter_type === 'TEAM'
+      ? `/submission-versions/${selectedSubmission.value.submission_version_id}/feedback`
+      : `/assignments/${selectedAssignment.value.id}/submissions/${selectedSubmission.value.user_id}/grade`
+    const result = await api(path, { method: 'DELETE' })
     Object.assign(selectedSubmission.value, result)
     await refreshSubmissionBoard()
     closeFilePreview()
@@ -732,6 +764,31 @@ async function logout() { try { await session.logout() } finally { await router.
 function downloadExport(kind, format = 'xlsx') {
   const assignment = kind === 'grades' && selectedGradeAssignmentId.value ? `&assignment_id=${selectedGradeAssignmentId.value}` : ''
   window.location.href = `/api/v1/exports/${kind}.${format}?class_id=${classId.value}${assignment}`
+}
+async function downloadTeamCoursework(item) {
+  if (!item || exportingTeamIds.has(item.id)) return
+  exportingTeamIds.add(item.id)
+  try {
+    const response = await fetch(`/api/v1/teams/${item.id}/coursework.zip`, { credentials: 'include', headers: { 'X-Client-ID': apiClientId } })
+    if (!response.ok) {
+      const data = await response.json().catch(() => null)
+      throw new Error(data?.message || data?.detail?.message || '当前无法导出，请稍后重试')
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${item.name}-全部作业与成绩.zip`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    message.success('导出文件已生成')
+  } catch (error) {
+    message.warning(error.message || '当前无法导出，请稍后重试')
+  } finally {
+    exportingTeamIds.delete(item.id)
+  }
 }
 function openFilePreview(file, files) {
   filePreview.mode = 'PREVIEW'
@@ -857,14 +914,14 @@ onBeforeUnmount(() => {
 
 provide(shellContextKey, {
   session, role, classId, menu, navView, notifications, noticesOpen, modals, audits, loading, dashboard, memberQuery, filteredMembers,
-  teams, requests, ungroupedMembers,
+  teams, requests, ungroupedMembers, selectedTeam, selectedTeamAssignments, teamDrawerLoading, exportingTeamIds,
   activeClasses, assignments,
   grades, gradeAssignments, selectedGradeAssignmentId, campaigns, selectedCampaign, reviewTask, reviewForm, selectedReviewCandidate,
   latestOverviewAssignment, assignmentHistory, assignmentChartLine, assignmentChartPoints, currentTeam, needsTopicSubmission,
   studentPendingAssignments, studentUpcomingAssignments, studentPendingReviews, studentLatestGrade,
-  changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback, openStudentAssignment, openClassCreate,
+  changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, gradeSourceLabel, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
   manageClass, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
-  applyTeam, openTeam, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
+  applyTeam, openTeam, closeTeamDrawer, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
   openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading
 })
 </script>
@@ -955,7 +1012,7 @@ provide(shellContextKey, {
       :submission-version-id="selectedSubmission?.submission_version_id||''"
       :owner="selectedSubmission?.owner||''"
       :assignment-title="selectedAssignment?.title||selectedCampaign?.assignment_title||reviewTask?.assignment?.title||''"
-      :editable="(filePreview.mode==='TEACHER'&&role==='TEACHER'&&selectedAssignment?.submitter_type==='INDIVIDUAL'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
+      :editable="(filePreview.mode==='TEACHER'&&role==='TEACHER'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
       :mode="filePreview.mode"
       :targets="filePreview.targets"
       :target-index="filePreview.targetIndex"
@@ -977,7 +1034,7 @@ provide(shellContextKey, {
     <a-modal v-model:open="modals.member" :title="memberForm.id?'编辑成员':'添加成员'" :confirm-loading="memberSaving" ok-text="保存" @ok="saveMember"><a-form layout="vertical"><a-form-item label="学号" required><a-input v-model:value="memberForm.student_no" :disabled="Boolean(memberForm.id)" maxlength="32"/></a-form-item><a-form-item label="姓名" required><a-input v-model:value="memberForm.name" maxlength="80"/></a-form-item></a-form></a-modal>
     <a-modal :open="Boolean(memberDetail)" title="成员信息" :footer="null" @cancel="memberDetail=null"><a-descriptions v-if="memberDetail" bordered :column="1"><a-descriptions-item label="学号">{{memberDetail.student_no}}</a-descriptions-item><a-descriptions-item label="姓名">{{memberDetail.name}}</a-descriptions-item><a-descriptions-item label="小组">{{memberDetail.team||'未入组'}}</a-descriptions-item><a-descriptions-item label="加入时间">{{formatTime(memberDetail.joined_at)}}</a-descriptions-item></a-descriptions></a-modal>
     <a-modal v-model:open="modals.team" title="创建小组" @ok="createTeam"><a-form layout="vertical"><a-form-item label="小组名称" required><a-input v-model:value="teamForm.name"/></a-form-item><a-checkbox v-model:checked="teamForm.open_recruitment">允许其他成员申请加入</a-checkbox></a-form></a-modal>
-    <a-modal v-model:open="selectedTeam" :title="selectedTeam?.name" :footer="null"><template v-if="selectedTeam"><p>组长：{{selectedTeam.leader_name}} · {{selectedTeam.member_count}} 人</p><a-list :data-source="selectedTeam.members||[]"><template #renderItem="{item}"><a-list-item>{{item.name}}（{{item.student_no}}）<a-space><a-tag>{{roleLabel(item.role)}}</a-tag><a-button v-if="selectedTeam.is_leader&&item.role!=='LEADER'" type="link" @click="transferLeader(item.id)">移交组长</a-button></a-space></a-list-item></template></a-list><template v-if="selectedTeam.is_leader"><a-divider/><a-space-compact block><a-select v-model:value="inviteTarget" placeholder="选择未入组学生" style="width:100%" :options="members.filter(x=>!x.team).map(x=>({value:x.id,label:`${x.name}（${x.student_no}）`}))"/><a-button type="primary" :disabled="!inviteTarget" @click="inviteMember">邀请</a-button></a-space-compact><a-divider/><a-form layout="vertical"><a-form-item label="选题名称"><a-input v-model:value="topicForm.name"/></a-form-item><a-form-item><template #label><span class="topic-description-label">选题说明<a-tooltip overlay-class-name="topic-guidance-tooltip"><template #title>请说明项目面向谁、当前业务如何运作、存在什么具体痛点和关键异常；写明已经可以访谈的真实人员、与其关系及联系渠道，并概括准备纳入系统的核心后台流程。避免只写“提高效率、实现信息化”等空泛表述。选题应面向运营侧或后台流程，具有真实业务约束，并能延续到后续需求、设计、开发与测试。</template><QuestionCircleOutlined class="topic-help-icon" tabindex="0" aria-label="查看选题说明填写要求"/></a-tooltip></span></template><a-textarea v-model:value="topicForm.description" :rows="3"/></a-form-item><a-space><a-button type="primary" @click="saveTopic">提交选题审核</a-button><a-button danger @click="disbandTeam">解散小组</a-button></a-space></a-form></template><a-button v-else-if="role==='STUDENT'&&selectedTeam.id===session.context?.team_membership?.team_id" danger @click="leaveTeam">退出小组</a-button></template></a-modal>
+<a-drawer :open="Boolean(selectedTeam)" :title="selectedTeam?.name" :width="role==='TEACHER'?'min(680px, 100vw)':'min(520px, 100vw)'" :get-container="false" :root-style="{position:'fixed'}" placement="right" @close="closeTeamDrawer"><template #extra><a-button class="team-export-button" v-if="role==='TEACHER'&&selectedTeam" :loading="exportingTeamIds.has(selectedTeam.id)" @click="downloadTeamCoursework(selectedTeam)"><DownloadOutlined/> 导出全部作业与成绩</a-button></template><template v-if="selectedTeam"><p>组长：{{selectedTeam.leader_name}} · {{selectedTeam.member_count}} 人</p><a-list :data-source="selectedTeam.members||[]"><template #renderItem="{item}"><a-list-item>{{item.name}}（{{item.student_no}}）<a-space><a-tag>{{roleLabel(item.role)}}</a-tag><a-button v-if="selectedTeam.is_leader&&item.role!=='LEADER'" type="link" @click="transferLeader(item.id)">移交组长</a-button></a-space></a-list-item></template></a-list><template v-if="role==='TEACHER'"><a-divider/><div class="team-drawer-topic"><span>选题</span><strong>{{selectedTeam.topic?.name||'暂未提交选题'}}</strong><p>{{selectedTeam.topic?.description||'暂无选题说明'}}</p></div><a-divider/><div class="team-drawer-section-title"><strong>近期小组作业</strong><span>最近 {{selectedTeamAssignments.length}} 次</span></div><a-skeleton v-if="teamDrawerLoading" active :paragraph="{rows:4}"/><a-empty v-else-if="!selectedTeamAssignments.length" description="暂无小组作业"/><div v-else class="team-assignment-history"><TeamAssignmentChart :assignments="selectedTeamAssignments"/><div v-for="assignment in selectedTeamAssignments" :key="assignment.id" class="team-assignment-item"><div><strong>{{assignment.title}}</strong><span>截止 {{formatTime(assignment.due_at)}}</span></div><div class="team-assignment-result"><a-tag :color="assignment.submission.status==='SUBMITTED'?'green':'default'">{{statusLabel(assignment.submission.status)}}</a-tag><a-tag v-if="assignment.submission.is_late" color="red">迟交</a-tag><span v-if="assignment.submission.status==='SUBMITTED'">{{formatTime(assignment.submission.submitted_at)}} · {{assignment.submission.files?.length||0}} 个附件</span></div></div></div></template><template v-if="selectedTeam.is_leader"><a-divider/><a-space-compact block><a-select v-model:value="inviteTarget" placeholder="选择未入组学生" style="width:100%" :options="members.filter(x=>!x.team).map(x=>({value:x.id,label:`${x.name}（${x.student_no}）`}))"/><a-button type="primary" :disabled="!inviteTarget" @click="inviteMember">邀请</a-button></a-space-compact><a-divider/><a-form layout="vertical"><a-form-item label="选题名称"><a-input v-model:value="topicForm.name"/></a-form-item><a-form-item><template #label><span class="topic-description-label">选题说明<a-tooltip overlay-class-name="topic-guidance-tooltip"><template #title>请说明项目面向谁、当前业务如何运作、存在什么具体痛点和关键异常；写明已经可以访谈的真实人员、与其关系及联系渠道，并概括准备纳入系统的核心后台流程。避免只写“提高效率、实现信息化”等空泛表述。选题应面向运营侧或后台流程，具有真实业务约束，并能延续到后续需求、设计、开发与测试。</template><QuestionCircleOutlined class="topic-help-icon" tabindex="0" aria-label="查看选题说明填写要求"/></a-tooltip></span></template><a-textarea v-model:value="topicForm.description" :rows="3"/></a-form-item><a-space><a-button type="primary" @click="saveTopic">提交选题审核</a-button><a-button danger @click="disbandTeam">解散小组</a-button></a-space></a-form></template><a-button v-else-if="role==='STUDENT'&&selectedTeam.id===session.context?.team_membership?.team_id" danger @click="leaveTeam">退出小组</a-button></template></a-drawer>
     <a-modal v-model:open="modals.assignment" :title="assignmentForm.id ? '编辑作业' : '新建作业'" :footer="null" width="720px">
       <a-form layout="vertical">
         <a-form-item v-if="!assignmentForm.id" label="教学班" required><a-select v-model:value="assignmentForm.class_ids" mode="multiple" placeholder="选择一个或多个教学班" :options="classOptions"/></a-form-item>

@@ -46,6 +46,8 @@ def test_formal_course_workflow():
     assert team.status_code == 201, team.text
     other_team = other_leader.post("/api/v1/teams", headers=other_leader_headers, json={"class_id": class_id, "name": "第二小组", "open_recruitment": True})
     assert other_team.status_code == 201, other_team.text
+    empty_export = teacher.get(f"/api/v1/teams/{team.json()['id']}/coursework.zip")
+    assert empty_export.status_code == 409 and empty_export.json()["code"] == "NO_COURSEWORK_TO_EXPORT"
     assert [item["id"] for item in leader.get(f"/api/v1/teams?class_id={class_id}").json()["items"]] == [team.json()["id"]]
     assert [item["id"] for item in other_leader.get(f"/api/v1/teams?class_id={class_id}").json()["items"]] == [other_team.json()["id"]]
     assert leader.get(f"/api/v1/teams/{other_team.json()['id']}").status_code == 403
@@ -77,6 +79,24 @@ def test_formal_course_workflow():
     assert teammate_submit.status_code == 403 and teammate_submit.json()["code"] == "TEAM_LEADER_REQUIRED"
     team_submit = leader.post(f"/api/v1/assignments/{team_assignment_id}/submission", headers={**leader_headers, "Idempotency-Key": "team-submit"}, json={"file_ids": [teammate_file["id"]]})
     assert team_submit.status_code == 201, team_submit.text
+    team_board = teacher.get(f"/api/v1/assignments/{team_assignment_id}/submissions").json()["items"]
+    team_version_id = next(item["submission_version_id"] for item in team_board if item["team_id"] == team.json()["id"])
+    team_feedback = teacher.post(f"/api/v1/submission-versions/{team_version_id}/feedback/publish", headers=teacher_headers, json={"revision": 0, "grade": "A", "comment": "<p>小组完成度高</p>", "annotations": []})
+    assert team_feedback.status_code == 200, team_feedback.text
+    graded_team = next(item for item in teacher.get(f"/api/v1/assignments/{team_assignment_id}/submissions").json()["items"] if item["team_id"] == team.json()["id"])
+    assert graded_team["teacher_grade"]["grade"] == "A" and graded_team["grading_status"] == "GRADED"
+    assert applicant.get(f"/api/v1/submission-versions/{team_version_id}/feedback").json()["grade"] == "A"
+    cleared_team = teacher.delete(f"/api/v1/submission-versions/{team_version_id}/feedback", headers=teacher_headers)
+    assert cleared_team.status_code == 200 and cleared_team.json()["teacher_grade"] is None
+    assert leader.get(f"/api/v1/teams/{team.json()['id']}/coursework.zip").status_code == 403
+    assert teacher.get(f"/api/v1/teams/{other_team.json()['id']}/coursework.zip").status_code == 200
+    team_export = teacher.get(f"/api/v1/teams/{team.json()['id']}/coursework.zip")
+    assert team_export.status_code == 200
+    with ZipFile(BytesIO(team_export.content)) as archive:
+        names = archive.namelist()
+        assert "小组作业提交记录.csv" in names and "本组成员成绩.csv" in names
+        assert any(name.endswith("design.pdf") for name in names)
+        assert "小组设计稿" in archive.read("小组作业提交记录.csv").decode("utf-8-sig")
 
     assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "个人需求报告", "description": "提交个人需求分析作品", "submitter_type": "INDIVIDUAL", "due_at": "2027-12-01T12:00:00+08:00", "allow_late": False, "publish": True})
     assert assignment.status_code == 201, assignment.text
