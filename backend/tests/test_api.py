@@ -1,4 +1,6 @@
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -20,6 +22,53 @@ def login(account: str, password: str, role: str):
     response = client.post("/api/v1/auth/login", json={"account": account, "password": password, "role": role})
     assert response.status_code == 200, response.text
     return client, {"X-CSRF-Token": response.json()["csrf_token"]}
+
+
+def test_password_changes_revoke_existing_sessions():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    second_teacher, _ = login("teacher", "123456", "teacher")
+
+    changed = teacher.post("/api/v1/auth/password", headers=teacher_headers, json={"current_password": "123456", "new_password": "new-password-123"})
+    assert changed.status_code == 204, changed.text
+    assert teacher.get("/api/v1/auth/session").status_code == 401
+    assert second_teacher.get("/api/v1/auth/session").status_code == 401
+
+    teacher, teacher_headers = login("teacher", "new-password-123", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "会话测试", "name": "密码重置班"}).json()
+    student = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990001", "name": "会话测试学生"}).json()
+    student_client, _ = login("20990001", "20990001", "student")
+    reset = teacher.post(f"/api/v1/classes/{course['id']}/members/{student['id']}/reset-password", headers=teacher_headers)
+    assert reset.status_code == 204, reset.text
+    assert student_client.get("/api/v1/auth/session").status_code == 401
+
+
+def test_concurrent_submission_with_same_idempotency_key_creates_one_version():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "并发测试", "name": "并发提交班"}).json()
+    student = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990002", "name": "并发测试学生"}).json()
+    assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": course["id"], "title": "并发提交作业", "description": "验证幂等提交", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
+    first, first_headers = login(student["student_no"], student["student_no"], "student")
+    second, second_headers = login(student["student_no"], student["student_no"], "student")
+    team = first.post("/api/v1/teams", headers=first_headers, json={"class_id": course["id"], "name": "并发测试组", "open_recruitment": False})
+    assert team.status_code == 201, team.text
+    uploaded = first.post(f"/api/v1/assignments/{assignment['id']}/files", headers=first_headers, files={"file": ("work.pdf", b"work", "application/pdf")})
+    assert uploaded.status_code == 201, uploaded.text
+    barrier = Barrier(2)
+
+    def submit(client, headers):
+        barrier.wait()
+        return client.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**headers, "Idempotency-Key": "concurrent-submit"}, json={})
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda args: submit(*args), [(first, first_headers), (second, second_headers)]))
+
+    assert [response.status_code for response in responses] == [201, 201]
+    assert responses[0].json()["id"] == responses[1].json()["id"]
+    with SessionLocal() as db:
+        submission = db.scalar(select(Submission).where(Submission.assignment_id == UUID(assignment["id"]), Submission.owner_user_id == UUID(student["id"])))
+        versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id)).all()
+        assert submission.current_version_no == 1
+        assert len(versions) == 1
 
 
 def test_audit_log_search_and_operator_ip():

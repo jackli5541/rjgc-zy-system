@@ -480,7 +480,11 @@ def logout(response: Response, user: CsrfUser, db: Db, session_id: Annotated[str
 @app.post("/api/v1/auth/password", status_code=204)
 def password(data: PasswordIn, user: CsrfUser, db: Db):
     if not verify_password(user.password_hash, data.current_password): raise ApiError(422, "CURRENT_PASSWORD_INVALID", "当前密码不正确")
-    user.password_hash = hash_password(data.new_password); audit(db, user, "PASSWORD_CHANGED", "user", str(user.id)); db.commit(); return Response(status_code=204)
+    user.password_hash = hash_password(data.new_password)
+    audit(db, user, "PASSWORD_CHANGED", "user", str(user.id))
+    db.execute(delete(LoginSession).where(LoginSession.user_id == user.id))
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.get("/api/v1/classes")
@@ -825,7 +829,11 @@ def delete_member(cid: UUID, uid: UUID, user: CsrfUser, db: Db):
 @app.post("/api/v1/classes/{cid}/members/{uid}/reset-password", status_code=204)
 def reset_password(cid: UUID, uid: UUID, user: CsrfUser, db: Db):
     teacher(user); require_writable_class(db, user, cid); _, student, _ = member_detail(db, cid, uid)
-    student.password_hash = hash_password(student.login_name); audit(db, user, "PASSWORD_RESET", "user", str(uid)); db.commit(); return Response(status_code=204)
+    student.password_hash = hash_password(student.login_name)
+    audit(db, user, "PASSWORD_RESET", "user", str(uid))
+    db.execute(delete(LoginSession).where(LoginSession.user_id == uid))
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.get("/api/v1/teams")
@@ -1169,7 +1177,7 @@ def own_submission(db: Session, a: Assignment, user: User):
 
 
 @app.post("/api/v1/assignments/{aid}/files", status_code=201)
-async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purpose: Literal["ATTACHMENT", "REVIEW_CRITERIA"] | None = Query(None)):
+def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purpose: Literal["ATTACHMENT", "REVIEW_CRITERIA"] | None = Query(None)):
     a = db.get(Assignment, aid)
     if not a: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, a.class_id)
@@ -1204,7 +1212,7 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
     size = 0
     try:
         with temporary.open("wb") as output:
-            while chunk := await file.read(1024 * 1024):
+            while chunk := file.file.read(1024 * 1024):
                 size += len(chunk)
                 if size > settings.max_file_size_bytes:
                     raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空且不得超过 100 MB")
@@ -1215,7 +1223,7 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
         if temporary.exists(): temporary.unlink()
         raise
     finally:
-        await file.close()
+        file.file.close()
     team_id = team.id if team and a.submitter_type == "TEAM" else None
     preview_status = "READY" if suffix in PREVIEWABLE_FILE_SUFFIXES else "NOT_AVAILABLE"
     x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
@@ -1237,10 +1245,11 @@ def assignment_files(aid: UUID, user: CurrentUser, db: Db):
         q = select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True)  # noqa: E712
         q = q.where(FileObject.owner_id == user.id) if assignment.submitter_type == "INDIVIDUAL" else q.where(FileObject.team_id == team.id)
         drafts = db.scalars(q.order_by(FileObject.created_at)).all()
+    owner_ids = {file.owner_id for file in [*materials, *criteria, *drafts]}
+    owners = {owner.id: owner.display_name for owner in db.scalars(select(User).where(User.id.in_(owner_ids))).all()} if owner_ids else {}
+    linked_file_ids = set(db.scalars(select(VersionFile.file_id).where(VersionFile.file_id.in_([file.id for file in drafts]))).all()) if drafts else set()
     def item(file: FileObject):
-        linked = bool(db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == file.id).limit(1)))
-        owner = db.get(User, file.owner_id)
-        return file_json(file, owner.display_name, linked)
+        return file_json(file, owners.get(file.owner_id, ""), file.id in linked_file_ids)
     return {"attachments": [item(x) for x in materials], "review_criteria": [item(x) for x in criteria], "drafts": [item(x) for x in drafts]}
 
 
@@ -1260,7 +1269,7 @@ def download_assignment_materials(aid: UUID, user: CurrentUser, db: Db, file_ids
     archive = TemporaryFile()
     try:
         used_names = set()
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
             for file in files:
                 path = settings.file_root / file.storage_path
                 if not path.is_file(): raise ApiError(404, "FILE_MISSING", "文件存储不可用")
@@ -1325,8 +1334,15 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
     if a.status != "PUBLISHED": raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "可提交的作业不存在")
     require_writable_class(db, user, a.class_id)
     if a.starts_at and a.starts_at > now(): raise ApiError(409, "ASSIGNMENT_NOT_STARTED", "作业尚未开始")
-    s, team = own_submission(db, a, user)
-    if team and team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "小组作业仅组长可正式提交")
+    team = None
+    if a.submitter_type == "INDIVIDUAL":
+        db.scalar(select(User.id).where(User.id == user.id).with_for_update())
+        s = db.scalar(select(Submission).where(Submission.assignment_id == aid, Submission.owner_user_id == user.id).with_for_update())
+    else:
+        _, team = require_team(db, a.class_id, user)
+        db.scalar(select(Team.id).where(Team.id == team.id).with_for_update())
+        s = db.scalar(select(Submission).where(Submission.assignment_id == aid, Submission.owner_team_id == team.id).with_for_update())
+        if team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "小组作业仅组长可正式提交")
     if a.due_at < now() and not a.allow_late: raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止且不允许迟交")
     file_scope = FileObject.owner_id == user.id if not team else FileObject.team_id == team.id
     files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).order_by(FileObject.created_at)).all()  # noqa: E712
@@ -2423,12 +2439,26 @@ def download_submissions(aid: UUID, user: CurrentUser, db: Db):
     teacher(user); assignment = db.get(Assignment, aid)
     if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     target = settings.file_root / "exports" / f"{aid}.zip"; target.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-        for submission in db.scalars(select(Submission).where(Submission.assignment_id == aid, Submission.status == "SUBMITTED")):
-            version = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id, SubmissionVersion.version_no == submission.current_version_no))
-            files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
-            owner = db.get(User, submission.owner_user_id) if submission.owner_user_id else db.get(Team, submission.owner_team_id)
-            for file in files: archive.write(settings.file_root / file.storage_path, arcname=f"{owner.login_name if isinstance(owner, User) else owner.name}/{file.original_name}")
+    rows = db.execute(
+        select(Submission, SubmissionVersion)
+        .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+        .where(Submission.assignment_id == aid, Submission.status == "SUBMITTED")
+    ).all()
+    version_ids = [version.id for _, version in rows]
+    files_by_version: dict[UUID, list[FileObject]] = {}
+    if version_ids:
+        for version_id, file in db.execute(select(VersionFile.version_id, FileObject).join(FileObject, FileObject.id == VersionFile.file_id).where(VersionFile.version_id.in_(version_ids))):
+            files_by_version.setdefault(version_id, []).append(file)
+    user_ids = {submission.owner_user_id for submission, _ in rows if submission.owner_user_id}
+    team_ids = {submission.owner_team_id for submission, _ in rows if submission.owner_team_id}
+    users = {item.id: item for item in db.scalars(select(User).where(User.id.in_(user_ids))).all()} if user_ids else {}
+    teams = {item.id: item for item in db.scalars(select(Team).where(Team.id.in_(team_ids))).all()} if team_ids else {}
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        for submission, version in rows:
+            owner = users.get(submission.owner_user_id) if submission.owner_user_id else teams.get(submission.owner_team_id)
+            owner_name = owner.login_name if isinstance(owner, User) else owner.name
+            for file in files_by_version.get(version.id, []):
+                archive.write(settings.file_root / file.storage_path, arcname=f"{owner_name}/{file.original_name}")
     audit(db, user, "SUBMISSIONS_EXPORTED", "assignment", str(aid)); db.commit(); return FileResponse(target, media_type="application/zip", filename=f"{assignment.title}.zip")
 
 
@@ -2447,6 +2477,27 @@ def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
     if not assignments:
         raise ApiError(409, "NO_COURSEWORK_TO_EXPORT", "暂无作业可导出")
 
+    assignment_ids = [assignment.id for assignment in assignments]
+    submissions = {
+        submission.assignment_id: submission
+        for submission in db.scalars(select(Submission).where(Submission.assignment_id.in_(assignment_ids), Submission.owner_team_id == tid)).all()
+    }
+    submitted = [submission for submission in submissions.values() if submission.status == "SUBMITTED"]
+    current_versions = {submission.id: submission.current_version_no for submission in submitted}
+    versions = {
+        version.submission_id: version
+        for version in db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id.in_(current_versions))).all()
+        if version.version_no == current_versions[version.submission_id]
+    } if submitted else {}
+    files_by_version: dict[UUID, list[FileObject]] = {}
+    if versions:
+        for version_id, file in db.execute(
+            select(VersionFile.version_id, FileObject)
+            .join(FileObject, FileObject.id == VersionFile.file_id)
+            .where(VersionFile.version_id.in_([version.id for version in versions.values()]))
+        ):
+            files_by_version.setdefault(version_id, []).append(file)
+
     def csv_bytes(rows):
         output = io.StringIO()
         csv.writer(output).writerows([[export_cell(value) for value in row] for row in rows])
@@ -2455,18 +2506,11 @@ def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
     homework_rows = [["作业", "截止时间", "提交状态", "提交时间", "是否迟交", "附件数"]]
     archive_file = TemporaryFile()
     try:
-        with zipfile.ZipFile(archive_file, "w", zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(archive_file, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
             for assignment in assignments:
-                submission = db.scalar(select(Submission).where(
-                    Submission.assignment_id == assignment.id, Submission.owner_team_id == tid
-                ))
-                version = db.scalar(select(SubmissionVersion).where(
-                    SubmissionVersion.submission_id == submission.id,
-                    SubmissionVersion.version_no == submission.current_version_no,
-                )) if submission and submission.status == "SUBMITTED" else None
-                files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(
-                    VersionFile.version_id == version.id
-                )).all() if version else []
+                submission = submissions.get(assignment.id)
+                version = versions.get(submission.id) if submission else None
+                files = files_by_version.get(version.id, []) if version else []
                 homework_rows.append([assignment.title, assignment.due_at, "已提交" if version else "未提交", version.submitted_at if version else None, "是" if version and version.is_late else "否", len(files)])
                 for file in files:
                     archive.write(settings.file_root / file.storage_path, arcname=f"小组作业/{assignment.id}/{file.id}-{Path(file.original_name).name}")
@@ -2474,13 +2518,8 @@ def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
 
             grade_rows = [["作业", "提交状态", "学生互评等级", "教师等级", "最终等级", "成绩来源", "评分状态"]]
             for assignment in assignments:
-                submission = db.scalar(select(Submission).where(
-                    Submission.assignment_id == assignment.id, Submission.owner_team_id == tid
-                ))
-                version = db.scalar(select(SubmissionVersion).where(
-                    SubmissionVersion.submission_id == submission.id,
-                    SubmissionVersion.version_no == submission.current_version_no,
-                )) if submission and submission.status == "SUBMITTED" else None
+                submission = submissions.get(assignment.id)
+                version = versions.get(submission.id) if submission else None
                 result = submission_grade_result(db, version) if version else missing_submission_grade_result(assignment)
                 source = result["grade_source"]
                 grade_rows.append([
@@ -2511,7 +2550,12 @@ def campaign_stats(cid: UUID, user: CurrentUser, db: Db):
     reviews = db.scalars(select(PeerReview).where(PeerReview.campaign_id == cid, PeerReview.status == "VALID")).all()
     if campaign.assignment_snapshot_at is not None:
         allocations = db.scalars(select(ReviewAssignment).where(ReviewAssignment.campaign_id == cid)).all()
-        skipped = [{"reviewer_id": str(x.reviewer_id), "reviewer_name": db.get(User, x.reviewer_id).display_name, "reason": x.skip_reason} for x in allocations if x.status == "SKIPPED"]
+        skipped_allocations = [item for item in allocations if item.status == "SKIPPED"]
+        reviewer_names = {
+            item.id: item.display_name
+            for item in db.scalars(select(User).where(User.id.in_([allocation.reviewer_id for allocation in skipped_allocations]))).all()
+        } if skipped_allocations else {}
+        skipped = [{"reviewer_id": str(x.reviewer_id), "reviewer_name": reviewer_names.get(x.reviewer_id, ""), "reason": x.skip_reason} for x in skipped_allocations]
         assigned = sum(x.status != "SKIPPED" for x in allocations)
         completed = sum(x.status == "COMPLETED" for x in allocations)
         return {"assigned_count": assigned, "completed_count": completed, "skipped_count": len(skipped), "skipped": skipped, "completion_rate": round(completed * 100 / assigned, 1) if assigned else 0, "review_count": len(reviews), "reviewer_count": completed, "uncompleted_reviewer_count": max(assigned - completed, 0), "average_score": round(sum(x.total_score for x in reviews) / len(reviews), 2) if reviews else None, "received_count": {str(x.reviewee_id): 1 for x in reviews}}

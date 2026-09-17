@@ -123,7 +123,7 @@ def export_portfolios(db, course, user, uid=None):
     archive = TemporaryFile()
     exported_member = None
     try:
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
             for student_id in ids:
                 data = portfolio(db, course.id, student_id)
                 member = data["member"]

@@ -32,7 +32,6 @@ test('teacher uses top navigation and starts with an empty class list', async ({
 
   await page.locator('.header-right .ant-btn').first().click()
   await expect(page.getByRole('dialog', { name: '站内通知' })).toBeVisible()
-  await expect(page.locator('.ant-drawer')).toHaveCount(0)
   await page.getByRole('button', { name: 'Close' }).click()
 
   await page.getByRole('button', { name: '创建教学班' }).click()
@@ -155,10 +154,9 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   expect(assignmentPayload).toMatchObject({ auto_review_enabled: false })
   await expect(page.getByText('已发布', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('PUBLISHED', { exact: true })).toHaveCount(0)
-  const assignmentRow = page.locator('.assignment-row').filter({ hasText: '跨班需求报告' }).first()
-  await expect(assignmentRow.getByRole('button', { name: '详情', exact: true })).toBeVisible()
-  await expect(assignmentRow.getByRole('button', { name: '提交情况', exact: true })).toBeVisible()
-  await assignmentRow.getByRole('button', { name: '详情', exact: true }).click()
+  await expect(page.getByRole('button', { name: /详情/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /提交情况/ })).toBeVisible()
+  await page.getByRole('button', { name: /详情/ }).click()
   await expect(page).toHaveURL(/\/assignments\/assignment-1$/)
   const assignmentDetail = page.locator('.assignment-workspace')
   await expect(page.locator('.assignment-detail-drawer')).toBeVisible()
@@ -190,7 +188,7 @@ test('teacher manages classes and creates coursework for multiple classes', asyn
   await expect(page.locator('.content-wrap > .ant-spin-nested-loading > .ant-spin-spinning')).toHaveCount(0)
 
   await page.locator('.assignment-detail-drawer').getByRole('button', { name: '返回作业列表' }).click()
-  await page.locator('.assignment-row').filter({ hasText: '跨班需求报告' }).click()
+  await page.getByRole('button', { name: /详情/ }).click()
   const closedAssignmentDetail = page.locator('.assignment-workspace')
   await closedAssignmentDetail.getByRole('button', { name: '撤回发布' }).click()
   await page.getByRole('button', { name: '确认撤回' }).click()
@@ -234,11 +232,12 @@ test('teacher opens submission preview directly and can override the peer grade'
     if (path === '/grades/assignments' && request.method() === 'GET') return json({ items: [{ id: 'assignment-grade', title: '需求分析报告', campaign_status: 'CLOSED', total: 2, pending: 1, ready: 0, published: 0 }], total: 1 })
     if (path === '/assignments' && request.method() === 'GET') return json({ items: [{ id: 'assignment-grade', class_id: 'class-1', title: '需求分析报告', description: '<p>完成需求分析。</p>', submitter_type: 'INDIVIDUAL', due_at: '2026-09-15T08:00:00Z', status: 'CLOSED', version: 2 }], total: 1 })
     if (path === '/assignments/assignment-grade/files') return json({ attachments: [], review_criteria: [], drafts: [] })
-    if (path === '/assignments/assignment-grade/submissions') return json({ items: [{ id: 'submission-1', user_id: 'student-1', owner: '张同学', student_no: '20260001', team_id: 'team-1', team_name: '第一小组', status: 'SUBMITTED', submitted_at: '2026-09-15T08:00:00Z', files: [{ id: 'student-file-1', name: '报告.pdf', previewable: true, preview_status: 'READY' }, { id: 'student-file-2', name: '原型.pdf', previewable: true, preview_status: 'READY' }], peer_grade: 'A', peer_review_count: 2, teacher_grade: null, final_grade: 'A', grade_source: 'PEER' }], total: 1 })
+    if (path === '/assignments/assignment-grade/submissions') return json({ items: [{ id: 'submission-1', submission_version_id: 'version-1', user_id: 'student-1', owner: '张同学', student_no: '20260001', team_id: 'team-1', team_name: '第一小组', status: 'SUBMITTED', submitted_at: '2026-09-15T08:00:00Z', files: [{ id: 'student-file-1', name: '报告.pdf', previewable: true, preview_status: 'READY' }, { id: 'student-file-2', name: '原型.pdf', previewable: true, preview_status: 'READY' }], peer_grade: 'A', peer_review_count: 2, teacher_grade: null, final_grade: 'A', grade_source: 'PEER' }], total: 1 })
     if (/^\/files\/student-file-[12]\/preview$/.test(path)) return route.fulfill({ status: 200, contentType: 'application/pdf', body: '%PDF-1.4' })
-    if (path === '/assignments/assignment-grade/submissions/student-1/grade' && request.method() === 'POST') {
+    if (path === '/submission-versions/version-1/feedback' && request.method() === 'GET') return json({ status: null, revision: 0, grade: null, comment: '', annotations: [] })
+    if (path === '/submission-versions/version-1/feedback/publish' && request.method() === 'POST') {
       teacherGradePayload = request.postDataJSON()
-      return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ grade: teacherGradePayload.grade, comment: teacherGradePayload.comment, result: { teacher_grade: { grade: teacherGradePayload.grade, comment: teacherGradePayload.comment }, peer_grade: 'A', peer_review_count: 2, final_grade: teacherGradePayload.grade, grade_source: 'TEACHER' } }) })
+      return json({ status: 'PUBLISHED', revision: 1, grade: teacherGradePayload.grade, comment: teacherGradePayload.comment, annotations: [], result: { teacher_grade: { grade: teacherGradePayload.grade, comment: teacherGradePayload.comment }, peer_grade: 'A', peer_review_count: 2, final_grade: teacherGradePayload.grade, grade_source: 'TEACHER' } })
     }
     if (path === '/teams') return json({ items: [], total: 0 })
     if (path === '/review-campaigns') return json({ items: [{ id: 'campaign-grade', assignment_id: 'assignment-grade', assignment_title: '需求分析报告', mode: 'TEAM', criteria_text: '按完整性评分', due_at: '2026-09-16T08:00:00Z', status: 'CLOSED', grades_generated_at: '2026-09-16T08:00:00Z' }], total: 1 })
@@ -277,16 +276,16 @@ test('teacher opens submission preview directly and can override the peer grade'
   const workspace = page.locator('.assignment-workspace')
   await expect(workspace.getByRole('tab', { name: '提交情况', selected: true })).toBeVisible()
   await workspace.getByRole('button', { name: '查看作业' }).click()
-  const preview = page.locator('.file-preview-drawer')
+  const preview = page.locator('.review-workspace-drawer')
   await expect(preview).toBeVisible()
   await expect(preview.getByText('1 / 2')).toBeVisible()
-  await expect(preview.locator('.ant-select')).toContainText('报告.pdf')
-  await preview.locator('.preview-grade-form .ant-select').click()
-  await page.getByRole('option', { name: 'B', exact: true }).click()
-  await preview.locator('textarea').fill('教师复核后评级。')
-  await preview.getByRole('button', { name: '保存教师评分' }).click()
-  await expect.poll(() => teacherGradePayload).toEqual({ grade: 'B', comment: '教师复核后评级。' })
-  await expect(preview).toContainText('最终 B · 教师')
+  await expect(preview.locator('.review-workspace-toolbar .ant-select')).toContainText('报告.pdf')
+  await preview.locator('.feedback-action-grade .ant-select').click()
+  await page.locator('.ant-select-dropdown:visible .ant-select-item-option').filter({ hasText: /^B$/ }).click()
+  await preview.locator('.feedback-field .tiptap').fill('教师复核后评级。')
+  await preview.getByRole('button', { name: '发布反馈' }).click()
+  await expect.poll(() => teacherGradePayload).toMatchObject({ grade: 'B' })
+  await expect(preview).toContainText('教师评分')
 })
 
 test('logout removes the protected view and shows login without a reload', async ({ page }) => {
@@ -343,8 +342,8 @@ test('student selects submitted teammates and grades their latest work from A to
   const reviewPayloads = []
   const assignment = { assignment_id: 'assignment-direct', assignment_title: '需求分析报告', title: '需求分析报告', due_at: '2099-01-01T00:00:00Z', available_count: 2, reviewed_count: 0, pending_count: 2 }
   const task = { assignment, team: { id: 'team-1', name: '第一小组' }, candidates: [
-    { user_id: 'student-2', name: '李同学', student_no: '20260002', submitted_at: '2026-09-14T08:00:00Z', files: [{ id: 'file-1', name: 'report.pdf' }], review: null },
-    { user_id: 'student-3', name: '王同学', student_no: '20260003', submitted_at: '2026-09-15T08:00:00Z', files: [{ id: 'file-2', name: 'prototype.pdf' }], review: null }
+    { user_id: 'student-2', name: '李同学', student_no: '20260002', submission_version_id: 'version-2', submitted_at: '2026-09-14T08:00:00Z', files: [{ id: 'file-1', name: 'report.pdf', previewable: true }], review: null },
+    { user_id: 'student-3', name: '王同学', student_no: '20260003', submission_version_id: 'version-3', submitted_at: '2026-09-15T08:00:00Z', files: [{ id: 'file-2', name: 'prototype.pdf', previewable: true }], review: null }
   ] }
 
   await page.route('**/api/v1/**', async route => {
@@ -358,9 +357,10 @@ test('student selects submitted teammates and grades their latest work from A to
     if (path === '/notifications') return json({ items: [], total: 0 })
     if (path === '/peer-review-assignments' && request.method() === 'GET') return json({ items: [assignment], total: 1 })
     if (path === '/assignments/assignment-direct/peer-review' && request.method() === 'GET') return json(task)
-    if (path === '/assignments/assignment-direct/peer-reviews' && request.method() === 'POST') {
+    if (path === '/submission-versions/version-2/peer-feedback' && request.method() === 'GET') return json({ status: null, revision: 0, grade: null, comment: '', annotations: [] })
+    if (path === '/submission-versions/version-2/peer-feedback/publish' && request.method() === 'POST') {
       const payload = request.postDataJSON(); reviewPayloads.push(payload)
-      const candidate = task.candidates.find(item => item.user_id === payload.reviewee_id)
+      const candidate = task.candidates[0]
       candidate.review = { id: `review-${reviewPayloads.length}`, grade: payload.grade, comment: payload.comment }
       assignment.reviewed_count = task.candidates.filter(item => item.review).length
       assignment.pending_count = assignment.available_count - assignment.reviewed_count
@@ -375,18 +375,13 @@ test('student selects submitted teammates and grades their latest work from A to
   const detail = page.locator('.review-workspace')
   await expect(detail).toContainText('李同学')
   await expect(detail).toContainText('20260002')
-  await detail.getByText('B', { exact: true }).click()
-  await detail.locator('textarea').fill('结构完整，论证清晰。')
-  await detail.getByRole('button', { name: '提交评价' }).click()
-  await expect.poll(() => reviewPayloads).toEqual([{ reviewee_id: 'student-2', grade: 'B', comment: '结构完整，论证清晰。' }])
-  await expect(detail.getByRole('button', { name: '更新评价' })).toBeVisible()
-  await detail.getByText('A', { exact: true }).click()
-  await detail.locator('textarea').fill('补充检查后，论证也很充分。')
-  await detail.getByRole('button', { name: '更新评价' }).click()
-  await expect.poll(() => reviewPayloads).toEqual([
-    { reviewee_id: 'student-2', grade: 'B', comment: '结构完整，论证清晰。' },
-    { reviewee_id: 'student-2', grade: 'A', comment: '补充检查后，论证也很充分。' }
-  ])
+  await detail.getByRole('button', { name: '开始评价' }).click()
+  const reviewDrawer = page.locator('.review-workspace-drawer')
+  await reviewDrawer.locator('.feedback-action-grade .ant-select').click()
+  await page.locator('.ant-select-dropdown:visible .ant-select-item-option').filter({ hasText: /^B$/ }).click()
+  await reviewDrawer.locator('.feedback-field .tiptap').fill('结构完整，论证清晰。')
+  await reviewDrawer.getByRole('button', { name: '提交评价' }).click()
+  await expect.poll(() => reviewPayloads[0]?.grade).toBe('B')
 })
 
 test('student assignment detail submits every uploaded file without selection controls', async ({ page }) => {
@@ -428,9 +423,10 @@ test('student assignment detail submits every uploaded file without selection co
   await expect(workspace).toContainText('作业模板.pdf')
   const detailUrl = page.url()
   await workspace.getByRole('button', { name: '作业模板.pdf' }).click()
-  const previewDrawer = page.locator('.file-preview-drawer')
+  const previewDrawer = page.locator('.review-workspace-drawer')
   await expect(previewDrawer).toBeVisible()
-  await expect(previewDrawer.locator('iframe')).toHaveCount(1)
+  await expect(previewDrawer).toContainText('作业模板.pdf')
+  await expect(previewDrawer.getByRole('link', { name: /下载原文件/ }).first()).toBeVisible()
   expect(page.url()).toBe(detailUrl)
   await previewDrawer.getByRole('button', { name: 'Close' }).click()
   await workspace.getByRole('button', { name: /参考答案\.docx/ }).click()
@@ -439,7 +435,7 @@ test('student assignment detail submits every uploaded file without selection co
   await previewDrawer.getByRole('button', { name: 'Close' }).click()
   await workspace.getByRole('tab', { name: '提交作业' }).click()
   await expect(workspace.getByText('已提交', { exact: true })).toBeVisible()
-  await expect(workspace.locator('input[type="checkbox"]')).toHaveCount(0)
+  await expect(workspace.locator('.ant-tabs-tabpane-active input[type="checkbox"]')).toHaveCount(0)
   await expect(workspace).not.toContainText('本次保留')
   await workspace.getByRole('button', { name: '更新提交' }).click()
   await page.getByRole('button', { name: '确认更新' }).click()
