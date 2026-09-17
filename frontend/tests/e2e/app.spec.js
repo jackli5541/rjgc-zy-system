@@ -229,7 +229,7 @@ test('teacher opens submission preview directly and can override the peer grade'
     if (path === '/classes') return json({ items: [{ id: 'class-1', semester: '2026 秋季', name: '软件工程 1 班', status: 'ACTIVE' }], total: 1 })
     if (path === '/classes/current/context') return json({ user: { id: 'teacher-1', role: 'TEACHER' }, current_class: { id: 'class-1', semester: '2026 秋季', name: '软件工程 1 班', status: 'ACTIVE' }, team_gate_required: false })
     if (path === '/notifications') return json({ items: [], total: 0 })
-    if (path === '/grades/assignments' && request.method() === 'GET') return json({ items: [{ id: 'assignment-grade', title: '需求分析报告', campaign_status: 'CLOSED', total: 2, pending: 1, ready: 0, published: 0 }], total: 1 })
+    if (path === '/grades/assignments' && request.method() === 'GET') return json({ items: [{ id: 'assignment-grade', title: '需求分析报告', due_at: '2026-09-15T08:00:00Z', submitted: 2, graded: 1, campaign_status: 'CLOSED', total: 2, pending: 1, ready: 0, published: 0 }], total: 1 })
     if (path === '/assignments' && request.method() === 'GET') return json({ items: [{ id: 'assignment-grade', class_id: 'class-1', title: '需求分析报告', description: '<p>完成需求分析。</p>', submitter_type: 'INDIVIDUAL', due_at: '2026-09-15T08:00:00Z', status: 'CLOSED', version: 2 }], total: 1 })
     if (path === '/assignments/assignment-grade/files') return json({ attachments: [], review_criteria: [], drafts: [] })
     if (path === '/assignments/assignment-grade/submissions') return json({ items: [{ id: 'submission-1', submission_version_id: 'version-1', user_id: 'student-1', owner: '张同学', student_no: '20260001', team_id: 'team-1', team_name: '第一小组', status: 'SUBMITTED', submitted_at: '2026-09-15T08:00:00Z', files: [{ id: 'student-file-1', name: '报告.pdf', previewable: true, preview_status: 'READY' }, { id: 'student-file-2', name: '原型.pdf', previewable: true, preview_status: 'READY' }], peer_grade: 'A', peer_review_count: 2, teacher_grade: null, final_grade: 'A', grade_source: 'PEER' }], total: 1 })
@@ -263,12 +263,14 @@ test('teacher opens submission preview directly and can override the peer grade'
 
   await page.goto('/grades')
   await expect(page.getByRole('heading', { name: '成绩与导出' })).toBeVisible()
-  await expect(page.locator('.export-item')).toHaveCount(4)
-  await expect(page.locator('.export-item')).toContainText(['成员名单', '小组名单', '互评记录', '作业成绩'])
-  await page.locator('.export-grade-item .ant-select-selector').click()
+  await expect(page.getByRole('heading', { name: '全班学生档案' })).toBeVisible()
+  await expect(page.locator('.data-export-row')).toHaveCount(3)
+  await expect(page.locator('.data-export-row')).toContainText(['成员名单', '小组名单', '互评记录'])
+  await page.locator('.grade-export-section .ant-select-selector').click()
   await page.locator('.ant-select-dropdown:visible .ant-select-item-option').filter({ hasText: '需求分析报告' }).click()
+  await expect(page.locator('.assignment-export-actions')).toContainText('已提交 2 / 2 · 已评分 1')
   const download = page.waitForEvent('download')
-  await page.locator('.export-grade-item').getByRole('button', { name: /CSV/ }).click()
+  await page.locator('.assignment-export-actions').getByRole('button', { name: 'CSV' }).click()
   await download
 
   await page.goto('/assignments/assignment-grade?tab=submission')
