@@ -471,6 +471,9 @@ def test_one_to_one_class_review_freezes_assignment_and_validates_score():
     assert office.status_code == 201 and office.json()["download_only"] is True and office.json()["preview_status"] == "NOT_AVAILABLE"
     office_preview = teacher.get(f"/api/v1/files/{office.json()['id']}/preview")
     assert office_preview.status_code == 200 and "attachment" in office_preview.headers["content-disposition"]
+    blocked_office = students[0][0].post(f"/api/v1/assignments/{assignment['id']}/files", headers=students[0][1], files={"file": ("work.docx", b"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+    assert blocked_office.status_code == 422 and blocked_office.json()["code"] == "FILE_TYPE_INVALID"
+    assert "仅支持可在线预览" in blocked_office.json()["message"]
 
     campaign = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": assignment["id"], "mode": "TEAM", "criteria_text": "按完整性与清晰度给出总分。", "due_at": "2099-01-01T00:00:00+08:00"})
     assert campaign.status_code == 201, campaign.text

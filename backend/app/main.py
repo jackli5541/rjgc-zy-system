@@ -51,6 +51,8 @@ SAFE_HTML_ATTRIBUTES = {
     "img": ["src", "alt", "title", "width", "height"],
     "input": ["type", "checked", "disabled"],
 }
+PREVIEWABLE_FILE_SUFFIXES = {".md", ".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+DOWNLOAD_ONLY_FILE_SUFFIXES = {".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
 
 
 def clean_html(value: str) -> str:
@@ -1114,8 +1116,10 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
         if a.starts_at and a.starts_at > now(): raise ApiError(409, "ASSIGNMENT_NOT_STARTED", "作业尚未开始")
         _, team = require_team(db, a.class_id, user)
     suffix = Path(file.filename or "file").suffix.lower()
-    supported = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".md", ".html", ".htm", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
-    if suffix not in supported: raise ApiError(422, "FILE_TYPE_INVALID", "仅支持 Markdown、HTML、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包")
+    supported = PREVIEWABLE_FILE_SUFFIXES if user.role == "STUDENT" else PREVIEWABLE_FILE_SUFFIXES | DOWNLOAD_ONLY_FILE_SUFFIXES
+    if suffix not in supported:
+        message = "学生提交仅支持可在线预览的 Markdown、HTML、PDF 和常见图片" if user.role == "STUDENT" else "仅支持 Markdown、HTML、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包"
+        raise ApiError(422, "FILE_TYPE_INVALID", message)
     expected_mimes = {
         ".md": {"text/markdown", "text/plain", "application/octet-stream"},
         ".html": {"text/html", "text/plain", "application/octet-stream"}, ".htm": {"text/html", "text/plain", "application/octet-stream"},
@@ -1146,7 +1150,7 @@ async def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)
     finally:
         await file.close()
     team_id = team.id if team and a.submitter_type == "TEAM" else None
-    preview_status = "READY" if suffix in {".md", ".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"} else "NOT_AVAILABLE"
+    preview_status = "READY" if suffix in PREVIEWABLE_FILE_SUFFIXES else "NOT_AVAILABLE"
     x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
     db.add(x)
     db.commit()

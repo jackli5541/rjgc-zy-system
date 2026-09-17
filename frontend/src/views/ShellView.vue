@@ -899,7 +899,7 @@ provide(shellContextKey, {
             <a-tab-pane key="submission" :tab="role==='TEACHER'?'提交情况':'提交作业'">
               <template v-if="role==='TEACHER'">
                 <section class="assignment-pane teacher-submission-pane">
-                  <div class="assignment-pane-heading"><h2>提交概览</h2><a-button :href="`/api/v1/assignments/${selectedAssignment.id}/download.zip`" target="_blank"><DownloadOutlined/> 批量下载</a-button></div>
+                  <div class="assignment-pane-heading"><h2>提交概览</h2><a-button :href="`/api/v1/assignments/${selectedAssignment.id}/download.zip`" target="_blank"><DownloadOutlined/> 下载全部学生作业</a-button></div>
                   <div class="detail-metrics"><div><span>应提交</span><strong>{{teacherSubmissionSummary.total}}</strong></div><div><span>已提交</span><strong>{{teacherSubmissionSummary.submitted}}</strong></div><div><span>未提交</span><strong>{{teacherSubmissionSummary.pending}}</strong></div><div><span>迟交</span><strong>{{teacherSubmissionSummary.late}}</strong></div></div>
                 </section>
                 <section class="assignment-pane">
@@ -912,7 +912,7 @@ provide(shellContextKey, {
               <template v-else>
               <div class="submission-summary" :class="{submitted:assignmentSubmitted,closed:!canSubmitAssignment&&!assignmentSubmitted}"><span class="submission-summary-icon"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/></span><div><strong>{{assignmentSubmitted?'已提交':!canManageTeamSubmission?'待组长提交':new Date(selectedAssignment.due_at)<=new Date()?'已截止':'待提交'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · ${draftFiles.length} 个附件`:!canManageTeamSubmission?'小组作业仅需组长统一上交':`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div>
               <section class="assignment-pane submission-files-pane">
-                <div class="assignment-pane-heading"><h2>提交附件</h2><a-upload v-if="canSubmitAssignment" :custom-request="uploadFile" multiple><a-button><UploadOutlined/> 上传附件</a-button></a-upload></div>
+                <div class="assignment-pane-heading"><h2>提交附件</h2><a-upload v-if="canSubmitAssignment" :custom-request="uploadFile" accept=".md,.html,.htm,.pdf,.png,.jpg,.jpeg,.gif,.webp" multiple><a-button><UploadOutlined/> 上传附件</a-button></a-upload></div>
                 <a-empty v-if="!draftFiles.length" class="detail-empty" description="暂无提交附件"/>
                 <div v-else class="assignment-file-list"><div v-for="file in draftFiles" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,draftFiles)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-tooltip v-if="canSubmitAssignment" :title="file.submitted?'从待更新附件中移除':'删除附件'"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></div></div>
                 <div v-if="canSubmitAssignment" class="submission-actions"><a-button type="primary" :disabled="!draftFiles.length" @click="submitAssignment">{{assignmentIsUpdate?'更新提交':'提交'}}</a-button></div>
@@ -947,6 +947,8 @@ provide(shellContextKey, {
       :targets="filePreview.targets"
       :target-index="filePreview.targetIndex"
       :initial-feedback="filePreview.initialFeedback"
+      :peer-grade="role==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
+      :peer-feedbacks="role==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
       @close="closeFilePreview"
       @feedback-published="handleFeedbackPublished"
       @clear-feedback="clearTeacherGrade"
