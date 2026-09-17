@@ -899,7 +899,7 @@ provide(shellContextKey, {
             <a-tab-pane key="submission" :tab="role==='TEACHER'?'提交情况':'提交作业'">
               <template v-if="role==='TEACHER'">
                 <section class="assignment-pane teacher-submission-pane">
-                  <div class="assignment-pane-heading"><h2>提交概览</h2><a-button :href="`/api/v1/assignments/${selectedAssignment.id}/download.zip`" target="_blank"><DownloadOutlined/> 下载全部学生作业</a-button></div>
+                  <div class="assignment-pane-heading"><h2>提交概览</h2><a-space wrap><a-button :href="`/api/v1/assignments/${selectedAssignment.id}/download.zip`"><DownloadOutlined/> 下载全部学生作业</a-button><a-button v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" :href="`/api/v1/exports/grades.xlsx?class_id=${classId}&assignment_id=${selectedAssignment.id}`"><DownloadOutlined/> 导出所有学生成绩</a-button></a-space></div>
                   <div class="detail-metrics"><div><span>应提交</span><strong>{{teacherSubmissionSummary.total}}</strong></div><div><span>已提交</span><strong>{{teacherSubmissionSummary.submitted}}</strong></div><div><span>未提交</span><strong>{{teacherSubmissionSummary.pending}}</strong></div><div><span>迟交</span><strong>{{teacherSubmissionSummary.late}}</strong></div></div>
                 </section>
                 <section class="assignment-pane">
@@ -947,6 +947,7 @@ provide(shellContextKey, {
       :targets="filePreview.targets"
       :target-index="filePreview.targetIndex"
       :initial-feedback="filePreview.initialFeedback"
+      :peer-feedback-enabled="role==='TEACHER'&&Boolean(selectedAssignment?.auto_review_enabled)"
       :peer-grade="role==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
       :peer-feedbacks="role==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
       @close="closeFilePreview"
