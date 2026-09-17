@@ -13,7 +13,7 @@
 
 除特别说明外，均在仓库根目录运行：
 
-- `.\scripts\init-local.ps1`：初始化 PostgreSQL、Python 环境、依赖、数据库迁移及基础数据。
+- `.\scripts\init-local.ps1`：初始化 SQL Server、Python 环境、依赖、数据库迁移及基础数据。
 - `.\scripts\start-local.bat`：启动 API、后台任务和 Vite 开发服务器，访问 `http://localhost:8080`。
 - `.\scripts\stop-local.ps1`：停止本地服务。
 - `cd frontend; npm run dev`：仅启动前端开发服务器。

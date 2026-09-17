@@ -1,25 +1,45 @@
 name: software-engineering-coursework
+
+x-sqlserver-healthcheck: &sqlserver-healthcheck
+  test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q \"SELECT 1\" -b -o /dev/null"]
+  interval: 5s
+  timeout: 5s
+  retries: 30
+  start_period: 20s
+
 services:
-  postgres:
-    image: postgres:17-alpine
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
-      POSTGRES_DB: coursework
-      POSTGRES_USER: coursework
-      POSTGRES_PASSWORD: coursework
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Coursework_2026!}"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - sqlserver_data:/var/opt/mssql
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U coursework -d coursework"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      - "${SQLSERVER_PORT:-1433}:1433"
+    healthcheck: *sqlserver-healthcheck
+
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Coursework_2026!}"
+    command:
+      - /bin/bash
+      - -c
+      - >-
+        /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -b
+        -Q "IF DB_ID(N'coursework') IS NULL CREATE DATABASE coursework;
+        ALTER DATABASE coursework SET COMPATIBILITY_LEVEL = 120;"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+
   api:
     profiles: ["container-app"]
     build: ./backend
     environment:
-      DATABASE_URL: postgresql+psycopg://coursework:coursework@postgres:5432/coursework
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
       CORS_ORIGINS: http://localhost:8080
       FILE_ROOT: /data/files
       TRUSTED_PROXY_CIDRS: 172.16.0.0/12
@@ -33,27 +53,30 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
   task-runner:
     profiles: ["container-app"]
     build: ./backend
     command: ["python", "-m", "app.worker"]
     environment:
-      DATABASE_URL: postgresql+psycopg://coursework:coursework@postgres:5432/coursework
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
       FILE_ROOT: /data/files
     depends_on:
       migrate:
         condition: service_completed_successfully
     volumes:
       - private_files:/data/files
+
   migrate:
     profiles: ["container-app"]
     build: ./backend
     command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
     environment:
-      DATABASE_URL: postgresql+psycopg://coursework:coursework@postgres:5432/coursework
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
     depends_on:
-      postgres:
-        condition: service_healthy
+      sqlserver-init:
+        condition: service_completed_successfully
+
   frontend:
     profiles: ["container-app"]
     build: ./frontend
@@ -62,36 +85,52 @@ services:
     depends_on:
       api:
         condition: service_healthy
-  test-postgres:
+
+  test-sqlserver:
     profiles: ["test"]
-    image: postgres:17-alpine
+    image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
-      POSTGRES_DB: coursework_test
-      POSTGRES_USER: coursework
-      POSTGRES_PASSWORD: coursework
-    tmpfs:
-      - /var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U coursework -d coursework_test"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Coursework_2026!}"
+    volumes:
+      - /var/opt/mssql
+    healthcheck: *sqlserver-healthcheck
     networks: [test]
+
+  test-sqlserver-init:
+    profiles: ["test"]
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Coursework_2026!}"
+    command:
+      - /bin/bash
+      - -c
+      - >-
+        /opt/mssql-tools18/bin/sqlcmd -S test-sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -b
+        -Q "IF DB_ID(N'coursework_test') IS NULL CREATE DATABASE coursework_test;
+        ALTER DATABASE coursework_test SET COMPATIBILITY_LEVEL = 120;"
+    depends_on:
+      test-sqlserver:
+        condition: service_healthy
+    networks: [test]
+
   test-migrate:
     profiles: ["test"]
     build: ./backend
     command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
     environment:
-      DATABASE_URL: postgresql+psycopg://coursework:coursework@test-postgres:5432/coursework_test
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@test-sqlserver:1433/coursework_test?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
     depends_on:
-      test-postgres:
-        condition: service_healthy
+      test-sqlserver-init:
+        condition: service_completed_successfully
     networks: [test]
+
   test-api:
     profiles: ["test"]
     build: ./backend
     environment:
-      DATABASE_URL: postgresql+psycopg://coursework:coursework@test-postgres:5432/coursework_test
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@test-sqlserver:1433/coursework_test?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
       CORS_ORIGINS: http://test-frontend
       FILE_ROOT: /tmp/coursework-test-files
     depends_on:
@@ -106,6 +145,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
   test-frontend:
     profiles: ["test"]
     build: ./frontend
@@ -113,6 +153,7 @@ services:
       test-api:
         condition: service_healthy
     networks: [test]
+
   e2e:
     profiles: ["test"]
     build:
@@ -127,8 +168,9 @@ services:
         condition: service_healthy
     ipc: host
     networks: [test]
+
 volumes:
-  postgres_data:
+  sqlserver_data:
   private_files:
 
 networks:

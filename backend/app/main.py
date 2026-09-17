@@ -11,7 +11,6 @@ from typing import Annotated, Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-import psycopg
 from fastapi import Cookie, Depends, FastAPI, File, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +22,7 @@ import zipfile
 from tempfile import TemporaryFile
 from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
@@ -437,7 +436,8 @@ def live(): return {"status": "ok", "service": "coursework-api"}
 @app.get("/health/ready")
 def ready(response: Response):
     try:
-        with psycopg.connect(settings.database_url.replace("postgresql+psycopg://", "postgresql://"), connect_timeout=2) as conn: conn.execute("SELECT 1")
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
         settings.file_root.mkdir(parents=True, exist_ok=True)
         return {"status": "ready", "database": "ok", "storage": "ok"}
     except Exception:
@@ -958,7 +958,7 @@ def review_config_editable(db: Session, assignment: Assignment) -> bool:
 
 
 def has_review_criteria_file(db: Session, assignment_id: UUID) -> bool:
-    return bool(db.scalar(select(FileObject.id).where(FileObject.assignment_id == assignment_id, FileObject.purpose == "REVIEW_CRITERIA", FileObject.active.is_(True)).limit(1)))
+    return bool(db.scalar(select(FileObject.id).where(FileObject.assignment_id == assignment_id, FileObject.purpose == "REVIEW_CRITERIA", FileObject.active == True).limit(1)))  # noqa: E712
 
 
 def file_json(file: FileObject, owner_name: str | None = None, submitted: bool = False) -> dict:
@@ -1137,6 +1137,23 @@ def delete_assignment(aid: UUID, user: CsrfUser, db: Db):
     paths = [settings.file_root / item.storage_path for item in db.scalars(select(FileObject).where(FileObject.assignment_id == aid)).all()]
     title = assignment.title
     audit(db, user, "ASSIGNMENT_DELETED", "assignment", str(aid), {"title": title})
+    submission_ids = select(Submission.id).where(Submission.assignment_id == aid)
+    version_ids = select(SubmissionVersion.id).where(SubmissionVersion.submission_id.in_(submission_ids))
+    assessment_ids = select(SubmissionAssessment.id).where(SubmissionAssessment.assignment_id == aid)
+    campaign_ids = select(ReviewCampaign.id).where(ReviewCampaign.assignment_id == aid)
+    grade_ids = select(Grade.id).where(Grade.assignment_id == aid)
+    db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id.in_(assessment_ids)))
+    db.execute(delete(GradeRevision).where(GradeRevision.grade_id.in_(grade_ids)))
+    db.execute(delete(Grade).where(Grade.assignment_id == aid))
+    db.execute(delete(PeerReview).where(PeerReview.campaign_id.in_(campaign_ids)))
+    db.execute(delete(ReviewAssignment).where(ReviewAssignment.campaign_id.in_(campaign_ids)))
+    db.execute(delete(SubmissionAssessment).where(SubmissionAssessment.assignment_id == aid))
+    db.execute(delete(VersionFile).where(VersionFile.version_id.in_(version_ids)))
+    db.execute(delete(SubmissionVersion).where(SubmissionVersion.submission_id.in_(submission_ids)))
+    db.execute(delete(Submission).where(Submission.assignment_id == aid))
+    db.execute(delete(GradeCoefficient).where(GradeCoefficient.assignment_id == aid))
+    db.execute(delete(ReviewCampaign).where(ReviewCampaign.assignment_id == aid))
+    db.execute(delete(FileObject).where(FileObject.assignment_id == aid))
     db.delete(assignment)
     db.commit()
     for path in paths:
@@ -1217,7 +1234,7 @@ def assignment_files(aid: UUID, user: CurrentUser, db: Db):
     criteria = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "REVIEW_CRITERIA").order_by(FileObject.created_at)).all()
     drafts = []
     if user.role == "STUDENT":
-        q = select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active.is_(True))
+        q = select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True)  # noqa: E712
         q = q.where(FileObject.owner_id == user.id) if assignment.submitter_type == "INDIVIDUAL" else q.where(FileObject.team_id == team.id)
         drafts = db.scalars(q.order_by(FileObject.created_at)).all()
     def item(file: FileObject):
@@ -1236,7 +1253,7 @@ def download_assignment_materials(aid: UUID, user: CurrentUser, db: Db, file_ids
         raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "可查看的作业不存在")
     files = db.scalars(select(FileObject).where(
         FileObject.assignment_id == aid, FileObject.id.in_(file_ids),
-        FileObject.purpose == "ATTACHMENT", FileObject.active.is_(True),
+        FileObject.purpose == "ATTACHMENT", FileObject.active == True,  # noqa: E712
     ).order_by(FileObject.created_at)).all()
     if len(files) != len(set(file_ids)):
         raise ApiError(422, "MATERIAL_FILE_INVALID", "部分文件不存在或不属于该作业资料")
@@ -1278,7 +1295,7 @@ def delete_file(fid: UUID, user: CsrfUser, db: Db):
     if file.purpose == "REVIEW_CRITERIA":
         if not review_config_editable(db, assignment):
             raise ApiError(409, "AUTO_REVIEW_CONFIG_LOCKED", "作业已截止或互评活动已创建，不能修改互评标准附件")
-        remaining = db.scalar(select(func.count()).select_from(FileObject).where(FileObject.assignment_id == assignment.id, FileObject.purpose == "REVIEW_CRITERIA", FileObject.active.is_(True), FileObject.id != fid)) or 0
+        remaining = db.scalar(select(func.count()).select_from(FileObject).where(FileObject.assignment_id == assignment.id, FileObject.purpose == "REVIEW_CRITERIA", FileObject.active == True, FileObject.id != fid)) or 0  # noqa: E712
         if assignment.auto_review_enabled and not (assignment.auto_review_criteria_text or "").strip() and remaining == 0:
             raise ApiError(409, "REVIEW_CRITERIA_REQUIRED", "启用互评时必须保留标准文字或至少一个附件")
     if db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == fid).limit(1)):
@@ -1312,7 +1329,7 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
     if team and team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "小组作业仅组长可正式提交")
     if a.due_at < now() and not a.allow_late: raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止且不允许迟交")
     file_scope = FileObject.owner_id == user.id if not team else FileObject.team_id == team.id
-    files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active.is_(True), file_scope).order_by(FileObject.created_at)).all()
+    files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).order_by(FileObject.created_at)).all()  # noqa: E712
     if not files: raise ApiError(422, "SUBMISSION_FILES_REQUIRED", "请先上传作业附件")
     if not s: s = Submission(assignment_id=aid, owner_user_id=user.id if not team else None, owner_team_id=team.id if team else None); db.add(s); db.flush()
     current = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s.current_version_no else None
@@ -1329,12 +1346,14 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
     old_versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.id != v.id)).all()
     for old in old_versions:
         frozen = db.scalar(select(ReviewAssignment.id).where(ReviewAssignment.submission_version_id == old.id).limit(1)) or db.scalar(select(PeerReview.id).where(PeerReview.submission_version_id == old.id).limit(1)) or db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == old.id).limit(1))
-        if not frozen: db.delete(old)
+        if not frozen:
+            db.execute(delete(VersionFile).where(VersionFile.version_id == old.id))
+            db.delete(old)
     s.status = "SUBMITTED"
     for f in files: db.add(VersionFile(version_id=v.id, file_id=f.id))
     db.flush()
     stale_paths = []
-    inactive = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active.is_(False), file_scope)).all()
+    inactive = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == False, file_scope)).all()  # noqa: E712
     for file in inactive:
         if not db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == file.id).limit(1)):
             stale_paths.append(settings.file_root / file.storage_path)
@@ -1428,7 +1447,7 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
     _, team = require_team(db, assignment.class_id, user)
     attachments = db.scalars(
         select(FileObject)
-        .where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT", FileObject.active.is_(True))
+        .where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT", FileObject.active == True)  # noqa: E712
         .order_by(FileObject.created_at)
     ).all()
     rows = db.execute(
@@ -1511,7 +1530,7 @@ def delete_teacher_submission_assessment(aid: UUID, student_id: UUID, user: Csrf
     _, version = submitted
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     if item:
-        item_id = str(item.id); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
+        item_id = str(item.id); db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id)); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
     result = submission_grade_result(db, version); db.commit()
     return result
 
@@ -1540,7 +1559,7 @@ def annotation_json(item: SubmissionAnnotation) -> dict:
 
 
 def assessment_annotations(db: Session, assessment_id: UUID) -> list[dict]:
-    items = db.scalars(select(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == assessment_id).order_by(SubmissionAnnotation.created_at)).all()
+    items = db.scalars(select(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == assessment_id).order_by(SubmissionAnnotation.position, SubmissionAnnotation.created_at)).all()
     return [annotation_json(item) for item in items]
 
 
@@ -1588,8 +1607,8 @@ def validate_feedback_annotations(db: Session, version_id: UUID, annotations: li
 
 def replace_feedback_annotations(db: Session, item: SubmissionAssessment, annotations: list[dict], user: User) -> None:
     db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id))
-    for annotation in annotations:
-        db.add(SubmissionAnnotation(assessment_id=item.id, submission_version_id=item.submission_version_id, file_id=UUID(annotation["file_id"]), author_id=user.id, kind=annotation["kind"], mark_type=annotation.get("mark_type") or ("COMMENT" if annotation.get("comment") else "HIGHLIGHT"), color=annotation.get("color") or "YELLOW", anchor=annotation["anchor"], comment=annotation["comment"]))
+    for position, annotation in enumerate(annotations):
+        db.add(SubmissionAnnotation(assessment_id=item.id, submission_version_id=item.submission_version_id, file_id=UUID(annotation["file_id"]), author_id=user.id, kind=annotation["kind"], mark_type=annotation.get("mark_type") or ("COMMENT" if annotation.get("comment") else "HIGHLIGHT"), color=annotation.get("color") or "YELLOW", anchor=annotation["anchor"], comment=annotation["comment"], position=position))
 
 
 def peer_feedback_context(db: Session, version_id: UUID, user: User):
@@ -1703,7 +1722,7 @@ def delete_submission_feedback(version_id: UUID, user: CsrfUser, db: Db):
     require_writable_class(db, user, assignment.class_id)
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     if item:
-        item_id = str(item.id); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
+        item_id = str(item.id); db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id)); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
     result = submission_grade_result(db, version); db.commit()
     return result
 
@@ -2241,6 +2260,7 @@ def delete_class(cid: UUID, user: CsrfUser, db: Db):
     }
     if any(blockers.values()): raise ApiError(409, "CLASS_NOT_EMPTY", "教学班已有历史数据，请改用归档", blockers)
     audit(db, user, "CLASS_DELETED", "class", str(cid), {"semester": course.semester, "name": course.name})
+    db.execute(delete(ClassJoinRequest).where(ClassJoinRequest.class_id == cid))
     db.delete(course); db.commit(); return Response(status_code=204)
 
 

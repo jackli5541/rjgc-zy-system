@@ -4,15 +4,25 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey as SAForeignKey, ForeignKeyConstraint as SAForeignKeyConstraint, Identity, Index, Integer, JSON, Numeric, Unicode as String, UnicodeText as Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
 
 def uuid_pk() -> Mapped[UUID]:
-    return mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    return mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+
+
+def ForeignKey(column: str, **kwargs):
+    """Avoid multiple cascade paths, which SQL Server rejects."""
+    kwargs.pop("ondelete", None)
+    return SAForeignKey(column, **kwargs)
+
+
+def ForeignKeyConstraint(columns, refcolumns, **kwargs):
+    kwargs.pop("ondelete", None)
+    return SAForeignKeyConstraint(columns, refcolumns, **kwargs)
 
 
 class User(Base):
@@ -77,7 +87,7 @@ class ClassJoinRequest(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-Index("uq_pending_class_join_request", ClassJoinRequest.class_id, ClassJoinRequest.user_id, unique=True, postgresql_where=ClassJoinRequest.status == "PENDING")
+Index("uq_pending_class_join_request", ClassJoinRequest.class_id, ClassJoinRequest.user_id, unique=True, mssql_where=ClassJoinRequest.status == "PENDING")
 
 
 class ImportBatch(Base):
@@ -116,7 +126,7 @@ class TeamMember(Base):
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-Index("uq_active_team_member", TeamMember.class_id, TeamMember.user_id, unique=True, postgresql_where=TeamMember.status == "ACTIVE")
+Index("uq_active_team_member", TeamMember.class_id, TeamMember.user_id, unique=True, mssql_where=TeamMember.status == "ACTIVE")
 
 
 class TeamRequest(Base):
@@ -196,7 +206,10 @@ class Submission(Base):
     status: Mapped[str] = mapped_column(String(16), default="DRAFT")
     current_version_no: Mapped[int] = mapped_column(Integer, default=0)
     version: Mapped[int] = mapped_column(Integer, default=1)
-    __table_args__ = (UniqueConstraint("assignment_id", "owner_user_id", name="uq_personal_submission"), UniqueConstraint("assignment_id", "owner_team_id", name="uq_team_submission"))
+
+
+Index("uq_personal_submission", Submission.assignment_id, Submission.owner_user_id, unique=True, mssql_where=Submission.owner_user_id.is_not(None))
+Index("uq_team_submission", Submission.assignment_id, Submission.owner_team_id, unique=True, mssql_where=Submission.owner_team_id.is_not(None))
 
 
 class SubmissionVersion(Base):
@@ -208,8 +221,11 @@ class SubmissionVersion(Base):
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     member_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     is_late: Mapped[bool] = mapped_column(Boolean, default=False)
-    idempotency_key: Mapped[str | None] = mapped_column(String(80), unique=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(80))
     __table_args__ = (UniqueConstraint("submission_id", "version_no", name="uq_submission_version"),)
+
+
+Index("uq_submission_version_idempotency_key", SubmissionVersion.idempotency_key, unique=True, mssql_where=SubmissionVersion.idempotency_key.is_not(None))
 
 
 class VersionFile(Base):
@@ -251,6 +267,7 @@ class SubmissionAnnotation(Base):
     color: Mapped[str] = mapped_column(String(10), default="YELLOW")
     anchor: Mapped[dict] = mapped_column(JSON)
     comment: Mapped[str] = mapped_column(Text, default="")
+    position: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     __table_args__ = (
@@ -294,14 +311,16 @@ class ReviewAssignment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         UniqueConstraint("campaign_id", "reviewer_id", name="uq_review_assignment_reviewer"),
-        UniqueConstraint("campaign_id", "reviewee_id", name="uq_review_assignment_reviewee"),
     )
+
+
+Index("uq_review_assignment_reviewee", ReviewAssignment.campaign_id, ReviewAssignment.reviewee_id, unique=True, mssql_where=ReviewAssignment.reviewee_id.is_not(None))
 
 
 class PeerReview(Base):
     __tablename__ = "peer_reviews"
     id: Mapped[UUID] = uuid_pk()
-    allocation_id: Mapped[UUID | None] = mapped_column(ForeignKey("review_assignments.id", ondelete="CASCADE"), unique=True)
+    allocation_id: Mapped[UUID | None] = mapped_column(ForeignKey("review_assignments.id", ondelete="CASCADE"))
     campaign_id: Mapped[UUID] = mapped_column(ForeignKey("review_campaigns.id", ondelete="CASCADE"), index=True)
     reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
     reviewee_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
@@ -315,7 +334,8 @@ class PeerReview(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-Index("uq_valid_peer_review", PeerReview.campaign_id, PeerReview.reviewer_id, PeerReview.reviewee_id, unique=True, postgresql_where=PeerReview.status == "VALID")
+Index("uq_valid_peer_review", PeerReview.campaign_id, PeerReview.reviewer_id, PeerReview.reviewee_id, unique=True, mssql_where=PeerReview.status == "VALID")
+Index("uq_peer_review_allocation", PeerReview.allocation_id, unique=True, mssql_where=PeerReview.allocation_id.is_not(None))
 
 
 class GradeCoefficient(Base):
@@ -338,7 +358,7 @@ class Grade(Base):
     campaign_id: Mapped[UUID] = mapped_column(ForeignKey("review_campaigns.id", ondelete="CASCADE"), index=True)
     subject_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
     coefficient_id: Mapped[UUID | None] = mapped_column(ForeignKey("grade_coefficients.id", ondelete="SET NULL"), index=True)
-    peer_review_id: Mapped[UUID | None] = mapped_column(ForeignKey("peer_reviews.id", ondelete="SET NULL"), unique=True)
+    peer_review_id: Mapped[UUID | None] = mapped_column(ForeignKey("peer_reviews.id", ondelete="SET NULL"))
     peer_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     draft_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
@@ -346,6 +366,9 @@ class Grade(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     __table_args__ = (UniqueConstraint("assignment_id", "subject_user_id", name="uq_personal_grade"),)
+
+
+Index("uq_grade_peer_review", Grade.peer_review_id, unique=True, mssql_where=Grade.peer_review_id.is_not(None))
 
 
 class GradeRevision(Base):
@@ -399,3 +422,10 @@ class BackgroundJob(Base):
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     result_path: Mapped[str | None] = mapped_column(String(255))
+
+
+class RealtimeEvent(Base):
+    __tablename__ = "realtime_events"
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

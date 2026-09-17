@@ -19,7 +19,7 @@
 | --- | --- |
 | 前端 | Vue 3、Vite、Ant Design Vue、Vue Router、Pinia |
 | 后端 | FastAPI、SQLAlchemy、Alembic、Pydantic |
-| 数据库 | PostgreSQL 17 |
+| 数据库 | SQL Server 2014+（开发与测试使用 SQL Server 2022 兼容级别 120） |
 | 测试 | Pytest、Playwright |
 | 部署 | Docker Compose；生产环境使用 FastAPI、Uvicorn 与 systemd 直接部署 |
 
@@ -31,10 +31,11 @@
 - Docker Desktop（需支持 `docker compose`）
 - Python 3.13
 - Node.js 22 与 npm
+- Microsoft ODBC Driver 18 for SQL Server（仅本机运行后端时需要）
 
 ### 方式一：本地开发（推荐）
 
-该模式仅在 Docker 中运行 PostgreSQL，后端 API、任务进程和前端开发服务器运行在本机，支持前端热更新。
+该模式仅在 Docker 中运行 SQL Server 2022，后端 API、任务进程和前端开发服务器运行在本机，支持前端热更新。
 
 ```powershell
 git clone https://github.com/jackli5541/rjgc-zy-system.git
@@ -45,13 +46,13 @@ cd rjgc-zy-system
 
 初始化仍使用 PowerShell 脚本；日常启动使用 `start-local.bat` 入口。启动脚本会先自动应用所有待执行的数据库迁移，迁移失败时不会启动服务。开发环境中的 API 和后台任务进程会监听 `backend/app` 下的 Python 文件并自动重启。启动窗口会保持打开，关闭该 CMD 窗口即可停止本地前后端进程。
 
-首次执行 `init-local.ps1` 会启动 PostgreSQL、创建 Python 虚拟环境、安装前后端依赖、执行数据库迁移并初始化系统。启动完成后访问：
+首次执行 `init-local.ps1` 会启动 SQL Server、创建兼容级别为 120 的数据库、创建 Python 虚拟环境、安装前后端依赖、执行数据库迁移并初始化系统。启动完成后访问：
 
 - Web 页面：<http://localhost:8080>
 - API 文档：<http://localhost:8000/docs>
 - 健康检查：<http://localhost:8000/health/ready>
 
-PostgreSQL 会继续在后台运行；开发数据库默认映射到本机 `5433` 端口，数据保存在 Docker 卷中。
+SQL Server 会继续在后台运行；开发数据库默认映射到本机 `1433` 端口，数据保存在 Docker 卷中。
 
 ### 方式二：全容器启动
 
@@ -88,12 +89,11 @@ docker compose --profile container-app down
 
 ## 自动化测试
 
-测试使用独立的 PostgreSQL 容器和临时文件系统，不会读写开发数据库：
+测试使用独立的 SQL Server 容器和临时文件系统，不会读写开发数据库。项目约定跳过 E2E，本次数据库回归只运行后端测试：
 
 ```powershell
 docker compose --profile test build
 docker compose --profile test run --rm test-api pytest -q
-docker compose --profile test run --rm e2e
 ```
 
 ## 项目结构
@@ -108,6 +108,6 @@ docker compose --profile test run --rm e2e
 `-- PRD-软件工程作业系统.md   # 产品需求文档
 ```
 
-生产服务器的 Python、PostgreSQL 与 systemd 直接部署流程见 [服务器直接部署说明](docs/服务器直接部署说明.md)，系统架构见 [系统架构设计](docs/系统架构设计.md)。
+生产服务器的 Python、SQL Server 与 systemd 直接部署流程见 [服务器直接部署说明](docs/服务器直接部署说明.md)，系统架构见 [系统架构设计](docs/系统架构设计.md)。
 
 Windows 服务器可在构建前端后运行 `scripts\start-server.bat`。脚本默认托管 `frontend\dist`，也可将独立部署的 dist 目录作为第一个参数，例如 `scripts\start-server.bat D:\coursework\dist`。

@@ -853,17 +853,19 @@ function openFilePreview(file, files) {
   filePreview.open = true
 }
 function openPortfolioFilePreview(file, files, assignment) {
+  const isTeamAssignment = Boolean(assignment.submission)
+  const record = assignment.submission || assignment
   const submission = {
-    owner: memberDetail.value?.name || '',
-    user_id: memberDetail.value?.id || '',
-    submission_version_id: assignment.submission_version_id,
+    owner: isTeamAssignment ? selectedTeam.value?.name || '' : memberDetail.value?.name || '',
+    user_id: isTeamAssignment ? '' : memberDetail.value?.id || '',
+    submission_version_id: record.submission_version_id,
     files: [...files],
-    teacher_grade: assignment.teacher_grade,
-    peer_grade: assignment.peer_grade,
-    peer_feedbacks: assignment.received_reviews || []
+    teacher_grade: record.teacher_grade,
+    peer_grade: isTeamAssignment ? null : record.peer_grade,
+    peer_feedbacks: isTeamAssignment ? [] : record.received_reviews || []
   }
   selectedSubmission.value = submission
-  Object.assign(filePreview, { mode: 'TEACHER', targets: [], targetIndex: 0, initialFeedback: assignment.teacher_grade, pendingOnly: false, readonly: true, assignmentTitle: assignment.title, files: [...files], index: Math.max(0, files.findIndex(item => item.id === file.id)), open: true })
+  Object.assign(filePreview, { mode: 'TEACHER', targets: [], targetIndex: 0, initialFeedback: record.teacher_grade, pendingOnly: false, readonly: true, assignmentTitle: assignment.title, files: [...files], index: Math.max(0, files.findIndex(item => item.id === file.id)), open: true })
 }
 function closeFilePreview() {
   filePreview.open = false

@@ -4,8 +4,15 @@ $backendRoot = Join-Path $projectRoot 'backend'
 $venvPython = Join-Path $backendRoot '.venv\Scripts\python.exe'
 
 Set-Location $projectRoot
-docker compose up -d postgres
-if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 容器启动失败。' }
+docker compose up -d sqlserver
+if ($LASTEXITCODE -ne 0) { throw 'SQL Server 容器启动失败。' }
+docker compose run --rm sqlserver-init
+if ($LASTEXITCODE -ne 0) { throw 'SQL Server 数据库初始化失败。' }
+
+$odbcDriver = Get-OdbcDriver -Name 'ODBC Driver 18 for SQL Server' -Platform '64-bit' -ErrorAction SilentlyContinue
+if (-not $odbcDriver) {
+    throw '未安装 Microsoft ODBC Driver 18 for SQL Server，请先安装 64 位驱动。'
+}
 
 if (-not (Test-Path -LiteralPath $venvPython)) {
     python -m venv (Join-Path $backendRoot '.venv')

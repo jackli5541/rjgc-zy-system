@@ -21,4 +21,4 @@ foreach ($processId in @($state.api, $state.worker, $state.frontend)) {
     Stop-ProcessTree -RootProcessId $processId
 }
 Remove-Item -LiteralPath $stateFile
-Write-Host '本地前后端已停止；PostgreSQL 容器保持运行。'
+Write-Host '本地前后端已停止；SQL Server 容器保持运行。'

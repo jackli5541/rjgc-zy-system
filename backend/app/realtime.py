@@ -1,24 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-import psycopg
-from sqlalchemy import text
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.settings import settings
+from app.database import SessionLocal
+from app.models import RealtimeEvent
 
 
-CHANNEL = "coursework_events"
-
-
-def _database_dsn() -> str:
-    return settings.database_url.replace("postgresql+psycopg://", "postgresql://")
+POLL_INTERVAL_SECONDS = 0.25
+POLL_BATCH_SIZE = 200
 
 
 def publish_event(
@@ -44,7 +40,7 @@ def publish_event(
         "source_client_id": source_client_id,
         "occurred_at": datetime.now(UTC).isoformat(),
     }
-    db.execute(text("SELECT pg_notify(:channel, :payload)"), {"channel": CHANNEL, "payload": json.dumps(payload, separators=(",", ":"))})
+    db.add(RealtimeEvent(payload=payload))
 
 
 @dataclass(frozen=True)
@@ -60,12 +56,14 @@ class RealtimeHub:
         self._subscribers: set[Subscriber] = set()
         self._listener_task: asyncio.Task | None = None
         self._stopping = False
+        self._last_event_id = 0
 
     async def start(self) -> None:
         if self._listener_task and not self._listener_task.done():
             return
         self._stopping = False
-        self._listener_task = asyncio.create_task(self._listen(), name="postgres-realtime-listener")
+        self._last_event_id = await asyncio.to_thread(self._current_event_id)
+        self._listener_task = asyncio.create_task(self._listen(), name="sqlserver-realtime-outbox")
 
     async def stop(self) -> None:
         self._stopping = True
@@ -108,26 +106,32 @@ class RealtimeHub:
         roles = payload.get("roles") or []
         return not roles or subscriber.role in roles
 
+    @staticmethod
+    def _current_event_id() -> int:
+        with SessionLocal() as db:
+            return db.scalar(select(func.max(RealtimeEvent.id))) or 0
+
+    @staticmethod
+    def _events_after(event_id: int) -> list[RealtimeEvent]:
+        with SessionLocal() as db:
+            return list(db.scalars(select(RealtimeEvent).where(RealtimeEvent.id > event_id).order_by(RealtimeEvent.id).limit(POLL_BATCH_SIZE)))
+
     async def _listen(self) -> None:
-        delay = 1
+        delay = POLL_INTERVAL_SECONDS
         while not self._stopping:
             try:
-                connection = await psycopg.AsyncConnection.connect(_database_dsn(), autocommit=True)
-                async with connection:
-                    await connection.execute(f"LISTEN {CHANNEL}")
-                    if delay > 1:
-                        self.dispatch({"id": uuid4().hex, "type": "sync_required", "scopes": ["current_view", "notifications"]})
-                    delay = 1
-                    async for notification in connection.notifies():
-                        try:
-                            self.dispatch(json.loads(notification.payload))
-                        except (TypeError, ValueError):
-                            continue
+                events = await asyncio.to_thread(self._events_after, self._last_event_id)
+                for event in events:
+                    self.dispatch(event.payload)
+                    self._last_event_id = event.id
+                delay = POLL_INTERVAL_SECONDS
+                await asyncio.sleep(0 if len(events) == POLL_BATCH_SIZE else POLL_INTERVAL_SECONDS)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
+                self.dispatch({"id": uuid4().hex, "type": "sync_required", "scopes": ["current_view", "notifications"]})
 
 
 hub = RealtimeHub()

@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+psycopg://coursework:coursework@localhost:5433/coursework"
+    database_url: str = "mssql+pyodbc://sa:Coursework_2026!@localhost:1433/coursework?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
     cors_origins: str = "http://localhost:8080,http://localhost:5173"
     file_root: Path = Path("./data/files")
     session_hours: int = 24

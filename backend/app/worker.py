@@ -6,7 +6,7 @@ from sqlalchemy import and_, delete, select
 
 from app.database import SessionLocal
 from app.grading import finalize_campaign
-from app.models import Assignment, AuditLog, BackgroundJob, ClassMember, FileObject, ImportBatch, LoginSession, Notification, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, User
+from app.models import Assignment, AuditLog, BackgroundJob, ClassMember, FileObject, ImportBatch, LoginSession, Notification, RealtimeEvent, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, User
 from app.realtime import publish_event
 from app.settings import settings
 
@@ -31,7 +31,7 @@ def process_preview(job_id: UUID, file_id: UUID) -> None:
 def process_auto_review(db, current: datetime) -> None:
     assignment = db.scalar(
         select(Assignment)
-        .where(Assignment.auto_review_enabled.is_(True), Assignment.auto_review_status == "PENDING", Assignment.status.in_(["PUBLISHED", "CLOSED"]), Assignment.due_at <= current)
+        .where(Assignment.auto_review_enabled == True, Assignment.auto_review_status == "PENDING", Assignment.status.in_(["PUBLISHED", "CLOSED"]), Assignment.due_at <= current)  # noqa: E712
         .order_by(Assignment.due_at)
         .with_for_update(skip_locked=True)
         .limit(1)
@@ -115,6 +115,7 @@ def run_once() -> None:
         current = datetime.now(UTC)
         db.execute(delete(LoginSession).where(LoginSession.expires_at < current))
         db.execute(delete(ImportBatch).where(ImportBatch.status == "PREVIEWED", ImportBatch.created_at < current - timedelta(days=1)))
+        db.execute(delete(RealtimeEvent).where(RealtimeEvent.created_at < current - timedelta(days=1)))
         process_auto_review(db, current)
         process_due_campaign(db, current)
         job = db.scalar(select(BackgroundJob).where(BackgroundJob.status == "PENDING", BackgroundJob.available_at <= current).with_for_update(skip_locked=True).limit(1))
