@@ -270,9 +270,13 @@ async function loadView({ silent = false, background = false } = {}) {
       if (linkedTeam) await openTeam(linkedTeam)
     }
     if (view.value === 'assignments') {
-      const assignmentData = await api(`/assignments?class_id=${classId.value}`)
+      const [assignmentData, gradeData] = await Promise.all([
+        api(`/assignments?class_id=${classId.value}`),
+        role.value === 'STUDENT' ? api(`/grades?class_id=${classId.value}`) : Promise.resolve({ items: [] })
+      ])
       if (!isCurrent()) return
       assignments.value = assignmentData.items
+      if (role.value === 'STUDENT') grades.value = gradeData.items
     }
     if (view.value === 'assignment-detail') {
       const assignmentData = await api(`/assignments?class_id=${classId.value}`)
@@ -618,8 +622,17 @@ async function continueGrading(item) {
   } catch (error) { message.error(error.message) }
 }
 function openStudentFeedback(record, peerFeedback = null) {
-  const submission = { ...record, owner: peerFeedback?.evaluator_name || record.assignment_title }
-  openAssessmentDrawer(submission, { mode: peerFeedback ? 'PEER' : 'TEACHER', initialFeedback: peerFeedback })
+  const combined = !peerFeedback && record.teacher_grade && record.files?.length
+  const submission = { ...record, owner: peerFeedback?.evaluator_name || record.assignment_title, peer_feedbacks: record.peer_feedbacks || [] }
+  openAssessmentDrawer(submission, { mode: combined ? 'TEACHER' : peerFeedback ? 'PEER' : 'TEACHER', initialFeedback: peerFeedback })
+}
+function openStudentAssignment(item) {
+  const grade = grades.value.find(record => record.assignment_id === item.id)
+  const hasFeedback = grade && ((grade.teacher_grade && grade.files?.length) || grade.peer_feedbacks?.length)
+  if (item.status === 'CLOSED' || new Date(item.due_at) <= new Date()) {
+    if (hasFeedback) return openStudentFeedback(grade)
+  }
+  return openAssignment(item, 'details')
 }
 function openPeerReviewDrawer(candidate, file = candidate?.files?.[0]) {
   if (!candidate?.files?.length || !file) return message.warning('该组员没有可预览的提交文件')
@@ -849,7 +862,7 @@ provide(shellContextKey, {
   grades, gradeAssignments, selectedGradeAssignmentId, campaigns, selectedCampaign, reviewTask, reviewForm, selectedReviewCandidate,
   latestOverviewAssignment, assignmentHistory, assignmentChartLine, assignmentChartPoints, currentTeam, needsTopicSubmission,
   studentPendingAssignments, studentUpcomingAssignments, studentPendingReviews, studentLatestGrade,
-  changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback, openClassCreate,
+  changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback, openStudentAssignment, openClassCreate,
   manageClass, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
   applyTeam, openTeam, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
   openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading
@@ -947,9 +960,9 @@ provide(shellContextKey, {
       :targets="filePreview.targets"
       :target-index="filePreview.targetIndex"
       :initial-feedback="filePreview.initialFeedback"
-      :peer-feedback-enabled="role==='TEACHER'&&Boolean(selectedAssignment?.auto_review_enabled)"
-      :peer-grade="role==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
-      :peer-feedbacks="role==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
+      :peer-feedback-enabled="filePreview.mode==='TEACHER'&&Boolean(selectedSubmission?.peer_feedbacks?.length)"
+      :peer-grade="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
+      :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
       @close="closeFilePreview"
       @feedback-published="handleFeedbackPublished"
       @clear-feedback="clearTeacherGrade"
