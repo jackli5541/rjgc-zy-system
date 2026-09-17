@@ -35,6 +35,8 @@ const selectedColor = ref('YELLOW')
 const drawerRoot = ref(null)
 const documentStage = ref(null)
 const documentViewer = ref(null)
+const overallEditor = ref(null)
+const commentEditor = ref(null)
 const selectionMenu = reactive({ open: false, left: 0, top: 0 })
 const commentComposer = reactive({ open: false, visible: true, mode: 'new', annotationId: '', left: 0, top: 0, value: '' })
 let loadSequence = 0
@@ -64,6 +66,7 @@ const markTypes = [
 ]
 
 function resetFeedback(value = {}) {
+  stopSpeechInput()
   const grade = props.mode === 'TEACHER' && !value.status ? undefined : value.grade
   Object.assign(feedback, { status: null, revision: 0, grade: undefined, comment: '', annotations: [], published_at: null, has_draft: false }, value, { grade, revision: value.revision ?? value.version ?? 0 })
   feedback.annotations = (value.annotations || []).map(item => ({ ...item, mark_type: item.mark_type || (item.comment ? 'COMMENT' : 'HIGHLIGHT'), color: item.color || 'YELLOW' }))
@@ -72,6 +75,11 @@ function resetFeedback(value = {}) {
   dismissTransient()
   feedbackBaseline = JSON.stringify(feedbackPayload())
   externalWarning.value = false
+}
+
+function stopSpeechInput() {
+  overallEditor.value?.stopSpeechRecognition?.()
+  commentEditor.value?.stopSpeechRecognition?.()
 }
 
 function feedbackDirty() {
@@ -215,12 +223,14 @@ function submitComment() {
     const annotation = feedback.annotations.find(item => item.id === commentComposer.annotationId)
     if (annotation) { annotation.mark_type = 'COMMENT'; annotation.comment = commentComposer.value }
   }
+  stopSpeechInput()
   commentComposer.open = false
   pendingSelection.value = null
   clearBrowserSelection()
 }
 
 function cancelComment() {
+  stopSpeechInput()
   commentComposer.open = false
   pendingSelection.value = null
   clearBrowserSelection()
@@ -338,19 +348,20 @@ function annotationLabel(item) {
 
 watch(() => props.open, value => {
   document.documentElement.classList.toggle('file-preview-open', value)
-  if (!value) { dismissTransient(); commentComposer.open = false; return }
+  if (!value) { stopSpeechInput(); dismissTransient(); commentComposer.open = false; return }
   index.value = Math.min(props.initialIndex, Math.max(0, props.files.length - 1))
   loadFeedback(); loadFile()
 })
-watch(index, () => { selectedAnnotationId.value = ''; commentComposer.open = false; dismissTransient(); loadFile() })
+watch(index, () => { stopSpeechInput(); selectedAnnotationId.value = ''; commentComposer.open = false; dismissTransient(); loadFile() })
 watch(() => props.files, () => { if (props.open) loadFile() }, { deep: true })
 watch(() => props.submissionVersionId, () => {
   if (!props.open) return
+  stopSpeechInput()
   index.value = 0
   loadFeedback(); loadFile()
 })
 onMounted(() => { document.addEventListener('pointerdown', handleGlobalPointer); document.addEventListener('scroll', handleGlobalScroll, true); document.addEventListener('keydown', handleGlobalKey); window.addEventListener('resize', handleResize) })
-onBeforeUnmount(() => { loadSequence += 1; document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
+onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
 </script>
 
 <template>
@@ -388,7 +399,7 @@ onBeforeUnmount(() => { loadSequence += 1; document.documentElement.classList.re
         <a-alert v-if="externalWarning" type="warning" show-icon message="提交或评价数据已更新" description="当前未保存内容已保留。完成本次编辑后将自动同步最新数据。"/>
         <div class="feedback-heading"><div><strong>{{owner||'教师反馈'}}</strong><span v-if="feedback.status">{{feedback.status==='PUBLISHED'?'已发布':'草稿'}}<template v-if="feedback.has_draft"> · 有待发布修改</template></span></div><a-tag v-if="feedback.grade" :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
         <template v-if="editable">
-          <label class="feedback-field"><span>总评</span><RichTextEditor v-model="feedback.comment" placeholder="填写整体评价"/></label>
+          <label class="feedback-field"><span>总评</span><RichTextEditor ref="overallEditor" v-model="feedback.comment" speech-enabled placeholder="填写整体评价"/></label>
         </template>
         <section class="annotation-section">
           <div class="annotation-section-heading"><strong>{{mode==='TEACHER'?'教师文内批注':'文内批注'}}</strong><span>{{activeAnnotations.length}}</span></div>
@@ -437,7 +448,7 @@ onBeforeUnmount(() => { loadSequence += 1; document.documentElement.classList.re
     </div>
     <div v-if="commentComposer.open" class="annotation-composer" :class="{hidden:!commentComposer.visible}" :style="{left:`${commentComposer.left}px`,top:`${commentComposer.top}px`}" @pointerdown.stop @keydown.ctrl.enter.prevent="submitComment" @keydown.esc.stop.prevent="cancelComment">
       <template v-if="editable&&!selectedAnnotation?.readonly">
-        <RichTextEditor v-model="commentComposer.value" compact autofocus placeholder="输入批注内容"/>
+        <RichTextEditor ref="commentEditor" v-model="commentComposer.value" compact autofocus speech-enabled placeholder="输入批注内容"/>
         <div class="annotation-composer-actions"><span>Ctrl+Enter 提交</span><a-button size="small" @click="cancelComment">取消</a-button><a-button type="primary" size="small" @click="submitComment">{{commentComposer.mode==='new'?'添加批注':'保存修改'}}</a-button></div>
       </template>
       <template v-else>
