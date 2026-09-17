@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 import bleach
 import markdown
 import zipfile
+from tempfile import TemporaryFile
 from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, or_, select
@@ -574,6 +575,36 @@ def dashboard(cid: UUID, user: CurrentUser, db: Db):
             "completion_rate": round(submitted * 100 / expected, 1) if expected else 0,
         })
 
+    latest_submission = None
+    if user.role == "TEACHER":
+        submitted_rows = db.execute(
+            select(Assignment, SubmissionVersion, Submission)
+            .join(Submission, and_(Submission.assignment_id == Assignment.id, Submission.status == "SUBMITTED"))
+            .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+            .where(
+                Assignment.class_id == cid,
+                Assignment.status.in_(["PUBLISHED", "CLOSED"]),
+                Assignment.submitter_type == "INDIVIDUAL",
+                ~select(SubmissionAssessment.id).where(
+                    SubmissionAssessment.submission_version_id == SubmissionVersion.id,
+                    SubmissionAssessment.kind == "TEACHER",
+                    SubmissionAssessment.status == "PUBLISHED",
+                ).exists(),
+            )
+        ).all()
+        submitted_rows = [row for row in submitted_rows if db.scalar(select(VersionFile.file_id).where(VersionFile.version_id == row.SubmissionVersion.id).limit(1))]
+        if submitted_rows:
+            assignment, version, submission_item = min(
+                submitted_rows,
+                key=lambda row: (abs((row.Assignment.due_at - now()).total_seconds()), -row.SubmissionVersion.submitted_at.timestamp()),
+            )
+            owner = db.get(User, submission_item.owner_user_id) if submission_item.owner_user_id else db.get(Team, submission_item.owner_team_id)
+            latest_submission = {
+                "assignment_id": str(assignment.id), "assignment_title": assignment.title,
+                "submission_version_id": str(version.id), "owner": owner.display_name if isinstance(owner, User) else owner.name,
+                "submitted_at": version.submitted_at, "due_at": assignment.due_at,
+            }
+
     latest_campaign = db.scalar(select(ReviewCampaign).where(ReviewCampaign.class_id == cid, ReviewCampaign.due_at <= now()).order_by(ReviewCampaign.due_at.desc()).limit(1))
     review_expected = review_completed = 0
     if latest_campaign:
@@ -598,6 +629,7 @@ def dashboard(cid: UUID, user: CurrentUser, db: Db):
             "peer_review_rate": round(review_completed * 100 / review_expected, 1) if review_expected else 0,
             "peer_review_assignment_title": latest_campaign_assignment.title if latest_campaign_assignment else None,
             "peer_review_due_at": latest_campaign.due_at if latest_campaign else None,
+            "latest_submission": latest_submission,
         },
         "assignment_history": assignment_history,
     }
@@ -1001,8 +1033,9 @@ def publish_assignment(aid: UUID, user: CsrfUser, db: Db):
     teacher(user); assignment = db.scalar(select(Assignment).where(Assignment.id == aid).with_for_update())
     if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, assignment.class_id)
-    if assignment.status == "PUBLISHED": return assignment_json(assignment)
-    if assignment.status == "CLOSED": raise ApiError(409, "ASSIGNMENT_CLOSED", "已提前截止的作业请先撤回发布后再重新发布")
+    republishing = assignment.status in {"PUBLISHED", "CLOSED"}
+    if assignment.status == "CLOSED" and assignment.due_at <= now():
+        raise ApiError(422, "ASSIGNMENT_DUE_INVALID", "重新发布已截止作业前，请将截止时间设置为未来时间")
     if assignment.submitter_type == "TEAM" and assignment.due_at <= now():
         raise ApiError(422, "TEAM_ASSIGNMENT_DUE_INVALID", "小组作业截止时间必须晚于当前时间")
     if assignment.auto_review_enabled:
@@ -1010,7 +1043,7 @@ def publish_assignment(aid: UUID, user: CsrfUser, db: Db):
         if not (assignment.auto_review_criteria_text or "").strip() and not criteria_exists: raise ApiError(422, "REVIEW_CRITERIA_REQUIRED", "自动互评标准文字和附件至少提供一种")
         if assignment.submitter_type != "INDIVIDUAL" or not assignment.auto_review_mode or not assignment.auto_review_due_at or assignment.auto_review_due_at <= assignment.due_at: raise ApiError(422, "AUTO_REVIEW_CONFIG_INVALID", "自动互评配置不完整")
     assignment.status = "PUBLISHED"; assignment.version += 1
-    for member in db.scalars(select(ClassMember).where(ClassMember.class_id == assignment.class_id, ClassMember.status == "ACTIVE")): notify(db, member.user_id, "ASSIGNMENT_PUBLISHED", f"新作业：{assignment.title}")
+    for member in db.scalars(select(ClassMember).where(ClassMember.class_id == assignment.class_id, ClassMember.status == "ACTIVE")): notify(db, member.user_id, "ASSIGNMENT_PUBLISHED", f"{'作业已更新' if republishing else '新作业'}：{assignment.title}")
     audit(db, user, "ASSIGNMENT_PUBLISHED", "assignment", str(aid)); db.commit(); return assignment_json(assignment)
 
 
@@ -1140,13 +1173,54 @@ def assignment_files(aid: UUID, user: CurrentUser, db: Db):
     return {"attachments": [item(x) for x in materials], "review_criteria": [item(x) for x in criteria], "drafts": [item(x) for x in drafts]}
 
 
+@app.get("/api/v1/assignments/{aid}/materials.zip")
+def download_assignment_materials(aid: UUID, user: CurrentUser, db: Db, file_ids: list[UUID] = Query(min_length=1, max_length=200)):
+    assignment = db.get(Assignment, aid)
+    if not assignment: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    require_class(db, user, assignment.class_id)
+    if user.role == "STUDENT" and assignment.status not in {"PUBLISHED", "CLOSED"}:
+        raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "可查看的作业不存在")
+    files = db.scalars(select(FileObject).where(
+        FileObject.assignment_id == aid, FileObject.id.in_(file_ids),
+        FileObject.purpose == "ATTACHMENT", FileObject.active.is_(True),
+    ).order_by(FileObject.created_at)).all()
+    if len(files) != len(set(file_ids)):
+        raise ApiError(422, "MATERIAL_FILE_INVALID", "部分文件不存在或不属于该作业资料")
+    archive = TemporaryFile()
+    try:
+        used_names = set()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+            for file in files:
+                path = settings.file_root / file.storage_path
+                if not path.is_file(): raise ApiError(404, "FILE_MISSING", "文件存储不可用")
+                original = Path(file.original_name).name
+                name, index = original, 1
+                while name.casefold() in used_names:
+                    name = f"{Path(original).stem} ({index}){Path(original).suffix}"
+                    index += 1
+                used_names.add(name.casefold())
+                bundle.write(path, name)
+        archive.seek(0)
+    except Exception:
+        archive.close()
+        raise
+
+    def chunks():
+        try:
+            while chunk := archive.read(1024 * 1024):
+                yield chunk
+        finally:
+            archive.close()
+
+    return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="assignment-materials.zip"'})
+
+
 @app.delete("/api/v1/files/{fid}", status_code=204)
 def delete_file(fid: UUID, user: CsrfUser, db: Db):
     file = db.get(FileObject, fid); assignment = db.get(Assignment, file.assignment_id) if file else None
     if not file or not assignment: raise ApiError(404, "FILE_NOT_FOUND", "文件不存在")
     require_writable_class(db, user, assignment.class_id)
     if file.owner_id != user.id: raise ApiError(403, "FILE_FORBIDDEN", "只能删除自己上传的文件")
-    if file.purpose == "ATTACHMENT" and assignment.status != "DRAFT": raise ApiError(409, "PUBLISHED_FILE_LOCKED", "已发布作业的教师附件不能删除")
     if file.purpose == "REVIEW_CRITERIA":
         if not review_config_editable(db, assignment):
             raise ApiError(409, "AUTO_REVIEW_CONFIG_LOCKED", "作业已截止或互评活动已创建，不能修改互评标准附件")
@@ -1298,6 +1372,11 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
     if not assignment or assignment.submitter_type != "INDIVIDUAL" or assignment.status not in {"PUBLISHED", "CLOSED"}: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_class(db, user, assignment.class_id)
     _, team = require_team(db, assignment.class_id, user)
+    attachments = db.scalars(
+        select(FileObject)
+        .where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT", FileObject.active.is_(True))
+        .order_by(FileObject.created_at)
+    ).all()
     rows = db.execute(
         select(Submission, SubmissionVersion, User)
         .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
@@ -1315,7 +1394,12 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
             "submitted_at": version.submitted_at, "submission_version_id": str(version.id),
             "files": [file_json(file) for file in files], "review": assessment_json(db, review) if review else None,
         })
-    return {"assignment": assignment_json(assignment), "team": {"id": str(team.id), "name": team.name}, "candidates": candidates}
+    return {
+        "assignment": assignment_json(assignment),
+        "attachments": [file_json(file) for file in attachments],
+        "team": {"id": str(team.id), "name": team.name},
+        "candidates": candidates,
+    }
 
 
 @app.post("/api/v1/assignments/{aid}/peer-reviews", status_code=201)

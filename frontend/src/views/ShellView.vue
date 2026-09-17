@@ -7,6 +7,7 @@ import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { api, apiClientId } from '../api'
 import FileReviewDrawer from '../components/FileReviewDrawer.vue'
+import AssignmentMaterials from '../components/AssignmentMaterials.vue'
 import ShellHeader from '../components/ShellHeader.vue'
 import AssignmentsPage from './shell/AssignmentsPage.vue'
 import ClassesPage from './shell/ClassesPage.vue'
@@ -42,6 +43,7 @@ const audits = ref([])
 const selectedTeam = ref(null)
 const selectedAssignment = ref(null)
 const selectedSubmission = ref(null)
+const openedSubmissionPreview = ref('')
 const fileReviewDrawer = ref(null)
 const selectedCampaign = ref(null)
 const reviewTask = ref(null)
@@ -65,7 +67,7 @@ const topicDecisionForm = reactive({ id: '', reason: '' })
 const passwordForm = reactive({ current_password: '', new_password: '' })
 const inviteTarget = ref('')
 const importState = reactive({ file: null, preview: null, result: null, step: 0, loading: false })
-const filePreview = reactive({ open: false, files: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null })
+const filePreview = reactive({ open: false, files: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false })
 const currentTime = ref(Date.now())
 let gateTimer
 let clockTimer
@@ -282,6 +284,23 @@ async function loadView({ silent = false, background = false } = {}) {
         const allowedTabs = ['details', 'submission']
         assignmentDetailTab.value = allowedTabs.includes(route.query.tab) ? route.query.tab : 'details'
         await loadAssignmentDetail(assignment, isCurrent, { preserveUi: background })
+        const previewVersion = route.query.preview_submission
+        const previewKey = `${assignment.id}:${previewVersion || ''}`
+        if (previewVersion && isCurrent() && openedSubmissionPreview.value !== previewKey) {
+          const record = assignment.board?.find(item => item.submission_version_id === previewVersion && item.status === 'SUBMITTED' && item.files?.length)
+          openedSubmissionPreview.value = previewKey
+          if (record) openSubmissionDetail(record)
+          else message.warning('该提交暂无可预览文件')
+        }
+        const gradingVersion = route.query.grade_submission
+        const gradingKey = `${assignment.id}:grading:${gradingVersion || ''}`
+        if (gradingVersion && isCurrent() && openedSubmissionPreview.value !== gradingKey) {
+          const targets = pendingTeacherReviewTargets(assignment.board)
+          const record = targets.find(item => item.submission_version_id === gradingVersion)
+          openedSubmissionPreview.value = gradingKey
+          if (record) openAssessmentDrawer(record, { mode: 'TEACHER', targets, targetIndex: targets.indexOf(record), pendingOnly: true })
+          else message.info('暂无待批改作业')
+        }
       }
     }
     if (view.value === 'reviews') {
@@ -457,8 +476,18 @@ async function createAssignment(publishRequested = false) {
     await action(async () => {
       const payload = { title: assignmentForm.title, description: assignmentForm.description, submitter_type: assignmentForm.submitter_type, starts_at: iso(assignmentForm.starts_at), due_at: iso(assignmentForm.due_at), allow_late: assignmentForm.allow_late, version: assignmentForm.version }
       if (reviewConfigEditable.value) Object.assign(payload, { auto_review_enabled: assignmentForm.auto_review_enabled, auto_review_mode: assignmentForm.auto_review_enabled ? assignmentForm.auto_review_mode : null, auto_review_criteria_text: assignmentForm.auto_review_enabled ? assignmentForm.auto_review_criteria_text : '', auto_review_due_at: assignmentForm.auto_review_enabled ? iso(assignmentForm.auto_review_due_at) : null })
-      await api(`/assignments/${assignmentForm.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); modals.assignment = false
-    }, '作业已更新')
+      const saved = await api(`/assignments/${assignmentForm.id}`, { method: 'PATCH', body: JSON.stringify(payload) })
+      assignmentForm.version = saved.version
+      while (pendingAssignmentFiles.value.length) {
+        const file = pendingAssignmentFiles.value[0]
+        const body = new FormData(); body.append('file', file)
+        const attachment = await api(`/assignments/${assignmentForm.id}/files`, { method: 'POST', body })
+        assignmentAttachments.value.push(attachment)
+        pendingAssignmentFiles.value.shift()
+      }
+      if (publishRequested) await api(`/assignments/${assignmentForm.id}/publish`, { method: 'POST' })
+      modals.assignment = false
+    }, publishRequested ? '作业已更新并重新发布' : '作业已更新')
     return
   }
   const count = assignmentForm.class_ids.length
@@ -534,6 +563,28 @@ async function uploadFile({ file, onSuccess, onError }) {
     onSuccess(saved)
   } catch (e) { onError(e); message.error(e.message) }
 }
+const deletingMaterials = ref(false)
+function deleteSelectedMaterials(files) {
+  if (!files.length || deletingMaterials.value) return
+  const assignment = selectedAssignment.value
+  Modal.confirm({
+    title: `确认删除 ${files.length} 个作业资料附件？`,
+    content: '删除后无法恢复，学生提交记录不受影响。',
+    okText: '确认删除', okType: 'danger', cancelText: '取消',
+    onOk: async () => {
+      if (deletingMaterials.value) return
+      deletingMaterials.value = true
+      try {
+        const results = await Promise.allSettled(files.map(file => api(`/files/${file.id}`, { method: 'DELETE' })))
+        await loadAssignmentDetail(assignment)
+        const failed = results.filter(result => result.status === 'rejected')
+        if (failed.length) message.error(`${files.length-failed.length} 个附件已删除，${failed.length} 个删除失败：${failed[0].reason.message}`)
+        else message.success(`已删除 ${files.length} 个附件`)
+      } catch (error) { message.error(error.message) }
+      finally { deletingMaterials.value = false }
+    }
+  })
+}
 function deleteDraft(file) {
   const submitted = Boolean(file.submitted)
   Modal.confirm({
@@ -554,6 +605,18 @@ function openSubmissionDetail(record) {
   const targetIndex = Math.max(0, targets.findIndex(item => item.submission_version_id === record.submission_version_id))
   openAssessmentDrawer(record, { mode: 'TEACHER', targets, targetIndex })
 }
+function pendingTeacherReviewTargets(board = selectedAssignment.value?.board || []) {
+  return board.filter(item => item.status === 'SUBMITTED' && item.files?.length && !item.teacher_grade)
+}
+async function continueGrading(item) {
+  if (item.submitter_type !== 'INDIVIDUAL') return message.info('小组作业暂不支持逐人批改')
+  try {
+    const board = await api(`/assignments/${item.id}/submissions`)
+    const targets = pendingTeacherReviewTargets(board.items)
+    if (!targets.length) return message.info('暂无待批改作业')
+    await router.push({ name: 'assignment-detail', params: { id: item.id }, query: { tab: 'submission', grade_submission: targets[0].submission_version_id } })
+  } catch (error) { message.error(error.message) }
+}
 function openStudentFeedback(record, peerFeedback = null) {
   const submission = { ...record, owner: peerFeedback?.evaluator_name || record.assignment_title }
   openAssessmentDrawer(submission, { mode: peerFeedback ? 'PEER' : 'TEACHER', initialFeedback: peerFeedback })
@@ -563,12 +626,13 @@ function openPeerReviewDrawer(candidate, file = candidate?.files?.[0]) {
   const submission = { ...candidate, owner: candidate.name }
   openAssessmentDrawer(submission, { mode: 'PEER', file })
 }
-function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0] } = {}) {
+function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false } = {}) {
   selectedSubmission.value = record
   filePreview.mode = mode
   filePreview.targets = targets
   filePreview.targetIndex = targetIndex
   filePreview.initialFeedback = initialFeedback
+  filePreview.pendingOnly = pendingOnly
   filePreview.files = [...(record.files || [])]
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file?.id))
   filePreview.open = true
@@ -584,7 +648,7 @@ function changeReviewTarget(targetIndex) {
 }
 function handleExternalReviewTarget(record) {
   selectedSubmission.value = record
-  const targets = selectedAssignment.value?.board?.filter(item => item.status === 'SUBMITTED' && item.files?.length) || []
+  const targets = filePreview.pendingOnly ? pendingTeacherReviewTargets() : selectedAssignment.value?.board?.filter(item => item.status === 'SUBMITTED' && item.files?.length) || []
   const targetIndex = Math.max(0, targets.findIndex(item => item.submission_version_id === record.submission_version_id))
   Object.assign(filePreview, { targets, targetIndex, files: [...(record.files || [])], index: 0, initialFeedback: null })
 }
@@ -661,6 +725,7 @@ function openFilePreview(file, files) {
   filePreview.targets = []
   filePreview.targetIndex = 0
   filePreview.initialFeedback = null
+  filePreview.pendingOnly = false
   filePreview.files = [...(files || [])]
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file.id))
   filePreview.open = true
@@ -670,6 +735,11 @@ function closeFilePreview() {
   selectedSubmission.value = null
 }
 function navigate(target) { return router.push(target) }
+function openLatestSubmission() {
+  const submission = dashboard.value?.summary?.latest_submission
+  if (!submission) return
+  return router.push({ name: 'assignment-detail', params: { id: submission.assignment_id }, query: { tab: 'submission', grade_submission: submission.submission_version_id } })
+}
 
 async function pollGate() {
   if (!session.teamGate) return
@@ -753,6 +823,7 @@ watch(() => route.query.tab, tab => {
   const allowedTabs = role.value === 'TEACHER' ? ['details', 'submission', 'reviews', 'grades'] : ['details', 'submission']
   assignmentDetailTab.value = allowedTabs.includes(tab) ? tab : 'details'
 })
+watch(() => route.path, () => { if (view.value !== 'assignment-detail') openedSubmissionPreview.value = '' })
 watch(() => session.teamGate, required => { clearInterval(gateTimer); gateTimer = required ? setInterval(pollGate, 10000) : undefined })
 watch(classId, () => connectRealtime())
 onMounted(async () => {
@@ -781,7 +852,7 @@ provide(shellContextKey, {
   changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback, openClassCreate,
   manageClass, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
   applyTeam, openTeam, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
-  openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview
+  openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading
 })
 </script>
 
@@ -816,9 +887,9 @@ provide(shellContextKey, {
                 <div class="rich-text detail-description" v-html="selectedAssignment.description"></div>
               </section>
               <section class="assignment-pane">
-                <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-upload v-if="role==='TEACHER'" :custom-request="uploadFile"><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
+                <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-upload v-if="role==='TEACHER'" :custom-request="uploadFile" :show-upload-list="false" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
                 <a-empty v-if="!assignmentAttachments.length" class="detail-empty" description="暂无作业资料"/>
-                <div v-else class="assignment-file-list"><div v-for="file in assignmentAttachments" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,assignmentAttachments)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-space><a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip><a-tooltip v-if="role==='TEACHER'&&selectedAssignment.status==='DRAFT'" title="删除附件"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></a-space></div></div>
+                <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials"/>
               </section>
               <section v-if="role==='TEACHER'" class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业操作</h2></div>
@@ -870,6 +941,7 @@ provide(shellContextKey, {
       :initial-index="filePreview.index"
       :submission-version-id="selectedSubmission?.submission_version_id||''"
       :owner="selectedSubmission?.owner||''"
+      :assignment-title="selectedAssignment?.title||selectedCampaign?.assignment_title||reviewTask?.assignment?.title||''"
       :editable="(filePreview.mode==='TEACHER'&&role==='TEACHER'&&selectedAssignment?.submitter_type==='INDIVIDUAL'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
       :mode="filePreview.mode"
       :targets="filePreview.targets"
@@ -898,9 +970,9 @@ provide(shellContextKey, {
         <a-form-item label="开始时间"><a-input v-model:value="assignmentForm.starts_at" type="datetime-local"/></a-form-item>
         <a-form-item label="截止时间" required><a-input v-model:value="assignmentForm.due_at" type="datetime-local"/></a-form-item>
         <a-form-item label="说明" required><div class="editor-shell"><div v-if="descriptionEditor" class="editor-toolbar"><a-tooltip title="二级标题"><a-button size="small" :type="descriptionEditor.isActive('heading',{level:2})?'primary':'default'" @click="descriptionEditor.chain().focus().toggleHeading({level:2}).run()">H2</a-button></a-tooltip><a-tooltip title="粗体"><a-button size="small" :type="descriptionEditor.isActive('bold')?'primary':'default'" @click="descriptionEditor.chain().focus().toggleBold().run()"><BoldOutlined/></a-button></a-tooltip><a-tooltip title="无序列表"><a-button size="small" @click="descriptionEditor.chain().focus().toggleBulletList().run()"><UnorderedListOutlined/></a-button></a-tooltip><a-tooltip title="有序列表"><a-button size="small" @click="descriptionEditor.chain().focus().toggleOrderedList().run()"><OrderedListOutlined/></a-button></a-tooltip><a-tooltip title="链接"><a-button size="small" @click="setDescriptionLink"><LinkOutlined/></a-button></a-tooltip><a-tooltip title="代码块"><a-button size="small" @click="descriptionEditor.chain().focus().toggleCodeBlock().run()"><CodeOutlined/></a-button></a-tooltip></div><EditorContent :editor="descriptionEditor"/></div></a-form-item>
-        <a-form-item v-if="!assignmentForm.id" label="作业附件"><a-upload :before-upload="queueAssignmentAttachment" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.pptx,.xlsx,.zip,.rar,.7z"><a-button><UploadOutlined/> 选择附件</a-button></a-upload><div v-for="(file,index) in pendingAssignmentFiles" :key="file.uid||`${file.name}-${index}`" class="uploaded-file"><span>{{file.name}}</span><a-button danger type="link" @click="removePendingAssignmentAttachment(index)">移除</a-button></div></a-form-item>
+        <a-form-item label="作业附件"><AssignmentMaterials v-if="assignmentForm.id&&assignmentAttachments.length" :files="assignmentAttachments" can-delete :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials"/><a-upload :before-upload="queueAssignmentAttachment" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.pptx,.xlsx,.zip,.rar,.7z"><a-button><UploadOutlined/> 选择附件</a-button></a-upload><div v-for="(file,index) in pendingAssignmentFiles" :key="file.uid||`${file.name}-${index}`" class="uploaded-file"><span>{{file.name}}</span><a-button danger type="link" @click="removePendingAssignmentAttachment(index)">移除</a-button></div></a-form-item>
         <a-checkbox v-model:checked="assignmentForm.allow_late">允许迟交并标记</a-checkbox>
-        <div class="modal-actions"><a-button @click="modals.assignment=false">取消</a-button><a-button v-if="!assignmentForm.id" @click="createAssignment(false)">保存草稿</a-button><a-button type="primary" @click="assignmentForm.id?createAssignment():createAssignment(true)">{{assignmentForm.id?'保存修改':'发布'}}</a-button></div>
+        <div class="modal-actions"><a-button @click="modals.assignment=false">取消</a-button><a-button @click="createAssignment(false)">{{assignmentForm.id?'保存修改':'保存草稿'}}</a-button><a-button type="primary" @click="createAssignment(true)">{{assignmentForm.id?'保存并再次发布':'发布'}}</a-button></div>
       </a-form>
     </a-modal>
     <a-modal v-model:open="modals.topicDecision" title="驳回选题" ok-text="确认驳回" @ok="rejectTopic"><a-form layout="vertical"><a-form-item label="驳回原因" required><a-textarea v-model:value="topicDecisionForm.reason" :rows="3" placeholder="请说明需要修改的内容"/></a-form-item></a-form></a-modal>
