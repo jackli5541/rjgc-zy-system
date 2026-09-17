@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     file_root: Path = Path("./data/files")
     session_hours: int = 24
     secure_cookies: bool = False
+    trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"
     max_file_size_bytes: int = 100 * 1024 * 1024
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

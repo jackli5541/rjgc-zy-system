@@ -42,6 +42,10 @@ const gradeAssignments = ref([])
 const selectedGradeAssignmentId = ref('')
 const notifications = ref([])
 const audits = ref([])
+const auditSearch = ref('')
+const auditPage = ref(1)
+const auditPageSize = 10
+const auditTotal = ref(0)
 const selectedTeam = ref(null)
 const selectedTeamAssignments = ref([])
 const teamDrawerLoading = ref(false)
@@ -223,6 +227,17 @@ const statusLabels = { ACTIVE: '进行中', ARCHIVED: '已归档', PENDING: '待
 const roleLabels = { LEADER: '组长', MEMBER: '组员', TEACHER: '教师', STUDENT: '学生' }
 const objectLabels = { user: '用户', class: '教学班', class_join_request: '入班申请', team: '小组', team_request: '组队申请', topic: '选题', assignment: '作业', submission: '作业提交', submission_assessment: '提交评价', review_campaign: '互评活动', peer_review: '作品评价', grade: '成绩' }
 const actionLabels = { PASSWORD_CHANGED: '修改密码', PASSWORD_RESET: '重置密码', CLASS_CREATED: '创建教学班', CLASS_UPDATED: '更新教学班', CLASS_DELETED: '删除教学班', CLASS_JOIN_REQUESTED: '申请加入教学班', CLASS_JOINED_BY_INVITE: '通过邀请码入班', CLASS_JOIN_APPROVED: '同意入班申请', CLASS_JOIN_REJECTED: '拒绝入班申请', ROSTER_IMPORTED: '导入学生名单', CLASS_MEMBER_ADDED: '添加班级成员', CLASS_MEMBER_UPDATED: '更新成员信息', CLASS_MEMBER_REMOVED: '移出班级成员', TEAM_CREATED: '创建小组', TEAMS_AUTO_GROUPED: '自动分组', TEAM_REQUEST_DECIDED: '处理组队申请', TEAM_REQUEST_CANCELLED: '取消组队申请', TEAM_INVITATION_RESPONDED: '回应小组邀请', TEAM_LEADER_TRANSFERRED: '移交组长', TEAM_LEFT: '退出小组', TEAM_DISBANDED: '解散小组', TEAM_MEMBER_REMOVED: '移出小组成员', TOPIC_SUBMITTED: '提交选题', TOPIC_DECIDED: '审核选题', ASSIGNMENT_CREATED: '创建作业', ASSIGNMENT_UPDATED: '更新作业', ASSIGNMENT_PUBLISHED: '发布作业', ASSIGNMENT_RETRACTED: '撤回作业', ASSIGNMENT_CLOSED: '提前截止作业', ASSIGNMENT_DELETED: '删除作业', SUBMISSION_CREATED: '提交作业', SUBMISSION_RETRACTED: '撤回作业', SUBMISSIONS_EXPORTED: '导出作业', REVIEW_CAMPAIGN_CREATED: '创建互评活动', REVIEW_CAMPAIGN_AUTO_CREATED: '自动创建互评活动', REVIEW_CAMPAIGN_CLOSED: '提前截止互评', PEER_REVIEW_SUBMITTED: '提交作品评价', PEER_REVIEW_UPDATED: '更新作品评价', PEER_REVIEW_INVALIDATED: '作废作品评价', PEER_ASSESSMENT_SUBMITTED: '提交学生互评', PEER_ASSESSMENT_UPDATED: '更新学生互评', TEACHER_ASSESSMENT_SUBMITTED: '提交教师评分', TEACHER_ASSESSMENT_UPDATED: '更新教师评分', TEACHER_ASSESSMENT_CLEARED: '清除教师评分', TEACHER_FEEDBACK_DRAFT_SAVED: '保存教师反馈草稿', TEACHER_FEEDBACK_PUBLISHED: '发布教师反馈', PEER_GRADES_GENERATED: '生成互评成绩', GRADE_COEFFICIENT_UPDATED: '更新小组系数', GRADES_PUBLISHED: '发布成绩' }
+function auditSearchParams() {
+  const params = new URLSearchParams()
+  const query = auditSearch.value.trim()
+  if (!query) return params
+  params.set('q', query)
+  Object.entries(actionLabels).filter(([, label]) => label.includes(query)).forEach(([value]) => params.append('actions', value))
+  Object.entries(objectLabels).filter(([, label]) => label.includes(query)).forEach(([value]) => params.append('object_types', value))
+  return params
+}
+async function searchAudits() { auditPage.value = 1; await loadView() }
+async function changeAuditPage(page) { auditPage.value = page; await loadView({ silent: true }) }
 function statusLabel(value) { return statusLabels[value] || value || '-' }
 function roleLabel(value) { return roleLabels[value] || value || '-' }
 function objectLabel(value) { return objectLabels[value] || (value ? '其他业务对象' : '-') }
@@ -340,9 +355,13 @@ async function loadView({ silent = false, background = false } = {}) {
       return
     }
     if (view.value === 'system' && role.value === 'TEACHER') {
-      const auditData = await api('/audit-logs')
+      const params = auditSearchParams()
+      params.set('page', auditPage.value)
+      params.set('page_size', auditPageSize)
+      const auditData = await api(`/audit-logs?${params}`)
       if (!isCurrent()) return
       audits.value = auditData.items
+      auditTotal.value = auditData.total
     }
   } catch (e) { if (!background) message.error(e.message) }
   finally {
@@ -930,13 +949,13 @@ onBeforeUnmount(() => {
 })
 
 provide(shellContextKey, {
-  session, role, classId, menu, navView, notifications, noticesOpen, modals, audits, loading, dashboard, memberQuery, filteredMembers,
+  session, role, classId, menu, navView, notifications, noticesOpen, modals, audits, auditSearch, auditPage, auditPageSize, auditTotal, loading, dashboard, memberQuery, filteredMembers,
   teams, requests, ungroupedMembers, selectedTeam, selectedTeamAssignments, teamDrawerLoading, exportingTeamIds,
   activeClasses, assignments,
   grades, gradeAssignments, selectedGradeAssignmentId, campaigns, selectedCampaign, reviewTask, reviewForm, selectedReviewCandidate,
   latestOverviewAssignment, assignmentHistory, assignmentChartLine, assignmentChartPoints, currentTeam, needsTopicSubmission,
   studentPendingAssignments, studentUpcomingAssignments, studentPendingReviews, studentLatestGrade,
-  changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, gradeSourceLabel, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
+  changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, gradeSourceLabel, searchAudits, changeAuditPage, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
   manageClass, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
   applyTeam, openTeam, closeTeamDrawer, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
   openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading

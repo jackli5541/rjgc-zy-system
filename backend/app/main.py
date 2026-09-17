@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from ipaddress import ip_address, ip_network
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -44,6 +45,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="软件工程作业系统 API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 request_client_id: ContextVar[str | None] = ContextVar("request_client_id", default=None)
+request_ip_address: ContextVar[str | None] = ContextVar("request_ip_address", default=None)
+request_trace_id: ContextVar[str | None] = ContextVar("request_trace_id", default=None)
 
 SAFE_HTML_TAGS = ["div", "span", "section", "article", "header", "footer", "main", "p", "br", "h1", "h2", "h3", "h4", "strong", "b", "em", "s", "small", "u", "ul", "ol", "li", "blockquote", "pre", "code", "a", "table", "thead", "tbody", "tr", "th", "td", "img", "hr", "input"]
 SAFE_HTML_ATTRIBUTES = {
@@ -126,16 +129,33 @@ class ApiError(Exception):
         self.status, self.code, self.message, self.details = status, code, message, details or {}
 
 
+def client_ip(request: Request) -> str | None:
+    peer = request.client.host if request.client else None
+    try:
+        trusted = any(ip_address(peer) in ip_network(value.strip()) for value in settings.trusted_proxy_cidrs.split(",") if value.strip())
+    except ValueError:
+        trusted = False
+    forwarded = request.headers.get("X-Real-IP") if trusted else None
+    try:
+        return str(ip_address(forwarded)) if forwarded else peer
+    except ValueError:
+        return peer
+
+
 @app.middleware("http")
 async def request_id(request: Request, call_next):
     request.state.request_id = request.headers.get("X-Request-ID") or uuid4().hex
-    token = request_client_id.set(request.headers.get("X-Client-ID"))
+    client_token = request_client_id.set(request.headers.get("X-Client-ID"))
+    ip_token = request_ip_address.set(client_ip(request))
+    trace_token = request_trace_id.set(request.state.request_id)
     try:
         response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
         return response
     finally:
-        request_client_id.reset(token)
+        request_trace_id.reset(trace_token)
+        request_ip_address.reset(ip_token)
+        request_client_id.reset(client_token)
 
 
 @app.exception_handler(ApiError)
@@ -196,7 +216,7 @@ def realtime_class_id(db: Session, kind: str, oid: str, changes: dict) -> UUID |
 
 
 def audit(db: Session, user: User | None, action: str, kind: str, oid: str, changes: dict | None = None):
-    db.add(AuditLog(actor_id=user.id if user else None, action=action, object_type=kind, object_id=oid, changes=changes or {}))
+    db.add(AuditLog(actor_id=user.id if user else None, action=action, object_type=kind, object_id=oid, changes=changes or {}, request_id=request_trace_id.get(), ip_address=request_ip_address.get()))
     class_id = realtime_class_id(db, kind, oid, changes or {})
     if class_id:
         publish_event(db, class_id=class_id, scopes=realtime_scopes(action), resource_type=kind, resource_id=oid, source_client_id=request_client_id.get())
@@ -2061,8 +2081,18 @@ def read_notifications(user: CsrfUser, db: Db):
 
 
 @app.get("/api/v1/audit-logs")
-def audit_logs(user: CurrentUser, db: Db, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100)):
-    teacher(user); total = db.scalar(select(func.count()).select_from(AuditLog)) or 0; rows = db.execute(select(AuditLog, User).outerjoin(User).order_by(AuditLog.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).all(); return {"items": [{"id": str(x.id), "actor": p.display_name if p else "系统", "action": x.action, "object_type": x.object_type, "object_id": x.object_id, "changes": x.changes, "created_at": x.created_at} for x, p in rows], "page": page, "page_size": page_size, "total": total}
+def audit_logs(user: CurrentUser, db: Db, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: str | None = Query(None, max_length=100), actions: list[str] = Query(default=[]), object_types: list[str] = Query(default=[])):
+    teacher(user)
+    query = select(AuditLog, User).outerjoin(User)
+    term = (q or "").strip()
+    if term:
+        text_filter = or_(User.display_name.icontains(term, autoescape=True), AuditLog.ip_address.icontains(term, autoescape=True), AuditLog.action.icontains(term, autoescape=True), AuditLog.object_type.icontains(term, autoescape=True), AuditLog.object_id.icontains(term, autoescape=True))
+        if actions: text_filter = or_(text_filter, AuditLog.action.in_(actions))
+        if object_types: text_filter = or_(text_filter, AuditLog.object_type.in_(object_types))
+        query = query.where(text_filter)
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = db.execute(query.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [{"id": str(x.id), "actor": p.display_name if p else "系统", "ip_address": x.ip_address, "action": x.action, "object_type": x.object_type, "object_id": x.object_id, "changes": x.changes, "created_at": x.created_at} for x, p in rows], "page": page, "page_size": page_size, "total": total}
 
 
 def export_rows(kind: str, class_id: UUID, user: User, db: Session, assignment_id: UUID | None = None) -> list[list]:

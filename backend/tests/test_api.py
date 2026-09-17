@@ -22,6 +22,27 @@ def login(account: str, password: str, role: str):
     return client, {"X-CSRF-Token": response.json()["csrf_token"]}
 
 
+def test_audit_log_search_and_operator_ip():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    created = teacher.post(
+        "/api/v1/classes",
+        headers=teacher_headers,
+        json={"semester": "审计测试", "name": "审计查询班", "max_team_members": 5},
+    )
+    assert created.status_code == 201, created.text
+
+    result = teacher.get(
+        "/api/v1/audit-logs",
+        params={"q": "testclient", "actions": "CLASS_CREATED", "page": 1, "page_size": 10},
+    )
+    assert result.status_code == 200, result.text
+    payload = result.json()
+    assert payload["total"] >= 1
+    assert any(item["action"] == "CLASS_CREATED" and item["ip_address"] == "testclient" for item in payload["items"])
+    deleted = teacher.delete(f"/api/v1/classes/{created.json()['id']}", headers=teacher_headers)
+    assert deleted.status_code == 204, deleted.text
+
+
 def test_formal_course_workflow():
     teacher, teacher_headers = login("teacher", "123456", "teacher")
     assert teacher.get("/api/v1/classes").json()["total"] == 0
