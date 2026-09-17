@@ -74,7 +74,7 @@ const classForm = reactive({ id: '', version: 1, semester: '', name: '', team_de
 const memberForm = reactive({ id: '', student_no: '', name: '' })
 const teamForm = reactive({ name: '', open_recruitment: true })
 const assignmentForm = reactive({ id: '', version: 1, has_submissions: false, class_ids: [], title: '', description: '', submitter_type: 'INDIVIDUAL', starts_at: '', due_at: '', allow_late: false, publish: true, auto_review_enabled: false, auto_review_mode: 'TEAM', auto_review_criteria_text: '', auto_review_due_at: '' })
-const reviewForm = reactive({ grade: 'A', comment: '', reviewee_id: '' })
+const reviewForm = reactive({ grade: undefined, comment: '', reviewee_id: '' })
 const topicForm = reactive({ name: '', description: '' })
 const topicDecisionForm = reactive({ id: '', reason: '' })
 const passwordForm = reactive({ current_password: '', new_password: '' })
@@ -765,17 +765,18 @@ async function loadCampaignDetail(item, isStillCurrent = () => true, preferredUs
   selectedCampaign.value = item
   reviewTask.value = task
   const first = task.candidates.find(candidate => candidate.user_id === preferredUserId) || task.candidates[0]
-  Object.assign(reviewForm, { reviewee_id: first?.user_id || '', grade: first?.review?.grade || 'A', comment: first?.review?.comment || '' })
+  Object.assign(reviewForm, { reviewee_id: first?.user_id || '', grade: first?.review?.grade, comment: first?.review?.comment || '' })
 }
 async function openCampaign(item) {
   await router.push(`/reviews/${item.assignment_id}`)
 }
 function selectReviewCandidate(userId) {
   const candidate = reviewTask.value?.candidates?.find(item => item.user_id === userId)
-  Object.assign(reviewForm, { reviewee_id: userId, grade: candidate?.review?.grade || 'A', comment: candidate?.review?.comment || '' })
+  Object.assign(reviewForm, { reviewee_id: userId, grade: candidate?.review?.grade, comment: candidate?.review?.comment || '' })
 }
 async function submitReview() {
   if (!reviewForm.reviewee_id) return message.warning('请选择要评价的组员')
+  if (!reviewForm.grade) return message.warning('请先选择作业等级')
   const updating = Boolean(selectedReviewCandidate.value?.review)
   await action(async () => { await api(`/assignments/${selectedCampaign.value.assignment_id}/peer-reviews`, { method: 'POST', body: JSON.stringify(reviewForm) }); await loadCampaignDetail(selectedCampaign.value) }, updating ? '评价已更新' : '评价已提交')
 }

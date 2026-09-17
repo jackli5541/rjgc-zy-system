@@ -1544,7 +1544,7 @@ def assessment_annotations(db: Session, assessment_id: UUID) -> list[dict]:
 
 def feedback_json(db: Session, item: SubmissionAssessment | None, include_draft: bool = False) -> dict:
     if not item:
-        return {"status": None, "revision": 0, "grade": "A", "comment": "", "annotations": [], "published_at": None, "has_draft": False}
+        return {"status": None, "revision": 0, "grade": None, "comment": "", "annotations": [], "published_at": None, "has_draft": False}
     published = {"grade": item.grade, "comment": item.comment, "annotations": assessment_annotations(db, item.id)}
     draft = item.draft_payload if include_draft and item.draft_payload else None
     payload = draft or published

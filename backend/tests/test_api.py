@@ -680,7 +680,8 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
     assert reviewer.get(f"/api/v1/files/{detail['attachments'][0]['id']}").status_code == 200
     assert [item["student_no"] for item in detail["candidates"]] == ["20349990"]
     version_id = detail["candidates"][0]["submission_version_id"]
-    assert reviewer.get(f"/api/v1/submission-versions/{version_id}/peer-feedback").json()["status"] is None
+    empty_feedback = reviewer.get(f"/api/v1/submission-versions/{version_id}/peer-feedback").json()
+    assert empty_feedback["status"] is None and empty_feedback["grade"] is None
     annotation = {"file_id": file["id"], "kind": "PDF_TEXT_OR_REGION", "mark_type": "HIGHLIGHT", "color": "YELLOW", "anchor": {"page": 1, "rects": [{"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1}], "quote": ""}, "comment": "<p>这里需要补充</p>"}
     reviewed = reviewer.post(f"/api/v1/submission-versions/{version_id}/peer-feedback/publish", headers=reviewer_headers, json={"revision": 0, "grade": "A", "comment": "<p>完成度高</p>", "annotations": [annotation]})
     assert reviewed.status_code == 200 and reviewed.json()["grade"] == "A" and len(reviewed.json()["annotations"]) == 1
