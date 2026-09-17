@@ -16,6 +16,7 @@ from fastapi import Cookie, Depends, FastAPI, File, Header, Query, Request, Resp
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from starlette.middleware.gzip import GZipMiddleware
 import bleach
 import markdown
 import zipfile
@@ -44,6 +45,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="软件工程作业系统 API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 request_client_id: ContextVar[str | None] = ContextVar("request_client_id", default=None)
 request_ip_address: ContextVar[str | None] = ContextVar("request_ip_address", default=None)
 request_trace_id: ContextVar[str | None] = ContextVar("request_trace_id", default=None)
@@ -2500,3 +2502,28 @@ def campaign_stats(cid: UUID, user: CurrentUser, db: Db):
         grouped.setdefault(member.team_id, []).append(member.user_id)
     eligible_reviewers = sum(len(member_ids) for member_ids in grouped.values() if len(member_ids) > 1)
     return {"review_count": len(reviews), "reviewer_count": reviewers, "uncompleted_reviewer_count": max(eligible_reviewers - reviewers, 0), "average_score": round(sum(x.total_score for x in reviews) / len(reviews), 2) if reviews else None, "received_count": received_count}
+
+
+@app.api_route("/{full_path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], include_in_schema=False)
+def serve_frontend(request: Request, full_path: str):
+    if request.method not in {"GET", "HEAD"}:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    dist = settings.frontend_dist.resolve()
+    index = dist / "index.html"
+    if not index.is_file():
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    requested = (dist / full_path).resolve()
+    if requested.is_relative_to(dist) and requested.is_file():
+        if requested == index:
+            cache_control = "no-cache"
+        elif full_path.startswith("assets/"):
+            cache_control = "public, max-age=31536000, immutable"
+        else:
+            cache_control = "public, max-age=3600"
+        return FileResponse(requested, headers={"Cache-Control": cache_control})
+
+    first_segment = full_path.split("/", 1)[0]
+    if first_segment in {"api", "health", "assets"} or Path(full_path).suffix:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    return FileResponse(index, headers={"Cache-Control": "no-cache"})

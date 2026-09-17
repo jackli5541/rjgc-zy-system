@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, CompressOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { api, apiClientId } from '../api'
@@ -69,6 +69,14 @@ const boardTeamFilter = ref('ALL')
 const assignmentDetailTab = ref('details')
 const DRAWER_EXPANDED_STORAGE_KEY = 'assignment-drawers-expanded'
 const assignmentDrawerExpanded = ref(localStorage.getItem(DRAWER_EXPANDED_STORAGE_KEY) === 'true')
+const assignmentDrawerAnimating = ref(false)
+let assignmentDrawerAnimationTimer
+const toggleAssignmentDrawerExpanded = () => {
+  clearTimeout(assignmentDrawerAnimationTimer)
+  assignmentDrawerAnimating.value = true
+  assignmentDrawerExpanded.value = !assignmentDrawerExpanded.value
+  assignmentDrawerAnimationTimer = setTimeout(() => { assignmentDrawerAnimating.value = false }, 220)
+}
 const noticesOpen = ref(false)
 const modals = reactive({ class: false, import: false, member: false, team: false, assignment: false, password: false, topicDecision: false })
 const classForm = reactive({ id: '', version: 1, semester: '', name: '', team_deadline: '', topic_public: false })
@@ -963,7 +971,7 @@ onMounted(async () => {
   connectRealtime(); startSafetyRefresh()
 })
 onBeforeUnmount(() => {
-  clearInterval(gateTimer); clearInterval(clockTimer); clearInterval(safetyTimer); clearTimeout(realtimeTimer)
+  clearInterval(gateTimer); clearInterval(clockTimer); clearInterval(safetyTimer); clearTimeout(realtimeTimer); clearTimeout(assignmentDrawerAnimationTimer)
   realtimeSource?.close()
   window.removeEventListener('focus', pollGate)
   document.removeEventListener('visibilitychange', handleVisibilitySync)
@@ -1006,7 +1014,7 @@ provide(shellContextKey, {
         </template>
         <Transition :name="role==='TEACHER'?'drawer-slide':'detail-fade'" appear>
         <div :class="{'assignment-detail-drawer':role==='TEACHER','expanded':role==='TEACHER'&&assignmentDrawerExpanded}">
-         <a-tooltip v-if="role==='TEACHER'" :title="assignmentDrawerExpanded?'收回':'展开至全屏'" placement="right"><button type="button" class="assignment-drawer-expand-button" :aria-label="assignmentDrawerExpanded?'收回作业详情':'将作业详情展开至全屏'" @click="assignmentDrawerExpanded=!assignmentDrawerExpanded"><CompressOutlined v-if="assignmentDrawerExpanded"/><ExpandOutlined v-else/></button></a-tooltip>
+         <a-tooltip v-if="role==='TEACHER'" :open="assignmentDrawerAnimating?false:undefined" :title="assignmentDrawerExpanded?'收回':'展开至全屏'" placement="right"><button type="button" class="assignment-drawer-expand-button" :aria-label="assignmentDrawerExpanded?'收回作业详情':'将作业详情展开至全屏'" @click="toggleAssignmentDrawerExpanded"><RightOutlined v-if="assignmentDrawerExpanded"/><ExpandOutlined v-else/></button></a-tooltip>
          <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag color="blue">{{selectedAssignment.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="closeAssignmentDrawer"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
          <section class="assignment-workspace">
            <a-tabs :active-key="assignmentDetailTab" :animated="{inkBar:true,tabPane:true}" class="assignment-detail-tabs" @change="changeAssignmentDetailTab">

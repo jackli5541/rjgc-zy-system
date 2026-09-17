@@ -3,6 +3,9 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://coursework:coursework@localhost:5433/coursework"
     cors_origins: str = "http://localhost:8080,http://localhost:5173"
@@ -11,6 +14,7 @@ class Settings(BaseSettings):
     secure_cookies: bool = False
     trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"
     max_file_size_bytes: int = 100 * 1024 * 1024
+    frontend_dist: Path = PROJECT_ROOT / "frontend" / "dist"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

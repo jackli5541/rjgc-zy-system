@@ -21,7 +21,7 @@
 | 后端 | FastAPI、SQLAlchemy、Alembic、Pydantic |
 | 数据库 | PostgreSQL 17 |
 | 测试 | Pytest、Playwright |
-| 部署 | Docker Compose、Nginx；生产环境支持 systemd 直接部署 |
+| 部署 | Docker Compose；生产环境使用 FastAPI、Uvicorn 与 systemd 直接部署 |
 
 ## 快速启动
 
@@ -103,10 +103,11 @@ docker compose --profile test run --rm e2e
 |-- backend/                 # FastAPI 应用、数据库迁移和后端测试
 |-- frontend/                # Vue 3 前端与 Playwright 测试
 |-- docs/                    # 架构、实现覆盖和部署文档
-|-- nginx/                   # 生产环境 Nginx 配置示例
-|-- scripts/                 # Windows 本地初始化、启动和停止脚本
+|-- scripts/                 # Windows 本地与服务器启动脚本
 |-- docker-compose.yml       # 开发数据库、全容器运行和测试编排
 `-- PRD-软件工程作业系统.md   # 产品需求文档
 ```
 
-生产服务器的 Node.js、Python、PostgreSQL、Nginx 与 systemd 直接部署流程见 [服务器直接部署说明](docs/服务器直接部署说明.md)，系统架构见 [系统架构设计](docs/系统架构设计.md)。
+生产服务器的 Python、PostgreSQL 与 systemd 直接部署流程见 [服务器直接部署说明](docs/服务器直接部署说明.md)，系统架构见 [系统架构设计](docs/系统架构设计.md)。
+
+Windows 服务器可在构建前端后运行 `scripts\start-server.bat`。脚本默认托管 `frontend\dist`，也可将独立部署的 dist 目录作为第一个参数，例如 `scripts\start-server.bat D:\coursework\dist`。
