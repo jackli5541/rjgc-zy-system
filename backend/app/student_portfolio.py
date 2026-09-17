@@ -121,12 +121,14 @@ def export_portfolios(db, course, user, uid=None):
     from app.main import ApiError, audit
     ids = [uid] if uid else db.scalars(select(ClassMember.user_id).where(ClassMember.class_id == course.id, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT").order_by(ClassMember.user_id)).all()
     archive = TemporaryFile()
+    exported_member = None
     try:
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
             for student_id in ids:
                 data = portfolio(db, course.id, student_id)
                 member = data["member"]
-                root = f"{safe_name(member['student_no'])}_{safe_name(member['name'])}_{student_id}/" if uid is None else ""
+                exported_member = member if uid is not None else exported_member
+                root = f"{safe_name(member['student_no'])}_{safe_name(member['name'])}/" if uid is None else ""
                 write_student_archive(bundle, db, data, root)
         archive.seek(0)
         audit(db, user, "STUDENT_PORTFOLIOS_EXPORTED", "class", str(course.id), {"student_id": str(uid) if uid else None, "student_count": len(ids)})
@@ -142,5 +144,5 @@ def export_portfolios(db, course, user, uid=None):
         finally:
             archive.close()
 
-    filename = safe_name(course.name) + ("-学生档案" if uid else "-班级档案") + ".zip"
+    filename = f"{safe_name(exported_member['student_no'])}_{safe_name(exported_member['name'])}.zip" if exported_member else f"{safe_name(course.name)}-班级档案.zip"
     return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=portfolio.zip; filename*=UTF-8''{quote(filename)}"})

@@ -162,6 +162,26 @@ html{scrollbar-gutter:stable}
 .student-portfolio-drawer .ant-drawer-title{font-size:14px;color:#687b87;font-weight:500}
 .student-portfolio-drawer .ant-drawer-content-wrapper{border-left:1px solid #dce4e8;box-shadow:-8px 0 28px rgba(35,54,66,.1)}
 .student-portfolio-drawer .ant-skeleton,.student-portfolio-drawer .ant-alert{margin:20px}
+
+/* Keep team details visually aligned with the student portfolio drawer. */
+.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-mask{background:transparent}
+.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-content-wrapper{width:min(720px,100vw)!important;border-left:1px solid #dce4e8;box-shadow:-8px 0 28px rgba(35,54,66,.1)}
+.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-header{padding:14px 24px;border-bottom:1px solid #e8edf0}
+.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-title{font-size:14px;color:#687b87;font-weight:500}
+.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-body{padding:0;background:#fff;overscroll-behavior:contain;scrollbar-gutter:stable}
+.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-body>p{margin:0;padding:16px 24px 12px;color:#72808a;font-size:12px;border-bottom:1px solid #e8edf0}
+.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-body>.ant-list{padding:4px 24px 12px;border-bottom:1px solid #e8edf0}
+.ant-drawer-root:has(.team-drawer-topic) .ant-list-item{min-height:48px;padding:10px 0}
+.ant-drawer-root:has(.team-drawer-topic) .ant-divider{margin:0;border-color:#e8edf0}
+.ant-drawer-root:has(.team-drawer-topic) .team-drawer-topic{padding:18px 24px;border-bottom:1px solid #e8edf0}
+.ant-drawer-root:has(.team-drawer-topic) .team-drawer-section-title{margin:0;padding:18px 24px 10px}
+.ant-drawer-root:has(.team-drawer-topic) .team-assignment-history{padding:0 24px 18px}
+.ant-drawer-root:has(.team-drawer-topic) .team-assignment-item{padding:13px 0}
+.ant-drawer-root:has(.team-drawer-topic) .ant-skeleton,.ant-drawer-root:has(.team-drawer-topic) .ant-empty{margin:12px 24px 20px}
+.ant-drawer-root:has(.team-drawer-topic) .ant-space-compact{width:calc(100% - 48px)!important;margin:18px 24px 0}
+.ant-drawer-root:has(.team-drawer-topic) .ant-form{padding:18px 24px 24px}
+.ant-drawer-root:has(.team-drawer-topic) .ant-form-item:last-of-type{margin-bottom:14px}
+@media(max-width:760px){.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-header{padding:13px 16px}.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-body>p,.ant-drawer-root:has(.team-drawer-topic) .team-drawer-topic,.ant-drawer-root:has(.team-drawer-topic) .ant-form{padding-inline:16px}.ant-drawer-root:has(.team-drawer-topic) .ant-drawer-body>.ant-list,.ant-drawer-root:has(.team-drawer-topic) .team-assignment-history{padding-inline:16px}.ant-drawer-root:has(.team-drawer-topic) .team-drawer-section-title{padding-inline:16px}.ant-drawer-root:has(.team-drawer-topic) .ant-space-compact{width:calc(100% - 32px)!important;margin-inline:16px}}
 .page-surface{min-height:calc(100vh - 240px)}
 .page-skeleton{min-height:420px;padding:18px 0}
 .page-progress{position:absolute;z-index:12;top:0;right:var(--page-gutter);left:var(--page-gutter);height:2px;overflow:hidden;background:rgba(23,105,170,.08);pointer-events:none}

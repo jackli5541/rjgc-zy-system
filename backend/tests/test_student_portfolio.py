@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from urllib.parse import unquote
 from uuid import UUID
 from zipfile import ZipFile
 
@@ -51,6 +52,7 @@ def test_student_portfolio_and_archives():
     assert teacher.get(f"/api/v1/classes/{another['id']}/members/{member['id']}/portfolio").status_code == 404
     response = teacher.get(base + ".zip")
     assert response.status_code == 200, response.text
+    assert "20390001_=SUM(1,2).zip" in unquote(response.headers["content-disposition"])
     with ZipFile(BytesIO(response.content)) as archive:
         assert len(archive.namelist()) == 3
         assert len(set(archive.namelist())) == 3
@@ -71,7 +73,8 @@ def test_student_portfolio_and_archives():
     response = teacher.get(f"/api/v1/classes/{cid}/portfolio.zip")
     assert response.status_code == 200, response.text
     with ZipFile(BytesIO(response.content)) as archive:
-        assert all(name.startswith("20390001_") for name in archive.namelist())
+        assert all(name.startswith("20390001_=SUM(1,2)/") for name in archive.namelist())
+        assert not any(str(member["id"]) in name for name in archive.namelist())
         assert sum(name.endswith("/report.pdf") or "/report (" in name for name in archive.namelist()) == 2
         assert any(name.endswith("/学生档案.xlsx") for name in archive.namelist())
     for file in files:
