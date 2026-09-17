@@ -9,6 +9,7 @@ import { api, apiClientId } from '../api'
 import FileReviewDrawer from '../components/FileReviewDrawer.vue'
 import AssignmentMaterials from '../components/AssignmentMaterials.vue'
 import ShellHeader from '../components/ShellHeader.vue'
+import StudentPortfolioDrawer from '../components/StudentPortfolioDrawer.vue'
 import AssignmentsPage from './shell/AssignmentsPage.vue'
 import ClassesPage from './shell/ClassesPage.vue'
 import GradesPage from './shell/GradesPage.vue'
@@ -72,7 +73,7 @@ const topicDecisionForm = reactive({ id: '', reason: '' })
 const passwordForm = reactive({ current_password: '', new_password: '' })
 const inviteTarget = ref('')
 const importState = reactive({ file: null, preview: null, result: null, step: 0, loading: false })
-const filePreview = reactive({ open: false, files: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false })
+const filePreview = reactive({ open: false, files: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false, readonly: false, assignmentTitle: '' })
 const currentTime = ref(Date.now())
 let gateTimer
 let clockTimer
@@ -413,8 +414,7 @@ function closeImport() { modals.import = false; Object.assign(importState, { fil
 function openMemberCreate() { Object.assign(memberForm, { id: '', student_no: '', name: '' }); modals.member = true }
 function openMemberEdit(item) { Object.assign(memberForm, { id: item.id, student_no: item.student_no, name: item.name }); modals.member = true }
 async function openMemberDetail(item) {
-  try { memberDetail.value = await api(`/classes/${classId.value}/members/${item.id}`) }
-  catch (e) { message.error(e.message) }
+  memberDetail.value = item
 }
 async function saveMember() {
   if (!memberForm.student_no.trim() || !memberForm.name.trim()) return message.warning('请填写学号和姓名')
@@ -426,7 +426,7 @@ async function saveMember() {
   } catch (e) { message.error(e.message) } finally { memberSaving.value = false }
 }
 function resetMemberPassword(item) { Modal.confirm({ title: `重置 ${item.name} 的密码？`, content: '密码将重置为当前学号。', okText: '确认重置', onOk: () => action(() => api(`/classes/${classId.value}/members/${item.id}/reset-password`, { method: 'POST' }), '密码已重置') }) }
-function removeClassMember(item) { Modal.confirm({ title: `将 ${item.name} 移出教学班？`, content: item.team ? `该成员也会退出小组「${item.team}」。` : '历史提交和成绩将继续保留。', okText: '确认移出', okType: 'danger', onOk: () => action(() => api(`/classes/${classId.value}/members/${item.id}`, { method: 'DELETE' }), '成员已移出') }) }
+function removeClassMember(item) { Modal.confirm({ title: `将 ${item.name} 移出教学班？`, content: item.team ? `该成员也会退出小组「${item.team}」。` : '历史提交和成绩将继续保留。', okText: '确认移出', okType: 'danger', onOk: () => action(async () => { await api(`/classes/${classId.value}/members/${item.id}`, { method: 'DELETE' }); memberDetail.value = null }, '成员已移出') }) }
 async function createTeam() {
   await action(async () => { await api('/teams', { method: 'POST', body: JSON.stringify({ class_id: classId.value, ...teamForm }) }); modals.team = false; await session.refreshContext(); await router.replace('/overview') }, '小组已创建')
 }
@@ -675,6 +675,8 @@ function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, ini
   filePreview.targetIndex = targetIndex
   filePreview.initialFeedback = initialFeedback
   filePreview.pendingOnly = pendingOnly
+  filePreview.readonly = false
+  filePreview.assignmentTitle = ''
   filePreview.files = [...(record.files || [])]
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file?.id))
   filePreview.open = true
@@ -796,9 +798,24 @@ function openFilePreview(file, files) {
   filePreview.targetIndex = 0
   filePreview.initialFeedback = null
   filePreview.pendingOnly = false
+  filePreview.readonly = true
+  filePreview.assignmentTitle = ''
   filePreview.files = [...(files || [])]
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file.id))
   filePreview.open = true
+}
+function openPortfolioFilePreview(file, files, assignment) {
+  const submission = {
+    owner: memberDetail.value?.name || '',
+    user_id: memberDetail.value?.id || '',
+    submission_version_id: assignment.submission_version_id,
+    files: [...files],
+    teacher_grade: assignment.teacher_grade,
+    peer_grade: assignment.peer_grade,
+    peer_feedbacks: assignment.received_reviews || []
+  }
+  selectedSubmission.value = submission
+  Object.assign(filePreview, { mode: 'TEACHER', targets: [], targetIndex: 0, initialFeedback: assignment.teacher_grade, pendingOnly: false, readonly: true, assignmentTitle: assignment.title, files: [...files], index: Math.max(0, files.findIndex(item => item.id === file.id)), open: true })
 }
 function closeFilePreview() {
   filePreview.open = false
@@ -893,9 +910,9 @@ watch(() => route.query.tab, tab => {
   const allowedTabs = role.value === 'TEACHER' ? ['details', 'submission', 'reviews', 'grades'] : ['details', 'submission']
   assignmentDetailTab.value = allowedTabs.includes(tab) ? tab : 'details'
 })
-watch(() => route.path, () => { if (view.value !== 'assignment-detail') openedSubmissionPreview.value = '' })
+watch(() => route.path, () => { memberDetail.value = null; if (view.value !== 'assignment-detail') openedSubmissionPreview.value = '' })
 watch(() => session.teamGate, required => { clearInterval(gateTimer); gateTimer = required ? setInterval(pollGate, 10000) : undefined })
-watch(classId, () => connectRealtime())
+watch(classId, () => { memberDetail.value = null; connectRealtime() })
 onMounted(async () => {
   await Promise.all([loadView(), loadNotifications()])
   if (session.teamGate) gateTimer = setInterval(pollGate, 10000)
@@ -1011,8 +1028,8 @@ provide(shellContextKey, {
       :initial-index="filePreview.index"
       :submission-version-id="selectedSubmission?.submission_version_id||''"
       :owner="selectedSubmission?.owner||''"
-      :assignment-title="selectedAssignment?.title||selectedCampaign?.assignment_title||reviewTask?.assignment?.title||''"
-      :editable="(filePreview.mode==='TEACHER'&&role==='TEACHER'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
+      :assignment-title="filePreview.assignmentTitle||selectedAssignment?.title||selectedCampaign?.assignment_title||reviewTask?.assignment?.title||''"
+      :editable="!filePreview.readonly&&(filePreview.mode==='TEACHER'&&role==='TEACHER'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
       :mode="filePreview.mode"
       :targets="filePreview.targets"
       :target-index="filePreview.targetIndex"
@@ -1032,7 +1049,7 @@ provide(shellContextKey, {
     <a-modal v-model:open="modals.class" :title="classForm.id?'编辑教学班':'创建教学班'" ok-text="保存" @ok="saveClass"><a-form layout="vertical"><a-form-item label="课程"><a-input value="软件工程" disabled/></a-form-item><a-form-item label="学期" required><a-input v-model:value="classForm.semester" placeholder="例如：2026 秋季"/></a-form-item><a-form-item label="班级名称" required><a-input v-model:value="classForm.name"/></a-form-item><a-form-item label="组队截止时间"><a-input v-model:value="classForm.team_deadline" type="datetime-local"/></a-form-item><a-form-item label="选题可见性"><a-switch v-model:checked="classForm.topic_public" checked-children="公开" un-checked-children="仅本组"/></a-form-item></a-form></a-modal>
     <a-modal v-model:open="modals.import" title="导入学生名单" :footer="null" @cancel="closeImport"><a-steps :current="importState.step" size="small" :items="[{title:'上传名单'},{title:'预览校验'},{title:'确认导入'}]"/><a-upload-dragger v-if="!importState.result" :before-upload="chooseRoster" :show-upload-list="true" :max-count="1" accept=".csv,.xlsx"><p class="ant-upload-drag-icon"><UploadOutlined/></p><p>选择 XLSX 或 CSV 名单</p><p class="ant-upload-hint">必填列：学号、姓名</p></a-upload-dragger><a-table v-if="importState.preview" :data-source="importState.preview.rows" size="small" row-key="row" :pagination="{pageSize:5}"><a-table-column title="行" data-index="row"/><a-table-column title="学号" data-index="student_no"/><a-table-column title="姓名" data-index="name"/><a-table-column title="结果" data-index="reason"/></a-table><a-result v-if="importState.result" status="success" title="名单导入完成" :sub-title="`新建 ${importState.result.created} 个账号，加入 ${importState.result.joined} 名学生，跳过 ${importState.result.skipped} 行`"/><div class="modal-actions"><a-button @click="closeImport">{{importState.result?'关闭':'取消'}}</a-button><a-button v-if="!importState.preview" type="primary" :loading="importState.loading" @click="previewRoster">校验名单</a-button><a-button v-else-if="!importState.result" type="primary" :loading="importState.loading" @click="confirmRoster">确认导入</a-button><a-button v-else :href="`/api/v1/classes/${classId}/members/import/${importState.preview.batch_id}/result.csv`"><DownloadOutlined/> 下载结果</a-button></div></a-modal>
     <a-modal v-model:open="modals.member" :title="memberForm.id?'编辑成员':'添加成员'" :confirm-loading="memberSaving" ok-text="保存" @ok="saveMember"><a-form layout="vertical"><a-form-item label="学号" required><a-input v-model:value="memberForm.student_no" :disabled="Boolean(memberForm.id)" maxlength="32"/></a-form-item><a-form-item label="姓名" required><a-input v-model:value="memberForm.name" maxlength="80"/></a-form-item></a-form></a-modal>
-    <a-modal :open="Boolean(memberDetail)" title="成员信息" :footer="null" @cancel="memberDetail=null"><a-descriptions v-if="memberDetail" bordered :column="1"><a-descriptions-item label="学号">{{memberDetail.student_no}}</a-descriptions-item><a-descriptions-item label="姓名">{{memberDetail.name}}</a-descriptions-item><a-descriptions-item label="小组">{{memberDetail.team||'未入组'}}</a-descriptions-item><a-descriptions-item label="加入时间">{{formatTime(memberDetail.joined_at)}}</a-descriptions-item></a-descriptions></a-modal>
+    <StudentPortfolioDrawer :student="memberDetail" :class-id="classId" :writable="session.context?.current_class?.status==='ACTIVE'" @close="memberDetail=null" @saved="loadView" @reset-password="resetMemberPassword" @remove="removeClassMember" @preview="openPortfolioFilePreview"/>
     <a-modal v-model:open="modals.team" title="创建小组" @ok="createTeam"><a-form layout="vertical"><a-form-item label="小组名称" required><a-input v-model:value="teamForm.name"/></a-form-item><a-checkbox v-model:checked="teamForm.open_recruitment">允许其他成员申请加入</a-checkbox></a-form></a-modal>
 <a-drawer :open="Boolean(selectedTeam)" :title="selectedTeam?.name" :width="role==='TEACHER'?'min(680px, 100vw)':'min(520px, 100vw)'" :get-container="false" :root-style="{position:'fixed'}" placement="right" @close="closeTeamDrawer"><template #extra><a-button class="team-export-button" v-if="role==='TEACHER'&&selectedTeam" :loading="exportingTeamIds.has(selectedTeam.id)" @click="downloadTeamCoursework(selectedTeam)"><DownloadOutlined/> 导出全部作业与成绩</a-button></template><template v-if="selectedTeam"><p>组长：{{selectedTeam.leader_name}} · {{selectedTeam.member_count}} 人</p><a-list :data-source="selectedTeam.members||[]"><template #renderItem="{item}"><a-list-item>{{item.name}}（{{item.student_no}}）<a-space><a-tag>{{roleLabel(item.role)}}</a-tag><a-button v-if="selectedTeam.is_leader&&item.role!=='LEADER'" type="link" @click="transferLeader(item.id)">移交组长</a-button></a-space></a-list-item></template></a-list><template v-if="role==='TEACHER'"><a-divider/><div class="team-drawer-topic"><span>选题</span><strong>{{selectedTeam.topic?.name||'暂未提交选题'}}</strong><p>{{selectedTeam.topic?.description||'暂无选题说明'}}</p></div><a-divider/><div class="team-drawer-section-title"><strong>近期小组作业</strong><span>最近 {{selectedTeamAssignments.length}} 次</span></div><a-skeleton v-if="teamDrawerLoading" active :paragraph="{rows:4}"/><a-empty v-else-if="!selectedTeamAssignments.length" description="暂无小组作业"/><div v-else class="team-assignment-history"><TeamAssignmentChart :assignments="selectedTeamAssignments"/><div v-for="assignment in selectedTeamAssignments" :key="assignment.id" class="team-assignment-item"><div><strong>{{assignment.title}}</strong><span>截止 {{formatTime(assignment.due_at)}}</span></div><div class="team-assignment-result"><a-tag :color="assignment.submission.status==='SUBMITTED'?'green':'default'">{{statusLabel(assignment.submission.status)}}</a-tag><a-tag v-if="assignment.submission.is_late" color="red">迟交</a-tag><span v-if="assignment.submission.status==='SUBMITTED'">{{formatTime(assignment.submission.submitted_at)}} · {{assignment.submission.files?.length||0}} 个附件</span></div></div></div></template><template v-if="selectedTeam.is_leader"><a-divider/><a-space-compact block><a-select v-model:value="inviteTarget" placeholder="选择未入组学生" style="width:100%" :options="members.filter(x=>!x.team).map(x=>({value:x.id,label:`${x.name}（${x.student_no}）`}))"/><a-button type="primary" :disabled="!inviteTarget" @click="inviteMember">邀请</a-button></a-space-compact><a-divider/><a-form layout="vertical"><a-form-item label="选题名称"><a-input v-model:value="topicForm.name"/></a-form-item><a-form-item><template #label><span class="topic-description-label">选题说明<a-tooltip overlay-class-name="topic-guidance-tooltip"><template #title>请说明项目面向谁、当前业务如何运作、存在什么具体痛点和关键异常；写明已经可以访谈的真实人员、与其关系及联系渠道，并概括准备纳入系统的核心后台流程。避免只写“提高效率、实现信息化”等空泛表述。选题应面向运营侧或后台流程，具有真实业务约束，并能延续到后续需求、设计、开发与测试。</template><QuestionCircleOutlined class="topic-help-icon" tabindex="0" aria-label="查看选题说明填写要求"/></a-tooltip></span></template><a-textarea v-model:value="topicForm.description" :rows="3"/></a-form-item><a-space><a-button type="primary" @click="saveTopic">提交选题审核</a-button><a-button danger @click="disbandTeam">解散小组</a-button></a-space></a-form></template><a-button v-else-if="role==='STUDENT'&&selectedTeam.id===session.context?.team_membership?.team_id" danger @click="leaveTeam">退出小组</a-button></template></a-drawer>
     <a-modal v-model:open="modals.assignment" :title="assignmentForm.id ? '编辑作业' : '新建作业'" :footer="null" width="720px">

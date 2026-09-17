@@ -366,7 +366,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; document.documentE
 </script>
 
 <template>
-  <a-drawer :open="open" :width="'min(100vw, 1440px)'" :get-container="false" :root-style="{position:'fixed'}" placement="right" root-class-name="review-workspace-drawer" @close="emit('close')">
+  <a-drawer :open="open" :width="'min(100vw, 1440px)'" :z-index="1200" placement="right" root-class-name="review-workspace-drawer" @close="emit('close')">
     <template #title><div class="review-drawer-title"><span class="review-drawer-filename" :title="activeFile?.name||'文件预览'">{{activeFile?.name||'文件预览'}}</span><strong v-if="assignmentTitle" class="review-drawer-assignment" :title="assignmentTitle">{{assignmentTitle}}</strong><span/></div></template>
     <div class="review-workspace-toolbar">
       <a-space>

@@ -4,6 +4,24 @@ sessionStorage.setItem('coursework-client-id', apiClientId)
 
 export function setCsrfToken(value) { csrfToken = value || '' }
 
+export async function downloadArchive(path) {
+  const response = await fetch(`/api/v1${path}`, { credentials: 'include' })
+  if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new CustomEvent('auth-expired'))
+    const data = await response.json().catch(() => null)
+    throw new Error(data?.message || `导出失败（${response.status}）`)
+  }
+  const blob = await response.blob()
+  const disposition = response.headers.get('content-disposition') || ''
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = encoded ? decodeURIComponent(encoded) : '学生档案.zip'
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 export async function api(path, options = {}) {
   const headers = new Headers(options.headers || {})
   headers.set('X-Client-ID', apiClientId)

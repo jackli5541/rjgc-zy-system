@@ -757,6 +757,28 @@ def update_member(cid: UUID, uid: UUID, data: MemberUpdateIn, user: CsrfUser, db
     return member_detail(db, cid, uid)[2]
 
 
+@app.get("/api/v1/classes/{cid}/members/{uid}/portfolio")
+def student_portfolio(cid: UUID, uid: UUID, user: CurrentUser, db: Db):
+    from app.student_portfolio import portfolio
+    teacher(user); require_class(db, user, cid)
+    return portfolio(db, cid, uid)
+
+
+@app.get("/api/v1/classes/{cid}/members/{uid}/portfolio.zip")
+def export_student_portfolio(cid: UUID, uid: UUID, user: CurrentUser, db: Db):
+    from app.student_portfolio import export_portfolios
+    teacher(user); course = require_class(db, user, cid)
+    member_detail(db, cid, uid)
+    return export_portfolios(db, course, user, uid)
+
+
+@app.get("/api/v1/classes/{cid}/portfolio.zip")
+def export_class_portfolio(cid: UUID, user: CurrentUser, db: Db):
+    from app.student_portfolio import export_portfolios
+    teacher(user); course = require_class(db, user, cid)
+    return export_portfolios(db, course, user)
+
+
 @app.delete("/api/v1/classes/{cid}/members/{uid}", status_code=204)
 def delete_member(cid: UUID, uid: UUID, user: CsrfUser, db: Db):
     teacher(user); require_writable_class(db, user, cid)

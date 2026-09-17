@@ -154,6 +154,13 @@ button, input, textarea { letter-spacing: 0; }
 .assignment-entry-actions{gap:8px}.assignment-entry-actions .ant-btn{height:34px;padding:0 14px;font-size:13px}.assignment-entry-actions .ant-btn+.ant-btn{border-left-width:1px;border-radius:6px}@media(max-width:760px){.assignment-entry-actions .ant-btn{padding:0 10px}}
 
 /* Stable page geometry and non-blocking loading feedback. */
+html{scrollbar-gutter:stable}
+.student-portfolio-drawer .ant-drawer-body{overscroll-behavior:contain;scrollbar-gutter:stable}
+.student-portfolio-drawer .ant-drawer-body{padding:0;background:#fff}
+.student-portfolio-drawer .ant-drawer-header{padding:14px 24px;border-bottom:1px solid #e8edf0}
+.student-portfolio-drawer .ant-drawer-title{font-size:14px;color:#687b87;font-weight:500}
+.student-portfolio-drawer .ant-drawer-content-wrapper{border-left:1px solid #dce4e8;box-shadow:-8px 0 28px rgba(35,54,66,.1)}
+.student-portfolio-drawer .ant-skeleton,.student-portfolio-drawer .ant-alert{margin:20px}
 .page-surface{min-height:calc(100vh - 240px)}
 .page-skeleton{min-height:420px;padding:18px 0}
 .page-progress{position:absolute;z-index:12;top:0;right:var(--page-gutter);left:var(--page-gutter);height:2px;overflow:hidden;background:rgba(23,105,170,.08);pointer-events:none}
