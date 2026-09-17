@@ -216,8 +216,9 @@ def realtime_class_id(db: Session, kind: str, oid: str, changes: dict) -> UUID |
 
 
 def audit(db: Session, user: User | None, action: str, kind: str, oid: str, changes: dict | None = None):
-    db.add(AuditLog(actor_id=user.id if user else None, action=action, object_type=kind, object_id=oid, changes=changes or {}, request_id=request_trace_id.get(), ip_address=request_ip_address.get()))
     class_id = realtime_class_id(db, kind, oid, changes or {})
+    course = db.get(TeachingClass, class_id) if class_id else None
+    db.add(AuditLog(actor_id=user.id if user else None, class_id=class_id, class_semester=course.semester if course else None, class_name=course.name if course else None, action=action, object_type=kind, object_id=oid, changes=changes or {}, request_id=request_trace_id.get(), ip_address=request_ip_address.get()))
     if class_id:
         publish_event(db, class_id=class_id, scopes=realtime_scopes(action), resource_type=kind, resource_id=oid, source_client_id=request_client_id.get())
     elif user:
@@ -483,7 +484,12 @@ def password(data: PasswordIn, user: CsrfUser, db: Db):
 @app.get("/api/v1/classes")
 def classes(user: CurrentUser, db: Db):
     q = select(TeachingClass).where(TeachingClass.teacher_id == user.id) if user.role == "TEACHER" else select(TeachingClass).join(ClassMember).where(ClassMember.user_id == user.id, ClassMember.status == "ACTIVE")
-    courses = db.scalars(q.order_by(TeachingClass.created_at.desc())).all()
+    courses = db.scalars(q.order_by(
+        TeachingClass.semester.desc(),
+        TeachingClass.name.asc(),
+        TeachingClass.created_at.desc(),
+        TeachingClass.id.desc(),
+    )).all()
     if not courses: return {"items": [], "total": 0}
     class_ids = [x.id for x in courses]
     member_counts = dict(db.execute(select(ClassMember.class_id, func.count()).where(ClassMember.class_id.in_(class_ids), ClassMember.status == "ACTIVE").group_by(ClassMember.class_id)).all())
@@ -2081,18 +2087,26 @@ def read_notifications(user: CsrfUser, db: Db):
 
 
 @app.get("/api/v1/audit-logs")
-def audit_logs(user: CurrentUser, db: Db, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: str | None = Query(None, max_length=100), actions: list[str] = Query(default=[]), object_types: list[str] = Query(default=[])):
+def audit_logs(user: CurrentUser, db: Db, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: str | None = Query(None, max_length=100), semester: str | None = Query(None, max_length=40), class_id: UUID | None = None, actor_role: Literal["TEACHER", "STUDENT"] | None = None, actions: list[str] = Query(default=[]), object_types: list[str] = Query(default=[])):
     teacher(user)
     query = select(AuditLog, User).outerjoin(User)
+    owned_classes = select(TeachingClass.id).where(TeachingClass.teacher_id == user.id)
+    query = query.where(or_(AuditLog.class_id.in_(owned_classes), and_(AuditLog.class_id.is_(None), AuditLog.actor_id == user.id)))
+    if semester: query = query.where(AuditLog.class_semester == semester)
+    if class_id:
+        course = db.get(TeachingClass, class_id)
+        if not course or course.teacher_id != user.id: raise ApiError(404, "CLASS_NOT_FOUND", "教学班不存在")
+        query = query.where(AuditLog.class_id == class_id)
+    if actor_role: query = query.where(User.role == actor_role)
     term = (q or "").strip()
     if term:
-        text_filter = or_(User.display_name.icontains(term, autoescape=True), AuditLog.ip_address.icontains(term, autoescape=True), AuditLog.action.icontains(term, autoescape=True), AuditLog.object_type.icontains(term, autoescape=True), AuditLog.object_id.icontains(term, autoescape=True))
+        text_filter = or_(User.display_name.icontains(term, autoescape=True), AuditLog.ip_address.icontains(term, autoescape=True), AuditLog.class_semester.icontains(term, autoescape=True), AuditLog.class_name.icontains(term, autoescape=True), AuditLog.action.icontains(term, autoescape=True), AuditLog.object_type.icontains(term, autoescape=True), AuditLog.object_id.icontains(term, autoescape=True))
         if actions: text_filter = or_(text_filter, AuditLog.action.in_(actions))
         if object_types: text_filter = or_(text_filter, AuditLog.object_type.in_(object_types))
         query = query.where(text_filter)
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     rows = db.execute(query.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": [{"id": str(x.id), "actor": p.display_name if p else "系统", "ip_address": x.ip_address, "action": x.action, "object_type": x.object_type, "object_id": x.object_id, "changes": x.changes, "created_at": x.created_at} for x, p in rows], "page": page, "page_size": page_size, "total": total}
+    return {"items": [{"id": str(x.id), "actor": p.display_name if p else "系统", "actor_role": p.role if p else "SYSTEM", "class_id": str(x.class_id) if x.class_id else None, "class_semester": x.class_semester, "class_name": x.class_name, "ip_address": x.ip_address, "action": x.action, "object_type": x.object_type, "object_id": x.object_id, "changes": x.changes, "created_at": x.created_at} for x, p in rows], "page": page, "page_size": page_size, "total": total}
 
 
 def export_rows(kind: str, class_id: UUID, user: User, db: Session, assignment_id: UUID | None = None) -> list[list]:
@@ -2408,16 +2422,8 @@ def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
         Assignment.submitter_type == "TEAM",
         Assignment.status.in_(["PUBLISHED", "CLOSED"]),
     ).order_by(Assignment.due_at.desc())).all()
-    personal_assignments = db.scalars(select(Assignment).where(
-        Assignment.class_id == team_item.class_id,
-        Assignment.submitter_type == "INDIVIDUAL",
-        Assignment.status.in_(["PUBLISHED", "CLOSED"]),
-    ).order_by(Assignment.due_at.desc())).all()
-    if not assignments and not personal_assignments:
+    if not assignments:
         raise ApiError(409, "NO_COURSEWORK_TO_EXPORT", "暂无作业可导出")
-    members = db.execute(select(TeamMember, User).join(User).where(
-        TeamMember.team_id == tid, TeamMember.status == "ACTIVE"
-    ).order_by(User.login_name)).all()
 
     def csv_bytes(rows):
         output = io.StringIO()
@@ -2444,20 +2450,24 @@ def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
                     archive.write(settings.file_root / file.storage_path, arcname=f"小组作业/{assignment.id}/{file.id}-{Path(file.original_name).name}")
             archive.writestr("小组作业提交记录.csv", csv_bytes(homework_rows))
 
-            grade_rows = [["作业", "学号", "姓名", "提交状态", "最终成绩", "成绩来源", "评分状态"]]
-            for assignment in personal_assignments:
-                for _, person in members:
-                    submitted = latest_personal_submission(db, assignment.id, person.id)
-                    result = submission_grade_result(db, submitted[1]) if submitted else missing_submission_grade_result(assignment)
-                    legacy = db.scalar(select(Grade).where(Grade.assignment_id == assignment.id, Grade.subject_user_id == person.id))
-                    score = result["final_grade"] or (legacy.score if legacy and legacy.status == "PUBLISHED" else None)
-                    source = result["grade_source"]
-                    grade_rows.append([
-                        assignment.title, person.login_name, person.display_name, "已提交" if submitted else "未提交",
-                        score, {"TEACHER": "教师评分", "PEER": "学生互评", "SYSTEM": "系统判定"}.get(source, "历史成绩" if score is not None else ""),
-                        "已评分" if score is not None else "待评分",
-                    ])
-            archive.writestr("本组成员成绩.csv", csv_bytes(grade_rows))
+            grade_rows = [["作业", "提交状态", "学生互评等级", "教师等级", "最终等级", "成绩来源", "评分状态"]]
+            for assignment in assignments:
+                submission = db.scalar(select(Submission).where(
+                    Submission.assignment_id == assignment.id, Submission.owner_team_id == tid
+                ))
+                version = db.scalar(select(SubmissionVersion).where(
+                    SubmissionVersion.submission_id == submission.id,
+                    SubmissionVersion.version_no == submission.current_version_no,
+                )) if submission and submission.status == "SUBMITTED" else None
+                result = submission_grade_result(db, version) if version else missing_submission_grade_result(assignment)
+                source = result["grade_source"]
+                grade_rows.append([
+                    assignment.title, "已提交" if version else "未提交", result["peer_grade"],
+                    result["teacher_grade"]["grade"] if result["teacher_grade"] else None,
+                    result["final_grade"], {"TEACHER": "教师评分", "PEER": "学生互评", "SYSTEM": "系统判定"}.get(source, ""),
+                    "已评分" if result["final_grade"] else "待评分",
+                ])
+            archive.writestr("小组作业成绩表.csv", csv_bytes(grade_rows))
 
         archive_file.seek(0)
         def stream():

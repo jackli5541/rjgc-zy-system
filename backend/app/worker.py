@@ -90,7 +90,7 @@ def process_auto_review(db, current: datetime) -> None:
             db.add(Notification(user_id=reviewer.id, kind="REVIEW_ASSIGNED", title=f"新的互评任务：{assignment.title}", object_type="review_campaign", object_id=str(campaign.id)))
     course = db.get(TeachingClass, assignment.class_id)
     assignment.auto_review_status, assignment.auto_review_error = "CREATED", None
-    db.add(AuditLog(actor_id=course.teacher_id if course else None, action="REVIEW_CAMPAIGN_AUTO_CREATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(assignment.id), "mode": assignment.auto_review_mode}))
+    db.add(AuditLog(actor_id=course.teacher_id if course else None, class_id=course.id if course else None, class_semester=course.semester if course else None, class_name=course.name if course else None, action="REVIEW_CAMPAIGN_AUTO_CREATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(assignment.id), "mode": assignment.auto_review_mode}))
     publish_event(db, class_id=assignment.class_id, scopes=["assignments", "reviews", "notifications", "dashboard"], resource_type="review_campaign", resource_id=campaign.id)
 
 
@@ -106,7 +106,7 @@ def process_due_campaign(db, current: datetime) -> None:
         return
     finalize_campaign(db, campaign, current)
     course = db.get(TeachingClass, campaign.class_id)
-    db.add(AuditLog(actor_id=course.teacher_id if course else None, action="PEER_GRADES_GENERATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(campaign.assignment_id)}))
+    db.add(AuditLog(actor_id=course.teacher_id if course else None, class_id=course.id if course else None, class_semester=course.semester if course else None, class_name=course.name if course else None, action="PEER_GRADES_GENERATED", object_type="review_campaign", object_id=str(campaign.id), changes={"assignment_id": str(campaign.assignment_id)}))
     publish_event(db, class_id=campaign.class_id, scopes=["reviews", "grades", "dashboard"], resource_type="review_campaign", resource_id=campaign.id)
 
 

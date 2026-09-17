@@ -376,6 +376,9 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[UUID] = uuid_pk()
     actor_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    class_id: Mapped[UUID | None] = mapped_column(index=True)
+    class_semester: Mapped[str | None] = mapped_column(String(40))
+    class_name: Mapped[str | None] = mapped_column(String(100))
     action: Mapped[str] = mapped_column(String(60))
     object_type: Mapped[str] = mapped_column(String(40))
     object_id: Mapped[str] = mapped_column(String(64))

@@ -38,7 +38,11 @@ def test_audit_log_search_and_operator_ip():
     assert result.status_code == 200, result.text
     payload = result.json()
     assert payload["total"] >= 1
-    assert any(item["action"] == "CLASS_CREATED" and item["ip_address"] == "testclient" for item in payload["items"])
+    assert any(item["action"] == "CLASS_CREATED" and item["ip_address"] == "testclient" and item["class_id"] == created.json()["id"] and item["class_semester"] == "审计测试" and item["class_name"] == "审计查询班" for item in payload["items"])
+    filtered = teacher.get("/api/v1/audit-logs", params={"semester": "审计测试", "class_id": created.json()["id"], "actor_role": "TEACHER"})
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()["total"] >= 1
+    assert all(item["class_id"] == created.json()["id"] and item["actor_role"] == "TEACHER" for item in filtered.json()["items"])
     deleted = teacher.delete(f"/api/v1/classes/{created.json()['id']}", headers=teacher_headers)
     assert deleted.status_code == 204, deleted.text
 
@@ -109,15 +113,20 @@ def test_formal_course_workflow():
     assert applicant.get(f"/api/v1/submission-versions/{team_version_id}/feedback").json()["grade"] == "A"
     cleared_team = teacher.delete(f"/api/v1/submission-versions/{team_version_id}/feedback", headers=teacher_headers)
     assert cleared_team.status_code == 200 and cleared_team.json()["teacher_grade"] is None
+    regraded_team = teacher.post(f"/api/v1/submission-versions/{team_version_id}/feedback/publish", headers=teacher_headers, json={"revision": 0, "grade": "A", "comment": "<p>归档成绩</p>", "annotations": []})
+    assert regraded_team.status_code == 200, regraded_team.text
     assert leader.get(f"/api/v1/teams/{team.json()['id']}/coursework.zip").status_code == 403
     assert teacher.get(f"/api/v1/teams/{other_team.json()['id']}/coursework.zip").status_code == 200
     team_export = teacher.get(f"/api/v1/teams/{team.json()['id']}/coursework.zip")
     assert team_export.status_code == 200
     with ZipFile(BytesIO(team_export.content)) as archive:
         names = archive.namelist()
-        assert "小组作业提交记录.csv" in names and "本组成员成绩.csv" in names
+        assert "小组作业提交记录.csv" in names and "小组作业成绩表.csv" in names
         assert any(name.endswith("design.pdf") for name in names)
         assert "小组设计稿" in archive.read("小组作业提交记录.csv").decode("utf-8-sig")
+        grade_sheet = archive.read("小组作业成绩表.csv").decode("utf-8-sig")
+        assert "学生互评等级,教师等级,最终等级,成绩来源" in grade_sheet
+        assert "小组设计稿,已提交,,A,A,教师评分,已评分" in grade_sheet
 
     assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "个人需求报告", "description": "提交个人需求分析作品", "submitter_type": "INDIVIDUAL", "due_at": "2027-12-01T12:00:00+08:00", "allow_late": False, "publish": True})
     assert assignment.status_code == 201, assignment.text
@@ -392,6 +401,20 @@ def test_multisheet_roster_and_member_crud():
     result = teacher.post(f"/api/v1/classes/{class_id}/members/import/{preview.json()['batch_id']}/confirm", headers=headers)
     assert result.json() == {"created": 1, "joined": 1, "skipped": 0}
     assert teacher.get(f"/api/v1/classes/{class_id}/members").json()["total"] == 2
+
+
+def test_classes_are_ordered_by_semester_name_and_creation_time():
+    teacher, headers = login("teacher", "123456", "teacher")
+    oldest_same_name = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2038-2039-1", "name": "同名班"}).json()
+    newest_same_name = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2038-2039-1", "name": "同名班"}).json()
+    older_semester = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2037-2038-2", "name": "A班"}).json()
+    later_name = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2039-2040-1", "name": "B班"}).json()
+    earlier_name = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2039-2040-1", "name": "A班"}).json()
+
+    items = teacher.get("/api/v1/classes").json()["items"]
+    assert [item["id"] for item in items] == [
+        earlier_name["id"], later_name["id"], newest_same_name["id"], oldest_same_name["id"], older_semester["id"],
+    ]
 
 
 def test_class_management_and_multi_class_creation_are_atomic():

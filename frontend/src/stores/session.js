@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { api, setCsrfToken } from '../api'
 
+const teacherClassKey = userId => `coursework:last-teacher-class:${userId}`
+
 export const useSessionStore = defineStore('session', {
   state: () => ({ user: null, context: null, classes: [], ready: false }),
   getters: {
@@ -34,9 +36,11 @@ export const useSessionStore = defineStore('session', {
     async refreshClasses(preferredId) {
       const data = await api('/classes')
       this.classes = data.items
-      const requested = preferredId || this.context?.current_class?.id
+      const remembered = this.user?.role === 'TEACHER' ? localStorage.getItem(teacherClassKey(this.user.id)) : null
+      const requested = preferredId || this.context?.current_class?.id || remembered
       const id = this.classes.some(item => item.id === requested) ? requested : this.classes[0]?.id
       this.context = await api(`/classes/current/context${id ? `?class_id=${id}` : ''}`)
+      if (this.user?.role === 'TEACHER' && this.context?.current_class?.id) localStorage.setItem(teacherClassKey(this.user.id), this.context.current_class.id)
     },
     async refreshContext() { if (this.user) await this.refreshClasses(this.classId) },
     async logout() {
