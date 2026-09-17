@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, CompressOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { api, apiClientId } from '../api'
@@ -67,6 +67,8 @@ const boardFilter = ref('ALL')
 const boardQuery = ref('')
 const boardTeamFilter = ref('ALL')
 const assignmentDetailTab = ref('details')
+const DRAWER_EXPANDED_STORAGE_KEY = 'assignment-drawers-expanded'
+const assignmentDrawerExpanded = ref(localStorage.getItem(DRAWER_EXPANDED_STORAGE_KEY) === 'true')
 const noticesOpen = ref(false)
 const modals = reactive({ class: false, import: false, member: false, team: false, assignment: false, password: false, topicDecision: false })
 const classForm = reactive({ id: '', version: 1, semester: '', name: '', team_deadline: '', topic_public: false })
@@ -126,7 +128,11 @@ const filteredBoard = computed(() => (selectedAssignment.value?.board || []).fil
   const q = boardQuery.value.trim().toLocaleLowerCase()
   const matchesQuery = !q || `${item.owner || ''} ${item.student_no || ''}`.toLocaleLowerCase().includes(q)
   const matchesTeam = boardTeamFilter.value === 'ALL' || (boardTeamFilter.value === 'NONE' ? !item.team_id : item.team_id === boardTeamFilter.value)
-  const matchesStatus = boardFilter.value === 'ALL' || (boardFilter.value === 'LATE' ? item.is_late : boardFilter.value === item.status)
+  const matchesStatus = boardFilter.value === 'ALL'
+    || (boardFilter.value === 'LATE' && item.is_late)
+    || (boardFilter.value === 'REVIEWED' && item.status === 'SUBMITTED' && Boolean(item.teacher_grade))
+    || (boardFilter.value === 'PENDING_REVIEW' && item.status === 'SUBMITTED' && !item.teacher_grade)
+    || boardFilter.value === item.status
   return matchesQuery && matchesTeam && matchesStatus
 }))
 const groupedBoard = computed(() => {
@@ -619,7 +625,9 @@ async function openAssignment(item, tab = 'details') {
   const query = tab === 'details' ? {} : { tab }
   await router.push({ name: 'assignment-detail', params: { id: item.id }, query })
 }
-async function closeAssignmentDrawer() { await router.push('/assignments') }
+async function closeAssignmentDrawer() {
+  await router.push('/assignments')
+}
 async function uploadFile({ file, onSuccess, onError }) {
   try {
     const body = new FormData(); body.append('file', file); const saved = await api(`/assignments/${selectedAssignment.value.id}/files`, { method: 'POST', body })
@@ -945,6 +953,7 @@ watch(() => route.query.tab, tab => {
 watch(() => route.path, () => { memberDetail.value = null; if (view.value !== 'assignment-detail') openedSubmissionPreview.value = '' })
 watch(() => session.teamGate, required => { clearInterval(gateTimer); gateTimer = required ? setInterval(pollGate, 10000) : undefined })
 watch(classId, () => { memberDetail.value = null; connectRealtime() })
+watch(assignmentDrawerExpanded, value => localStorage.setItem(DRAWER_EXPANDED_STORAGE_KEY, String(value)))
 onMounted(async () => {
   await Promise.all([loadView(), loadNotifications()])
   if (session.teamGate) gateTimer = setInterval(pollGate, 10000)
@@ -996,8 +1005,9 @@ provide(shellContextKey, {
           <Transition name="drawer-fade" appear><div class="assignment-drawer-mask" @click="closeAssignmentDrawer"></div></Transition>
         </template>
         <Transition :name="role==='TEACHER'?'drawer-slide':'detail-fade'" appear>
-        <div :class="{'assignment-detail-drawer':role==='TEACHER'}">
-         <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag color="blue">{{selectedAssignment.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="router.push('/assignments')"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
+        <div :class="{'assignment-detail-drawer':role==='TEACHER','expanded':role==='TEACHER'&&assignmentDrawerExpanded}">
+         <a-tooltip v-if="role==='TEACHER'" :title="assignmentDrawerExpanded?'收回':'展开至全屏'" placement="right"><button type="button" class="assignment-drawer-expand-button" :aria-label="assignmentDrawerExpanded?'收回作业详情':'将作业详情展开至全屏'" @click="assignmentDrawerExpanded=!assignmentDrawerExpanded"><CompressOutlined v-if="assignmentDrawerExpanded"/><ExpandOutlined v-else/></button></a-tooltip>
+         <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag color="blue">{{selectedAssignment.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="closeAssignmentDrawer"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
          <section class="assignment-workspace">
            <a-tabs :active-key="assignmentDetailTab" :animated="{inkBar:true,tabPane:true}" class="assignment-detail-tabs" @change="changeAssignmentDetailTab">
             <a-tab-pane key="details" :tab="role==='TEACHER'?'详情':'作业详情'">
@@ -1023,7 +1033,7 @@ provide(shellContextKey, {
                 </section>
                 <section class="assignment-pane">
                   <div class="assignment-pane-heading"><h2>提交明细</h2></div>
-                  <div class="board-toolbar"><a-input-search v-model:value="boardQuery" allow-clear placeholder="搜索姓名或学号"/><a-select v-model:value="boardTeamFilter" :options="boardTeamOptions"/><a-segmented v-model:value="boardFilter" :options="[{label:'全部',value:'ALL'},{label:'未提交',value:'NOT_SUBMITTED'},{label:'已提交',value:'SUBMITTED'},{label:'迟交',value:'LATE'}]"/></div>
+                  <div class="board-toolbar"><a-input-search v-model:value="boardQuery" allow-clear placeholder="搜索姓名或学号"/><a-select v-model:value="boardTeamFilter" :options="boardTeamOptions"/><a-segmented v-model:value="boardFilter" :options="[{label:'全部',value:'ALL'},{label:'未提交',value:'NOT_SUBMITTED'},{label:'已提交',value:'SUBMITTED'},{label:'迟交',value:'LATE'},{label:'未批改',value:'PENDING_REVIEW'},{label:'已批改',value:'REVIEWED'}]"/></div>
                   <a-empty v-if="!groupedBoard.length" class="detail-empty" description="没有符合条件的提交记录"/>
                   <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="最终成绩"><template #default="{record}"><a-tag v-if="record.final_grade" :color="record.grade_source==='TEACHER'?'green':record.grade_source==='SYSTEM'?'red':'blue'">{{record.final_grade}} · {{gradeSourceLabel(record.grade_source)}}</a-tag><a-tag v-else color="gold">{{statusLabel(record.grading_status)}}</a-tag></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
                 </section>
@@ -1069,7 +1079,9 @@ provide(shellContextKey, {
       :peer-feedback-enabled="filePreview.mode==='TEACHER'&&Boolean(selectedSubmission?.peer_feedbacks?.length)"
       :peer-grade="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
       :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
+      :expanded="assignmentDrawerExpanded"
       @close="closeFilePreview"
+      @update:expanded="assignmentDrawerExpanded=$event"
       @feedback-published="handleFeedbackPublished"
       @clear-feedback="clearTeacherGrade"
       @target-change="changeReviewTarget"
