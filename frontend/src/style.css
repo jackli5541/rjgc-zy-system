@@ -10,6 +10,8 @@
 * { box-sizing: border-box; }
 html { scrollbar-gutter: stable; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: #f3f6fa; }
+html.file-preview-open { overflow: hidden; }
+body.ant-scrolling-effect { width: auto !important; }
 button, input, textarea { letter-spacing: 0; }
 
 .login-page { min-height: 100vh; display: grid; grid-template-columns: minmax(420px, 1.05fr) minmax(440px, .95fr); background: #fff; }

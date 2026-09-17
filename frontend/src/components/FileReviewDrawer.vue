@@ -38,7 +38,7 @@ const commentComposer = reactive({ open: false, visible: true, mode: 'new', anno
 let loadSequence = 0
 let positionFrame = 0
 let feedbackBaseline = ''
-const feedback = reactive({ status: null, revision: 0, grade: 'A', comment: '', annotations: [], published_at: null, has_draft: false })
+const feedback = reactive({ status: null, revision: 0, grade: undefined, comment: '', annotations: [], published_at: null, has_draft: false })
 const externalWarning = ref(false)
 
 const activeFile = computed(() => props.files[index.value] || null)
@@ -57,7 +57,8 @@ const markTypes = [
 ]
 
 function resetFeedback(value = {}) {
-  Object.assign(feedback, { status: null, revision: 0, grade: 'A', comment: '', annotations: [], published_at: null, has_draft: false }, value, { revision: value.revision ?? value.version ?? 0 })
+  const grade = props.mode === 'TEACHER' && !value.status ? undefined : value.grade
+  Object.assign(feedback, { status: null, revision: 0, grade: undefined, comment: '', annotations: [], published_at: null, has_draft: false }, value, { grade, revision: value.revision ?? value.version ?? 0 })
   feedback.annotations = (value.annotations || []).map(item => ({ ...item, mark_type: item.mark_type || (item.comment ? 'COMMENT' : 'HIGHLIGHT'), color: item.color || 'YELLOW' }))
   selectedAnnotationId.value = ''
   commentComposer.open = false
@@ -298,6 +299,7 @@ function feedbackPayload() {
 
 async function saveFeedback(publish) {
   if (!props.submissionVersionId) return
+  if (!feedback.grade) { message.warning('请先选择作业等级'); return false }
   saving.value = true
   try {
     const peer = props.mode === 'PEER'
@@ -327,6 +329,7 @@ function annotationLabel(item) {
 }
 
 watch(() => props.open, value => {
+  document.documentElement.classList.toggle('file-preview-open', value)
   if (!value) { dismissTransient(); commentComposer.open = false; return }
   index.value = Math.min(props.initialIndex, Math.max(0, props.files.length - 1))
   loadFeedback(); loadFile()
@@ -339,11 +342,11 @@ watch(() => props.submissionVersionId, () => {
   loadFeedback(); loadFile()
 })
 onMounted(() => { document.addEventListener('pointerdown', handleGlobalPointer); document.addEventListener('scroll', handleGlobalScroll, true); document.addEventListener('keydown', handleGlobalKey); window.addEventListener('resize', handleResize) })
-onBeforeUnmount(() => { loadSequence += 1; if (positionFrame) cancelAnimationFrame(positionFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
+onBeforeUnmount(() => { loadSequence += 1; document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
 </script>
 
 <template>
-  <a-drawer :open="open" :width="'min(100vw, 1440px)'" placement="right" root-class-name="review-workspace-drawer" @close="emit('close')">
+  <a-drawer :open="open" :width="'min(100vw, 1440px)'" :get-container="false" :root-style="{position:'fixed'}" placement="right" root-class-name="review-workspace-drawer" @close="emit('close')">
     <template #title><div class="review-drawer-title"><span class="review-drawer-filename" :title="activeFile?.name||'文件预览'">{{activeFile?.name||'文件预览'}}</span><strong v-if="assignmentTitle" class="review-drawer-assignment" :title="assignmentTitle">{{assignmentTitle}}</strong><span/></div></template>
     <div class="review-workspace-toolbar">
       <a-space>
@@ -370,9 +373,9 @@ onBeforeUnmount(() => { loadSequence += 1; if (positionFrame) cancelAnimationFra
       </main>
       <aside v-if="hasFeedbackPanel" class="feedback-sidebar">
         <a-alert v-if="externalWarning" type="warning" show-icon message="提交或评价数据已更新" description="当前未保存内容已保留。完成本次编辑后将自动同步最新数据。"/>
-        <div class="feedback-heading"><div><strong>{{owner||'教师反馈'}}</strong><span v-if="feedback.status">{{feedback.status==='PUBLISHED'?'已发布':'草稿'}}<template v-if="feedback.has_draft"> · 有待发布修改</template></span></div><a-tag :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
+        <div class="feedback-heading"><div><strong>{{owner||'教师反馈'}}</strong><span v-if="feedback.status">{{feedback.status==='PUBLISHED'?'已发布':'草稿'}}<template v-if="feedback.has_draft"> · 有待发布修改</template></span></div><a-tag v-if="feedback.grade" :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
         <template v-if="editable">
-          <label class="feedback-field"><span>作业等级</span><a-select v-model:value="feedback.grade" :options="['A','B','C','D','E'].map(value=>({value,label:value}))"/></label>
+          <label class="feedback-field"><span>作业等级</span><a-select v-model:value="feedback.grade" placeholder="请选择等级" :options="['A','B','C','D','E'].map(value=>({value,label:value}))"/></label>
           <label class="feedback-field"><span>总评</span><RichTextEditor v-model="feedback.comment" placeholder="填写整体评价"/></label>
         </template>
         <section class="annotation-section">
