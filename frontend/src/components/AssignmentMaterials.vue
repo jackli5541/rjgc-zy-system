@@ -4,7 +4,18 @@ import { DeleteOutlined, DownloadOutlined, DownOutlined, FileTextOutlined, UpOut
 import { message } from 'ant-design-vue'
 
 const props = defineProps({ files: { type: Array, default: () => [] }, assignmentId: String, canDelete: Boolean, deleting: Boolean })
-const emit = defineEmits(['preview', 'delete', 'delete-selected'])
+const emit = defineEmits(['preview', 'delete', 'delete-selected', 'retype'])
+const MATERIAL_TYPES = [
+  { value: 'TASK', label: '任务型', color: 'blue' },
+  { value: 'ATTACHMENT', label: '附件型', color: 'default' },
+  { value: 'CRITERIA', label: '判定标准', color: 'gold' },
+]
+function materialTypeMeta(type) {
+  return MATERIAL_TYPES.find(item => item.value === type)
+}
+function retype(file, type) {
+  if (type !== file.material_type) emit('retype', file, type)
+}
 const expanded = ref(false)
 const selectedIds = ref([])
 const downloading = ref(false)
@@ -56,6 +67,15 @@ watch(() => props.files.map(file => file.id).join(','), () => {
         <span class="materials-file-leading"><input v-if="canDelete||assignmentId" type="checkbox" :aria-label="`选择附件 ${file.name}`" :checked="selectedIds.includes(file.id)" :disabled="deleting" @change="selectFile(file.id,$event.target.checked)"><span class="assignment-file-icon"><FileTextOutlined/></span></span>
         <button type="button" class="file-preview-link" @click="emit('preview',file,files)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button>
         <a-space>
+          <a-dropdown v-if="canDelete && file.material_type" :trigger="['click']">
+            <a-tag class="material-type-tag" :color="materialTypeMeta(file.material_type)?.color" @click.prevent>{{materialTypeMeta(file.material_type)?.label}}</a-tag>
+            <template #overlay>
+              <a-menu @click="({key}) => retype(file,key)">
+                <a-menu-item v-for="item in MATERIAL_TYPES" :key="item.value" :disabled="item.value===file.material_type">{{item.label}}</a-menu-item>
+              </a-menu>
+            </template>
+          </a-dropdown>
+          <a-tag v-else-if="file.material_type" :color="materialTypeMeta(file.material_type)?.color">{{materialTypeMeta(file.material_type)?.label}}</a-tag>
           <a-tooltip title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip>
           <a-tooltip v-if="canDelete" title="删除附件"><a-button danger type="text" shape="circle" :disabled="deleting" @click="emit('delete',file)"><DeleteOutlined/></a-button></a-tooltip>
         </a-space>
@@ -78,4 +98,5 @@ watch(() => props.files.map(file => file.id).join(','), () => {
 .materials-stacked::before{inset:8px 8px auto}
 .materials-stacked::after{inset:16px 16px auto;z-index:-2;background:#edf2f6}
 .materials-toggle{display:flex;justify-content:center;margin-top:8px}
+.material-type-tag{cursor:pointer;margin:0}
 </style>

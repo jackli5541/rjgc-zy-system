@@ -60,6 +60,8 @@ const fileReviewDrawer = ref(null)
 const selectedCampaign = ref(null)
 const reviewTask = ref(null)
 const assignmentAttachments = ref([])
+const uploadMaterialType = ref('ATTACHMENT')
+const materialTypeOptions = [{ label: '任务型', value: 'TASK' }, { label: '附件型', value: 'ATTACHMENT' }, { label: '判定标准', value: 'CRITERIA' }]
 const reviewCriteriaFiles = ref([])
 const pendingAssignmentFiles = ref([])
 const draftFiles = ref([])
@@ -641,6 +643,21 @@ async function uploadFile({ file, onSuccess, onError }) {
     onSuccess(saved)
   } catch (e) { onError(e); message.error(e.message) }
 }
+async function uploadMaterialFile({ file, onSuccess, onError }) {
+  try {
+    const body = new FormData(); body.append('file', file)
+    const saved = await api(`/assignments/${selectedAssignment.value.id}/files?material_type=${uploadMaterialType.value}`, { method: 'POST', body })
+    assignmentAttachments.value.push(saved)
+    onSuccess(saved)
+  } catch (e) { onError(e); message.error(e.message) }
+}
+async function retypeMaterial(file, materialType) {
+  try {
+    const saved = await api(`/files/${file.id}`, { method: 'PATCH', body: JSON.stringify({ material_type: materialType }) })
+    const index = assignmentAttachments.value.findIndex(item => item.id === file.id)
+    if (index !== -1) assignmentAttachments.value[index] = saved
+  } catch (e) { message.error(e.message) }
+}
 const deletingMaterials = ref(false)
 function deleteSelectedMaterials(files) {
   if (!files.length || deletingMaterials.value) return
@@ -1023,9 +1040,9 @@ provide(shellContextKey, {
                 <div class="rich-text detail-description" v-html="selectedAssignment.description"></div>
               </section>
               <section class="assignment-pane">
-                <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-upload v-if="role==='TEACHER'" :custom-request="uploadFile" :show-upload-list="false" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
+                <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-segmented v-if="role==='TEACHER'" v-model:value="uploadMaterialType" size="small" :options="materialTypeOptions"/><a-upload v-if="role==='TEACHER'" :custom-request="uploadMaterialFile" :show-upload-list="false" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
                 <a-empty v-if="!assignmentAttachments.length" class="detail-empty" description="暂无作业资料"/>
-                <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials"/>
+                <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials" @retype="retypeMaterial"/>
               </section>
               <section v-if="role==='TEACHER'" class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业操作</h2></div>

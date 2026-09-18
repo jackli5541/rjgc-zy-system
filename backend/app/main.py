@@ -429,6 +429,8 @@ class MemberCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 class MemberUpdateIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+class MaterialTypeIn(BaseModel):
+    material_type: Literal["TASK", "ATTACHMENT", "CRITERIA"]
 
 
 @app.get("/health/live")
@@ -975,7 +977,7 @@ def file_json(file: FileObject, owner_name: str | None = None, submitted: bool =
     suffix = Path(file.original_name).suffix.lower()
     render_type = "PDF" if suffix == ".pdf" else "RICH_TEXT" if suffix in {".md", ".html", ".htm"} else "IMAGE" if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"} else "DOWNLOAD_ONLY"
     previewable = render_type != "DOWNLOAD_ONLY"
-    return {"id": str(file.id), "name": file.original_name, "size": file.size_bytes, "render_type": render_type, "preview_status": file.preview_status, "preview_error": file.preview_error, "previewable": previewable, "download_only": not previewable, "purpose": file.purpose, "owner_name": owner_name, "created_at": file.created_at, "submitted": submitted}
+    return {"id": str(file.id), "name": file.original_name, "size": file.size_bytes, "render_type": render_type, "preview_status": file.preview_status, "preview_error": file.preview_error, "previewable": previewable, "download_only": not previewable, "purpose": file.purpose, "material_type": file.material_type, "owner_name": owner_name, "created_at": file.created_at, "submitted": submitted}
 
 
 def writable_teacher_classes(db: Session, user: User, class_ids: list[UUID]) -> list[TeachingClass]:
@@ -1179,12 +1181,13 @@ def own_submission(db: Session, a: Assignment, user: User):
 
 
 @app.post("/api/v1/assignments/{aid}/files", status_code=201)
-def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purpose: Literal["ATTACHMENT", "REVIEW_CRITERIA"] | None = Query(None)):
+def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purpose: Literal["ATTACHMENT", "REVIEW_CRITERIA"] | None = Query(None), material_type: Literal["TASK", "ATTACHMENT", "CRITERIA"] | None = Query(None)):
     a = db.get(Assignment, aid)
     if not a: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, a.class_id)
     team = None
     selected_purpose = (purpose or "ATTACHMENT") if user.role == "TEACHER" else "SUBMISSION"
+    selected_material_type = (material_type or "ATTACHMENT") if selected_purpose == "ATTACHMENT" else None
     if user.role == "TEACHER" and selected_purpose == "REVIEW_CRITERIA" and not review_config_editable(db, a):
         raise ApiError(409, "AUTO_REVIEW_CONFIG_LOCKED", "作业已截止或互评活动已创建，不能修改互评标准附件")
     if user.role == "STUDENT":
@@ -1228,7 +1231,7 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
         file.file.close()
     team_id = team.id if team and a.submitter_type == "TEAM" else None
     preview_status = "READY" if suffix in PREVIEWABLE_FILE_SUFFIXES else "NOT_AVAILABLE"
-    x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
+    x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, material_type=selected_material_type, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
     db.add(x)
     db.commit()
     return file_json(x, user.display_name)
@@ -1316,6 +1319,18 @@ def delete_file(fid: UUID, user: CsrfUser, db: Db):
     path = settings.file_root / file.storage_path; db.delete(file); db.commit()
     if path.is_file(): path.unlink()
     return Response(status_code=204)
+
+
+@app.patch("/api/v1/files/{fid}")
+def retype_file(fid: UUID, body: MaterialTypeIn, user: CsrfUser, db: Db):
+    file = db.get(FileObject, fid); assignment = db.get(Assignment, file.assignment_id) if file else None
+    if not file or not assignment: raise ApiError(404, "FILE_NOT_FOUND", "文件不存在")
+    require_writable_class(db, user, assignment.class_id)
+    if file.owner_id != user.id: raise ApiError(403, "FILE_FORBIDDEN", "只能修改自己上传的文件")
+    if file.purpose != "ATTACHMENT": raise ApiError(422, "FILE_TYPE_NOT_APPLICABLE", "只有作业资料附件可以分类")
+    file.material_type = body.material_type
+    db.commit()
+    return file_json(file, user.display_name)
 
 
 @app.get("/api/v1/assignments/{aid}/submission")

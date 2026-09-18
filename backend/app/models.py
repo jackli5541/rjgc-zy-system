@@ -186,6 +186,7 @@ class FileObject(Base):
     assignment_id: Mapped[UUID | None] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True)
     team_id: Mapped[UUID | None] = mapped_column(ForeignKey("teams.id"), index=True)
     purpose: Mapped[str] = mapped_column(String(16), default="SUBMISSION")
+    material_type: Mapped[str | None] = mapped_column(String(16))
     storage_path: Mapped[str] = mapped_column(String(255), unique=True)
     original_name: Mapped[str] = mapped_column(String(255))
     size_bytes: Mapped[int] = mapped_column(Integer)
