@@ -816,7 +816,8 @@ def test_rich_preview_feedback_annotations_and_resubmission_history():
     student.post("/api/v1/teams", headers=student_headers, json={"class_id": class_id, "name": "批注测试组", "open_recruitment": True})
     assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "富文本报告", "description": "验证安全预览和批注", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
 
-    markdown_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("report.md", b"# Heading\n\n- [x] Done\n\n| A | B |\n|---|---|\n| 1 | 2 |", "text/markdown")}).json()
+    markdown_content = b"# Heading\n\n- [x] Done\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n![chart](data:image/png;base64,iVBORw0KGgo=)\n\n![unsafe](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)"
+    markdown_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("report.md", markdown_content, "text/markdown")}).json()
     pdf_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("diagram.pdf", b"%PDF-1.4", "application/pdf")}).json()
     html_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("appendix.html", b'<h2>Safe</h2><script>alert(1)</script><img src="/private.png"><img src="https://example.com/ok.png"><a href="javascript:alert(1)">bad</a>', "text/html")})
     assert html_file.status_code == 201 and html_file.json()["render_type"] == "RICH_TEXT"
@@ -829,6 +830,9 @@ def test_rich_preview_feedback_annotations_and_resubmission_history():
     assert rendered.status_code == 200 and rendered.json()["render_type"] == "RICH_TEXT"
     assert "<script" not in rendered.json()["html"] and "javascript:" not in rendered.json()["html"]
     assert 'src="/private.png"' not in rendered.json()["html"] and "https://example.com/ok.png" in rendered.json()["html"]
+    rendered_markdown = teacher.get(f"/api/v1/files/{markdown_file['id']}/render")
+    assert "data:image/png;base64,iVBORw0KGgo=" in rendered_markdown.json()["html"]
+    assert "data:image/svg+xml" not in rendered_markdown.json()["html"]
 
     annotation = {"file_id": markdown_file["id"], "kind": "RICH_TEXT_RANGE", "mark_type": "COMMENT", "color": "BLUE", "anchor": {"start": {"block_id": "b0", "offset": 0}, "end": {"block_id": "b0", "offset": 7}, "exact": "Heading", "prefix": "", "suffix": "Done"}, "comment": "<p><strong>重点</strong><script>bad()</script></p>"}
     pure_mark = {"file_id": markdown_file["id"], "kind": "RICH_TEXT_RANGE", "mark_type": "UNDERLINE", "color": "GREEN", "anchor": {"start": {"block_id": "b1", "offset": 0}, "end": {"block_id": "b1", "offset": 4}, "exact": "Done", "prefix": "", "suffix": ""}, "comment": ""}

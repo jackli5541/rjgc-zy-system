@@ -59,6 +59,10 @@ SAFE_HTML_ATTRIBUTES = {
 }
 PREVIEWABLE_FILE_SUFFIXES = {".md", ".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
 DOWNLOAD_ONLY_FILE_SUFFIXES = {".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
+SAFE_IMAGE_DATA_URL = re.compile(
+    r"data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]*={0,2}",
+    flags=re.IGNORECASE,
+)
 
 
 def clean_html(value: str) -> str:
@@ -71,7 +75,8 @@ def clean_file_html(value: str) -> str:
         if tag == "a" and name in {"title", "target", "rel"}: return True
         if tag == "a" and name == "href": return attribute_value.startswith(("https://", "mailto:"))
         if tag == "img" and name in {"alt", "title", "width", "height"}: return True
-        if tag == "img" and name == "src": return attribute_value.startswith("https://")
+        if tag == "img" and name == "src":
+            return attribute_value.startswith("https://") or bool(SAFE_IMAGE_DATA_URL.fullmatch(attribute_value))
         if tag == "input" and name in {"type", "checked", "disabled"}: return name != "type" or attribute_value == "checkbox"
         if tag == "code" and name == "class" and attribute_value.startswith("language-"): return True
         if name in {"class", "id"}: return bool(re.fullmatch(r"[A-Za-z0-9_\- ]{1,200}", attribute_value))
@@ -79,7 +84,7 @@ def clean_file_html(value: str) -> str:
 
     styles = re.findall(r"<style\b[^>]*>(.*?)</style\s*>", value, flags=re.IGNORECASE | re.DOTALL)
     without_styles = re.sub(r"<style\b[^>]*>.*?</style\s*>", "", value, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = bleach.clean(without_styles, tags=SAFE_HTML_TAGS, attributes=allowed_attribute, protocols=["https", "mailto"], strip=True)
+    cleaned = bleach.clean(without_styles, tags=SAFE_HTML_TAGS, attributes=allowed_attribute, protocols=["https", "mailto", "data"], strip=True)
     cleaned = re.sub(r'<a\s+([^>]*href="[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
     scoped_css = scope_preview_css("\n".join(styles))
     return f"<style>{scoped_css}</style>{cleaned}" if scoped_css else cleaned
