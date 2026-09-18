@@ -61,7 +61,7 @@ const selectedCampaign = ref(null)
 const reviewTask = ref(null)
 const assignmentAttachments = ref([])
 const uploadMaterialType = ref('ATTACHMENT')
-const materialTypeOptions = [{ label: '任务型', value: 'TASK' }, { label: '附件型', value: 'ATTACHMENT' }, { label: '判定标准', value: 'CRITERIA' }]
+const materialTypeOptions = [{ label: '任务型', value: 'TASK', color: 'blue' }, { label: '附件型', value: 'ATTACHMENT' }, { label: '判定标准', value: 'CRITERIA', color: 'gold' }]
 const reviewCriteriaFiles = ref([])
 const pendingAssignmentFiles = ref([])
 const draftFiles = ref([])
@@ -560,8 +560,37 @@ function setDescriptionLink() {
   if (!href.trim()) descriptionEditor.value?.chain().focus().unsetLink().run()
   else descriptionEditor.value?.chain().focus().extendMarkRange('link').setLink({ href: href.trim() }).run()
 }
-function queueAssignmentAttachment(file) { pendingAssignmentFiles.value.push(file); return false }
+function materialTypeOption(value) { return materialTypeOptions.find(option => option.value === value) || materialTypeOptions[1] }
+function queueAssignmentAttachment(file, materialType) { pendingAssignmentFiles.value.push({ file, materialType }); return false }
 function removePendingAssignmentAttachment(index) { pendingAssignmentFiles.value.splice(index, 1) }
+async function copyAssignmentFiles(targets) {
+  const files = [
+    ...assignmentAttachments.value.map(file => ({ ...file, purpose: 'ATTACHMENT' })),
+    ...reviewCriteriaFiles.value.map(file => ({ ...file, purpose: 'REVIEW_CRITERIA' }))
+  ]
+  for (const file of files) {
+    const response = await fetch(`/api/v1/files/${file.id}`, { credentials: 'include' })
+    if (!response.ok) throw new Error(`复制附件“${file.name}”失败`)
+    const blob = await response.blob()
+    for (const target of targets) {
+      const query = new URLSearchParams({ purpose: file.purpose })
+      if (file.purpose === 'ATTACHMENT' && file.material_type) query.set('material_type', file.material_type)
+      const body = new FormData()
+      body.append('file', blob, file.name)
+      await api(`/assignments/${target.id}/files?${query}`, { method: 'POST', body })
+    }
+  }
+}
+async function uploadPendingAssignmentFiles(targets, sourceId = '') {
+  for (const target of targets) {
+    for (const pending of pendingAssignmentFiles.value) {
+      const body = new FormData(); body.append('file', pending.file)
+      const attachment = await api(`/assignments/${target.id}/files?material_type=${pending.materialType}`, { method: 'POST', body })
+      if (target.id === sourceId) assignmentAttachments.value.push(attachment)
+    }
+  }
+  pendingAssignmentFiles.value = []
+}
 async function createAssignment(publishRequested = false) {
   if (!assignmentForm.class_ids.length) return message.warning('请至少选择一个教学班')
   if (assignmentForm.title.trim().length < 2) return message.warning('标题至少填写 2 个字符')
@@ -576,21 +605,44 @@ async function createAssignment(publishRequested = false) {
   }
   if (assignmentForm.id) {
     await action(async () => {
-      const payload = { class_id: assignmentForm.class_ids[0], title: assignmentForm.title, description: assignmentForm.description, submitter_type: assignmentForm.submitter_type, starts_at: iso(assignmentForm.starts_at), due_at: iso(assignmentForm.due_at), allow_late: assignmentForm.allow_late, version: assignmentForm.version }
+      const originalClassId = selectedAssignment.value.class_id
+      const targetClassId = assignmentForm.class_ids.includes(originalClassId) ? originalClassId : assignmentForm.class_ids[0]
+      const additionalClassIds = assignmentForm.class_ids.filter(id => id !== targetClassId)
+      const payload = { class_id: targetClassId, title: assignmentForm.title, description: assignmentForm.description, submitter_type: assignmentForm.submitter_type, starts_at: iso(assignmentForm.starts_at), due_at: iso(assignmentForm.due_at), allow_late: assignmentForm.allow_late, version: assignmentForm.version }
       if (reviewConfigEditable.value) Object.assign(payload, { auto_review_enabled: assignmentForm.auto_review_enabled, auto_review_mode: assignmentForm.auto_review_enabled ? assignmentForm.auto_review_mode : null, auto_review_criteria_text: assignmentForm.auto_review_enabled ? assignmentForm.auto_review_criteria_text : '', auto_review_due_at: assignmentForm.auto_review_enabled ? iso(assignmentForm.auto_review_due_at) : null })
       const saved = await api(`/assignments/${assignmentForm.id}`, { method: 'PATCH', body: JSON.stringify(payload) })
       assignmentForm.version = saved.version
-      while (pendingAssignmentFiles.value.length) {
-        const file = pendingAssignmentFiles.value[0]
-        const body = new FormData(); body.append('file', file)
-        const attachment = await api(`/assignments/${assignmentForm.id}/files`, { method: 'POST', body })
-        assignmentAttachments.value.push(attachment)
-        pendingAssignmentFiles.value.shift()
+      try {
+        let copies = []
+        if (additionalClassIds.length) {
+          const created = await api('/assignments/bulk', { method: 'POST', body: JSON.stringify({
+            class_ids: additionalClassIds,
+            title: assignmentForm.title.trim(),
+            description: assignmentForm.description,
+            submitter_type: assignmentForm.submitter_type,
+            starts_at: iso(assignmentForm.starts_at),
+            due_at: iso(assignmentForm.due_at),
+            allow_late: assignmentForm.allow_late,
+            publish: false,
+            auto_review_enabled: assignmentForm.auto_review_enabled,
+            auto_review_mode: assignmentForm.auto_review_enabled ? assignmentForm.auto_review_mode : null,
+            auto_review_criteria_text: assignmentForm.auto_review_enabled ? assignmentForm.auto_review_criteria_text : '',
+            auto_review_due_at: assignmentForm.auto_review_enabled ? iso(assignmentForm.auto_review_due_at) : null
+          }) })
+          copies = created.items
+          await copyAssignmentFiles(copies)
+        }
+        await uploadPendingAssignmentFiles([saved, ...copies], saved.id)
+        const copiesShouldPublish = selectedAssignment.value.status === 'PUBLISHED' || publishRequested
+        if (copiesShouldPublish) await Promise.all(copies.map(item => api(`/assignments/${item.id}/publish`, { method: 'POST' })))
+        if (publishRequested) await api(`/assignments/${assignmentForm.id}/publish`, { method: 'POST' })
+        message.success(publishRequested ? '作业已更新并重新发布' : `作业已更新至 ${assignmentForm.class_ids.length} 个教学班`)
+      } catch (error) {
+        message.warning(`原作业已保存，但跨班处理未完成：${error.message}。请检查各班作业列表中的草稿和附件后再操作`)
       }
-      if (publishRequested) await api(`/assignments/${assignmentForm.id}/publish`, { method: 'POST' })
       modals.assignment = false
-      if (saved.class_id !== classId.value) await session.refreshClasses(saved.class_id)
-    }, publishRequested ? '作业已更新并重新发布' : '作业已更新')
+      await session.refreshClasses(saved.class_id)
+    })
     return
   }
   const count = assignmentForm.class_ids.length
@@ -612,16 +664,16 @@ async function createAssignment(publishRequested = false) {
     const created = await api('/assignments/bulk', { method: 'POST', body: JSON.stringify(createPayload) })
     const failed = []
     for (const assignment of created.items) {
-      for (const file of pendingAssignmentFiles.value) {
+      for (const pending of pendingAssignmentFiles.value) {
         try {
-          const body = new FormData(); body.append('file', file)
-          await api(`/assignments/${assignment.id}/files`, { method: 'POST', body })
-        } catch (error) { failed.push(`${assignment.title}：${file.name}（${error.message}）`) }
+          const body = new FormData(); body.append('file', pending.file)
+          await api(`/assignments/${assignment.id}/files?material_type=${pending.materialType}`, { method: 'POST', body })
+        } catch (error) { failed.push(`${assignment.title}：${pending.file.name}（${error.message}）`) }
       }
     }
     if (!failed.length && publishRequested) await Promise.all(created.items.map(item => api(`/assignments/${item.id}/publish`, { method: 'POST' })))
     pendingAssignmentFiles.value = []; modals.assignment = false; await session.refreshClasses(classId.value); await loadView()
-    if (failed.length) message.warning(`草稿已保留，${failed.length} 个附件上传失败，可在作业详情中重试后发布`)
+    if (failed.length) message.warning(`草稿已保留，${failed.length} 个作业资料上传失败，可在作业详情中重试后发布`)
     else message.success(publishRequested ? `已向 ${count} 个教学班发布作业` : `已为 ${count} 个教学班保存草稿`)
   } catch (error) { message.error(error.message) }
 }
@@ -1161,14 +1213,25 @@ provide(shellContextKey, {
     </a-drawer>
     <a-modal v-model:open="modals.assignment" :title="assignmentForm.id ? '编辑作业' : '新建作业'" :footer="null" width="720px">
       <a-form layout="vertical">
-        <a-form-item v-if="!assignmentForm.id" label="教学班" required><a-select v-model:value="assignmentForm.class_ids" mode="multiple" placeholder="选择一个或多个教学班" :options="classOptions"/></a-form-item>
-        <a-form-item v-else label="教学班" required><a-select :value="assignmentForm.class_ids[0]" placeholder="选择教学班" :options="classOptions" @update:value="assignmentForm.class_ids = [$event]"/></a-form-item>
+        <a-form-item label="教学班" required><a-select v-model:value="assignmentForm.class_ids" mode="multiple" placeholder="选择一个或多个教学班" :options="classOptions"/></a-form-item>
         <a-form-item label="标题" required><a-input v-model:value="assignmentForm.title"/></a-form-item>
         <a-form-item label="提交类型" :help="assignmentForm.has_submissions ? '已有提交，不能修改提交类型' : ''"><a-segmented v-model:value="assignmentForm.submitter_type" :disabled="assignmentForm.has_submissions||assignmentForm.auto_review_enabled" :options="[{label:'个人作业',value:'INDIVIDUAL'},{label:'小组作业',value:'TEAM'}]"/></a-form-item>
         <a-form-item label="开始时间"><a-input v-model:value="assignmentForm.starts_at" type="datetime-local"/></a-form-item>
         <a-form-item label="截止时间" required><a-input v-model:value="assignmentForm.due_at" type="datetime-local"/></a-form-item>
         <a-form-item label="说明" required><div class="editor-shell"><div v-if="descriptionEditor" class="editor-toolbar"><a-tooltip title="二级标题"><a-button size="small" :type="descriptionEditor.isActive('heading',{level:2})?'primary':'default'" @click="descriptionEditor.chain().focus().toggleHeading({level:2}).run()">H2</a-button></a-tooltip><a-tooltip title="粗体"><a-button size="small" :type="descriptionEditor.isActive('bold')?'primary':'default'" @click="descriptionEditor.chain().focus().toggleBold().run()"><BoldOutlined/></a-button></a-tooltip><a-tooltip title="无序列表"><a-button size="small" @click="descriptionEditor.chain().focus().toggleBulletList().run()"><UnorderedListOutlined/></a-button></a-tooltip><a-tooltip title="有序列表"><a-button size="small" @click="descriptionEditor.chain().focus().toggleOrderedList().run()"><OrderedListOutlined/></a-button></a-tooltip><a-tooltip title="链接"><a-button size="small" @click="setDescriptionLink"><LinkOutlined/></a-button></a-tooltip><a-tooltip title="代码块"><a-button size="small" @click="descriptionEditor.chain().focus().toggleCodeBlock().run()"><CodeOutlined/></a-button></a-tooltip></div><EditorContent :editor="descriptionEditor"/></div></a-form-item>
-        <a-form-item label="作业附件"><AssignmentMaterials v-if="assignmentForm.id&&assignmentAttachments.length" :files="assignmentAttachments" can-delete can-download :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials"/><a-upload :before-upload="queueAssignmentAttachment" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.pptx,.xlsx,.zip,.rar,.7z"><a-button><UploadOutlined/> 选择附件</a-button></a-upload><div v-for="(file,index) in pendingAssignmentFiles" :key="file.uid||`${file.name}-${index}`" class="uploaded-file"><span>{{file.name}}</span><a-button danger type="link" @click="removePendingAssignmentAttachment(index)">移除</a-button></div></a-form-item>
+        <a-form-item label="作业资料">
+          <AssignmentMaterials v-if="assignmentForm.id&&assignmentAttachments.length" :files="assignmentAttachments" can-delete can-download :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials"/>
+          <div class="assignment-material-upload-actions">
+            <a-upload v-for="option in materialTypeOptions" :key="option.value" :before-upload="file => queueAssignmentAttachment(file, option.value)" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.pptx,.xlsx,.zip,.rar,.7z">
+              <a-button><UploadOutlined/> 选择{{option.value==='ATTACHMENT'?'附件':option.label}}</a-button>
+            </a-upload>
+          </div>
+          <div v-for="(pending,index) in pendingAssignmentFiles" :key="pending.file.uid||`${pending.file.name}-${index}`" class="uploaded-file assignment-material-pending">
+            <span class="assignment-material-pending-name">{{pending.file.name}}</span>
+            <a-tag :color="materialTypeOption(pending.materialType).color">{{materialTypeOption(pending.materialType).label}}</a-tag>
+            <a-button danger type="link" @click="removePendingAssignmentAttachment(index)">移除</a-button>
+          </div>
+        </a-form-item>
         <a-checkbox v-model:checked="assignmentForm.allow_late">允许迟交并标记</a-checkbox>
         <div class="modal-actions"><a-button @click="modals.assignment=false">取消</a-button><a-button @click="createAssignment(false)">{{assignmentForm.id?'保存修改':'保存草稿'}}</a-button><a-button type="primary" @click="createAssignment(true)">{{assignmentForm.id?'保存并再次发布':'发布'}}</a-button></div>
       </a-form>
