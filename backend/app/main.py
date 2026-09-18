@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio, base64, binascii, csv, hashlib, html, io, json, mimetypes, os, re, secrets
+import asyncio, csv, hashlib, html, io, json, mimetypes, os, re, secrets
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
@@ -128,32 +128,6 @@ def render_rich_file(data: bytes, suffix: str) -> tuple[str, str]:
         source = re.sub(r"(?m)^(\s*[-*]\s+)\[([ xX])\]\s+", lambda match: f'{match.group(1)}<input type="checkbox" disabled{" checked" if match.group(2).lower() == "x" else ""}> ', source)
         source = markdown.markdown(source, extensions=["fenced_code", "tables", "sane_lists"])
     return clean_file_html(source), hashlib.sha256(data).hexdigest()
-
-
-EMBEDDED_IMAGE_RE = re.compile(r"data:image/(png|jpe?g|gif|webp);base64,([A-Za-z0-9+/]+=*)", re.IGNORECASE)
-
-
-def extract_markdown_images(data: bytes, aid: UUID, fid: UUID, base_url: str) -> bytes:
-    """Pull inline base64 images out of an uploaded .md file into their own OSS
-    objects, replacing each data URI with a URL. Keeps the stored markdown
-    small instead of shipping the same image bytes on every preview/download."""
-    try:
-        text = data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return data
-
-    def replace(match: re.Match) -> str:
-        mime, payload = match.group(1).lower(), match.group(2)
-        ext = "jpg" if mime in {"jpg", "jpeg"} else mime
-        try:
-            image_bytes = base64.b64decode(payload, validate=True)
-        except (binascii.Error, ValueError):
-            return match.group(0)
-        name = f"{uuid4().hex}.{ext}"
-        storage.put_bytes(f"{aid}/{fid.hex}/images/{name}", image_bytes)
-        return f"{base_url}api/v1/files/{fid}/images/{name}"
-
-    return EMBEDDED_IMAGE_RE.sub(replace, text).encode("utf-8")
 
 
 def content_disposition(filename: str, disposition: str = "attachment") -> str:
@@ -1218,7 +1192,7 @@ def delete_assignment(aid: UUID, user: CsrfUser, db: Db):
     teacher(user); assignment = db.scalar(select(Assignment).where(Assignment.id == aid).with_for_update())
     if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, assignment.class_id)
-    files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid)).all()
+    keys = [item.storage_path for item in db.scalars(select(FileObject).where(FileObject.assignment_id == aid)).all()]
     title = assignment.title
     audit(db, user, "ASSIGNMENT_DELETED", "assignment", str(aid), {"title": title})
     submission_ids = select(Submission.id).where(Submission.assignment_id == aid)
@@ -1240,9 +1214,8 @@ def delete_assignment(aid: UUID, user: CsrfUser, db: Db):
     db.execute(delete(FileObject).where(FileObject.assignment_id == aid))
     db.delete(assignment)
     db.commit()
-    for item in files:
-        storage.delete_object(item.storage_path)
-        storage.delete_prefix(f"{aid}/{item.id.hex}/images/")
+    for key in keys:
+        storage.delete_object(key)
     return Response(status_code=204)
 
 
@@ -1252,7 +1225,7 @@ def own_submission(db: Session, a: Assignment, user: User):
 
 
 @app.post("/api/v1/assignments/{aid}/files", status_code=201)
-def upload(aid: UUID, request: Request, user: CsrfUser, db: Db, file: UploadFile = File(...), purpose: Literal["ATTACHMENT", "REVIEW_CRITERIA"] | None = Query(None), material_type: Literal["TASK", "ATTACHMENT", "CRITERIA"] | None = Query(None)):
+def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purpose: Literal["ATTACHMENT", "REVIEW_CRITERIA"] | None = Query(None), material_type: Literal["TASK", "ATTACHMENT", "CRITERIA"] | None = Query(None)):
     a = db.get(Assignment, aid)
     if not a: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, a.class_id)
@@ -1294,10 +1267,6 @@ def upload(aid: UUID, request: Request, user: CsrfUser, db: Db, file: UploadFile
                     raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空且不得超过 100 MB")
                 output.write(chunk)
         if not size: raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空")
-        if suffix == ".md":
-            rewritten = extract_markdown_images(temporary.read_bytes(), aid, fid, str(request.base_url))
-            temporary.write_bytes(rewritten)
-            size = len(rewritten)
         storage.put_object(relative, temporary)
     finally:
         file.file.close()
@@ -1392,9 +1361,8 @@ def delete_file(fid: UUID, user: CsrfUser, db: Db):
         file.active = False
         db.commit()
         return Response(status_code=204)
-    key, fid_hex, aid = file.storage_path, file.id.hex, file.assignment_id; db.delete(file); db.commit()
+    key = file.storage_path; db.delete(file); db.commit()
     storage.delete_object(key)
-    storage.delete_prefix(f"{aid}/{fid_hex}/images/")
     return Response(status_code=204)
 
 
@@ -1462,16 +1430,15 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
     s.status = "SUBMITTED"
     for f in files: db.add(VersionFile(version_id=v.id, file_id=f.id))
     db.flush()
-    stale_files = []
+    stale_keys = []
     inactive = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == False, file_scope)).all()  # noqa: E712
     for file in inactive:
         if not db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == file.id).limit(1)):
-            stale_files.append(file)
+            stale_keys.append(file.storage_path)
             db.delete(file)
     audit(db, user, "SUBMISSION_CREATED", "submission", str(s.id)); db.commit()
-    for file in stale_files:
-        storage.delete_object(file.storage_path)
-        storage.delete_prefix(f"{aid}/{file.id.hex}/images/")
+    for key in stale_keys:
+        storage.delete_object(key)
     return {"id": str(s.id), "submitted_at": v.submitted_at, "is_late": v.is_late}
 
 
@@ -1867,18 +1834,6 @@ def download(fid: UUID, user: CurrentUser, db: Db):
     except NoSuchKey:
         raise ApiError(404, "FILE_MISSING", "文件存储不可用")
     return StreamingResponse(stream, media_type=f.detected_mime, headers={"Content-Disposition": content_disposition(f.original_name)})
-
-
-@app.get("/api/v1/files/{fid}/images/{name}")
-def download_embedded_image(fid: UUID, name: str, user: CurrentUser, db: Db):
-    file = require_file_access(db, user, fid)
-    if not re.fullmatch(r"[0-9a-f]{32}\.(png|jpe?g|gif|webp)", name):
-        raise ApiError(404, "FILE_NOT_FOUND", "图片不存在")
-    try:
-        stream = storage.get_object_stream(f"{file.assignment_id}/{fid.hex}/images/{name}")
-    except NoSuchKey:
-        raise ApiError(404, "FILE_MISSING", "图片不存在")
-    return StreamingResponse(stream, media_type=mimetypes.guess_type(name)[0] or "application/octet-stream")
 
 
 @app.post("/api/v1/review-campaigns", status_code=201)
