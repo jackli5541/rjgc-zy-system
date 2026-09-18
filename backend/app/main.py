@@ -422,6 +422,7 @@ class CoefficientIn(BaseModel):
 class GradePublishIn(BaseModel):
     reason: str = Field("", max_length=500)
 class AssignmentUpdateIn(BaseModel):
+    class_id: UUID | None = None
     title: str | None = Field(None, min_length=2, max_length=100); description: str | None = Field(None, min_length=1, max_length=5000); starts_at: datetime | None = None; due_at: datetime | None = None; allow_late: bool | None = None; submitter_type: Literal["TEAM", "INDIVIDUAL"] | None = None; version: int
     auto_review_enabled: bool | None = None
     auto_review_mode: Literal["TEAM"] | None = None
@@ -930,6 +931,21 @@ def apply_team(tid: UUID, user: CsrfUser, db: Db):
     req = TeamRequest(class_id=x.class_id, team_id=tid, applicant_id=user.id); db.add(req); notify(db, x.leader_id, "TEAM_APPLICATION", f"{user.display_name} 申请加入小组"); db.commit(); return {"id": str(req.id), "status": req.status}
 
 
+@app.post("/api/v1/teams/{tid}/close-recruitment")
+def close_team_recruitment(tid: UUID, user: CsrfUser, db: Db):
+    team = db.scalar(select(Team).where(Team.id == tid).with_for_update())
+    if not team or team.status != "ACTIVE": raise ApiError(404, "TEAM_NOT_FOUND", "小组不存在")
+    if user.role != "STUDENT" or team.leader_id != user.id:
+        raise ApiError(403, "TEAM_LEADER_REQUIRED", "仅组长可截止招募")
+    require_writable_class(db, user, team.class_id)
+    if team.open_recruitment:
+        team.open_recruitment = False
+        team.version += 1
+        audit(db, user, "TEAM_RECRUITMENT_CLOSED", "team", str(tid))
+    db.commit()
+    return team_json(db, team, user)
+
+
 @app.get("/api/v1/team-requests")
 def requests(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id); q = select(TeamRequest, Team, User).join(Team, Team.id == TeamRequest.team_id).join(User, User.id == TeamRequest.applicant_id).where(TeamRequest.class_id == class_id)
@@ -1078,6 +1094,12 @@ def update_assignment(aid: UUID, data: AssignmentUpdateIn, user: CsrfUser, db: D
     review_fields = {"auto_review_enabled", "auto_review_mode", "auto_review_criteria_text", "auto_review_due_at"}
     changing_review_config = bool(review_fields & data.model_fields_set)
     campaign = assignment_review_campaign(db, aid)
+    previous_class_id = assignment.class_id
+    changing_class = data.class_id is not None and data.class_id != previous_class_id
+    if changing_class:
+        writable_teacher_classes(db, user, [data.class_id])
+        if has_submissions or campaign:
+            raise ApiError(409, "ASSIGNMENT_CLASS_LOCKED", "已有提交记录或互评活动，不能修改教学班")
     if changing_review_config and (assignment.status == "CLOSED" or assignment.due_at <= now() or campaign):
         raise ApiError(409, "AUTO_REVIEW_CONFIG_LOCKED", "作业已截止或互评活动已创建，不能修改互评配置")
 
@@ -1106,7 +1128,14 @@ def update_assignment(aid: UUID, data: AssignmentUpdateIn, user: CsrfUser, db: D
         assignment.auto_review_due_at = auto_review_due_at if auto_review_enabled else None
         assignment.auto_review_status = "PENDING" if auto_review_enabled else None
         assignment.auto_review_error = None
-    assignment.version += 1; audit(db, user, "ASSIGNMENT_UPDATED", "assignment", str(aid)); db.commit(); return assignment_json(assignment)
+    if changing_class:
+        assignment.class_id = data.class_id
+        publish_event(db, class_id=previous_class_id, scopes=realtime_scopes("ASSIGNMENT_UPDATED"), resource_type="assignment", resource_id=str(aid), source_client_id=request_client_id.get())
+        if assignment.status == "PUBLISHED":
+            for member in db.scalars(select(ClassMember).where(ClassMember.class_id == assignment.class_id, ClassMember.status == "ACTIVE")):
+                notify(db, member.user_id, "ASSIGNMENT_PUBLISHED", f"新作业：{assignment.title}")
+    changes = {"previous_class_id": str(previous_class_id), "class_id": str(assignment.class_id)} if changing_class else None
+    assignment.version += 1; audit(db, user, "ASSIGNMENT_UPDATED", "assignment", str(aid), changes); db.commit(); return assignment_json(assignment)
 
 
 @app.post("/api/v1/assignments/{aid}/publish")
