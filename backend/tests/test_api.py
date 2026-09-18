@@ -26,6 +26,79 @@ def login(account: str, password: str, role: str):
     return client, {"X-CSRF-Token": response.json()["csrf_token"]}
 
 
+def test_published_assignment_can_change_class():
+    teacher, headers = login("teacher", "123456", "teacher")
+    first = teacher.post("/api/v1/classes", headers=headers, json={"semester": "班级调整", "name": "原教学班"}).json()
+    second = teacher.post("/api/v1/classes", headers=headers, json={"semester": "班级调整", "name": "新教学班"}).json()
+    assignment = teacher.post("/api/v1/assignments", headers=headers, json={"class_id": first["id"], "title": "已发布作业", "description": "调整教学班", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
+    url = f"/api/v1/assignments/{assignment['id']}"
+    missing = teacher.patch(url, headers=headers, json={"class_id": "00000000-0000-0000-0000-000000000000", "version": assignment["version"]})
+    assert missing.status_code == 404
+    changed = teacher.patch(url, headers=headers, json={"class_id": second["id"], "version": assignment["version"]})
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["class_id"] == second["id"]
+    assert changed.json()["status"] == "PUBLISHED"
+    assert teacher.get(f"/api/v1/assignments?class_id={first['id']}").json()["total"] == 0
+    assert teacher.get(f"/api/v1/assignments?class_id={second['id']}").json()["total"] == 1
+    stale = teacher.patch(url, headers=headers, json={"class_id": first["id"], "version": assignment["version"]})
+    assert stale.status_code == 409
+    teacher.patch(f"/api/v1/classes/{first['id']}", headers=headers, json={"status": "ARCHIVED", "version": first["version"]})
+    archived = teacher.patch(url, headers=headers, json={"class_id": first["id"], "version": changed.json()["version"]})
+    assert archived.status_code == 409
+    assert teacher.get(f"/api/v1/assignments?class_id={second['id']}").json()["items"][0]["version"] == changed.json()["version"]
+
+
+def test_assignment_class_change_preserves_existing_submissions():
+    teacher, headers = login("teacher", "123456", "teacher")
+    first = teacher.post("/api/v1/classes", headers=headers, json={"semester": "班级保护", "name": "原教学班"}).json()
+    second = teacher.post("/api/v1/classes", headers=headers, json={"semester": "班级保护", "name": "新教学班"}).json()
+    member = teacher.post(f"/api/v1/classes/{first['id']}/members", headers=headers, json={"student_no": "20998881", "name": "提交学生"}).json()
+    assignment = teacher.post("/api/v1/assignments", headers=headers, json={"class_id": first["id"], "title": "已有提交作业", "description": "保护提交记录", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
+    with SessionLocal() as db:
+        db.add(Submission(assignment_id=UUID(assignment["id"]), owner_user_id=UUID(member["id"]), status="DRAFT"))
+        db.commit()
+    url = f"/api/v1/assignments/{assignment['id']}"
+    locked = teacher.patch(url, headers=headers, json={"class_id": second["id"], "version": assignment["version"]})
+    assert locked.status_code == 409, locked.text
+    unchanged = teacher.patch(url, headers=headers, json={"class_id": first["id"], "title": "原班正常编辑", "version": assignment["version"]})
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["class_id"] == first["id"]
+
+
+def test_team_leader_can_close_recruitment():
+    teacher, headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=headers, json={"semester": "招募测试", "name": "招募教学班"}).json()
+    students = []
+    for index in range(3):
+        account = f"2099777{index}"
+        teacher.post(f"/api/v1/classes/{course['id']}/members", headers=headers, json={"student_no": account, "name": f"招募学生{index}"})
+        students.append(login(account, account, "student"))
+    leader, leader_headers = students[0]
+    applicant, applicant_headers = students[1]
+    other, other_headers = students[2]
+    team = leader.post("/api/v1/teams", headers=leader_headers, json={"class_id": course["id"], "name": "招募小组"}).json()
+    url = f"/api/v1/teams/{team['id']}/close-recruitment"
+    application = applicant.post(f"/api/v1/teams/{team['id']}/applications", headers=applicant_headers).json()
+    assert other.post(url, headers=other_headers).status_code == 403
+    assert teacher.post(url, headers=headers).status_code == 403
+    assert leader.post(url).status_code == 403
+    closed = leader.post(url, headers=leader_headers)
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["open_recruitment"] is False
+    assert closed.json()["version"] == team["version"] + 1
+    repeated = leader.post(url, headers=leader_headers)
+    assert repeated.json()["version"] == closed.json()["version"]
+    blocked = other.post(f"/api/v1/teams/{team['id']}/applications", headers=other_headers)
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "TEAM_NOT_OPEN"
+    decision = leader.post(f"/api/v1/team-requests/{application['id']}/decision?decision=APPROVED", headers=leader_headers)
+    assert decision.status_code == 200, decision.text
+    detail = leader.get(f"/api/v1/teams/{team['id']}").json()
+    assert detail["member_count"] == 2 and detail["open_recruitment"] is False
+    teacher.patch(f"/api/v1/classes/{course['id']}", headers=headers, json={"status": "ARCHIVED", "version": course["version"]})
+    assert leader.post(url, headers=leader_headers).status_code == 409
+
+
 def test_password_changes_revoke_existing_sessions():
     teacher, teacher_headers = login("teacher", "123456", "teacher")
     second_teacher, _ = login("teacher", "123456", "teacher")
