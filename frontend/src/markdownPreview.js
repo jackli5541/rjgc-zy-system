@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 
-const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024
+const MAX_MARKDOWN_BYTES = 500 * 1024 * 1024
 const SAFE_IMAGE_DATA_URL = /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/=\s]+$/i
 const markdown = new MarkdownIt({ html: true, linkify: true, typographer: false })
 
@@ -44,9 +44,9 @@ export async function loadMarkdownPreview(url) {
   const response = await fetch(url)
   if (!response.ok) throw new Error('Markdown 文件加载失败')
   const announcedSize = Number(response.headers.get('content-length') || 0)
-  if (announcedSize > MAX_MARKDOWN_BYTES) throw new Error('Markdown 文件超过 5 MB，无法在线预览')
+  if (announcedSize > MAX_MARKDOWN_BYTES) throw new Error('Markdown 文件超过 500 MB，无法在线预览')
   const content = await response.blob()
-  if (content.size > MAX_MARKDOWN_BYTES) throw new Error('Markdown 文件超过 5 MB，无法在线预览')
+  if (content.size > MAX_MARKDOWN_BYTES) throw new Error('Markdown 文件超过 500 MB，无法在线预览')
   let source
   try { source = new TextDecoder('utf-8', { fatal: true }).decode(await content.arrayBuffer()) }
   catch (_) { throw new Error('Markdown 文件必须使用 UTF-8 编码') }

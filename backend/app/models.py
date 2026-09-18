@@ -237,6 +237,36 @@ class VersionFile(Base):
     file_id: Mapped[UUID] = mapped_column(ForeignKey("file_objects.id", ondelete="CASCADE"), primary_key=True)
 
 
+class SubmissionWorkspace(Base):
+    __tablename__ = "submission_workspaces"
+    id: Mapped[UUID] = uuid_pk()
+    assignment_id: Mapped[UUID] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True)
+    owner_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    owner_team_id: Mapped[UUID | None] = mapped_column(ForeignKey("teams.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+Index("uq_personal_submission_workspace", SubmissionWorkspace.assignment_id, SubmissionWorkspace.owner_user_id, unique=True, mssql_where=SubmissionWorkspace.owner_user_id.is_not(None))
+Index("uq_team_submission_workspace", SubmissionWorkspace.assignment_id, SubmissionWorkspace.owner_team_id, unique=True, mssql_where=SubmissionWorkspace.owner_team_id.is_not(None))
+
+
+class SubmissionDocument(Base):
+    __tablename__ = "submission_documents"
+    id: Mapped[UUID] = uuid_pk()
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("submission_workspaces.id", ondelete="CASCADE"), index=True)
+    source_file_id: Mapped[UUID | None] = mapped_column(ForeignKey("file_objects.id", ondelete="SET NULL"))
+    name: Mapped[str] = mapped_column(String(255))
+    content_html: Mapped[str] = mapped_column(Text, default="")
+    markdown_content: Mapped[str] = mapped_column(Text, default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_workspace_document_name"),)
+
+
 class SubmissionAssessment(Base):
     __tablename__ = "submission_assessments"
     id: Mapped[UUID] = uuid_pk()

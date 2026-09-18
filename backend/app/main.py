@@ -22,7 +22,7 @@ from starlette.middleware.gzip import GZipMiddleware
 import bleach
 import markdown
 import zipfile
-from oss2.exceptions import NoSuchKey
+from oss2.exceptions import NoSuchKey, OssError
 import tempfile
 from tempfile import TemporaryFile
 from openpyxl import Workbook, load_workbook
@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app.database import SessionLocal, get_db
 from app.grading import final_score, finalize_campaign
-from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionVersion, SubmissionWorkspace, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 from app import storage
@@ -118,12 +118,10 @@ def scope_preview_css(value: str) -> str:
 
 
 def render_rich_file(data: bytes, suffix: str) -> tuple[str, str]:
-    if len(data) > 5 * 1024 * 1024:
-        raise ApiError(413, "RICH_TEXT_PREVIEW_TOO_LARGE", "Markdown 或 HTML 文件超过 5 MB，请下载原文件查看")
-    try:
-        source = data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise ApiError(422, "RICH_TEXT_ENCODING_INVALID", "Markdown 或 HTML 文件必须使用 UTF-8 编码")
+    if len(data) > settings.max_file_size_bytes:
+        raise ApiError(413, "RICH_TEXT_PREVIEW_TOO_LARGE", "Markdown 或 HTML 文件超过 500 MB，请下载原文件查看")
+    try: source = decode_text_file(data)
+    except UnicodeDecodeError: raise ApiError(422, "RICH_TEXT_ENCODING_INVALID", "Markdown 或 HTML 文件编码无法识别")
     if suffix.lower() == ".md":
         source = re.sub(r"(?m)^(\s*[-*]\s+)\[([ xX])\]\s+", lambda match: f'{match.group(1)}<input type="checkbox" disabled{" checked" if match.group(2).lower() == "x" else ""}> ', source)
         source = markdown.markdown(source, extensions=["fenced_code", "tables", "sane_lists"])
@@ -135,6 +133,13 @@ def content_disposition(filename: str, disposition: str = "attachment") -> str:
     if quoted != filename:
         return f"{disposition}; filename*=utf-8''{quoted}"
     return f'{disposition}; filename="{filename}"'
+
+
+def decode_text_file(payload: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-16", "gb18030"):
+        try: return payload.decode(encoding)
+        except UnicodeDecodeError: continue
+    raise UnicodeDecodeError("unknown", payload, 0, len(payload), "unsupported text encoding")
 
 
 def render_description(value: str) -> str:
@@ -428,6 +433,12 @@ class AssignmentUpdateIn(BaseModel):
     auto_review_mode: Literal["TEAM"] | None = None
     auto_review_criteria_text: str | None = Field(None, max_length=5000)
     auto_review_due_at: datetime | None = None
+class SubmissionDocumentIn(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+class SubmissionDocumentUpdateIn(BaseModel):
+    revision: int = Field(ge=1)
+    content_html: str = Field(max_length=settings.max_file_size_bytes + 1024 * 1024)
+    markdown_content: str = Field(max_length=settings.max_file_size_bytes)
 class ReasonIn(BaseModel): reason: str = Field(min_length=2, max_length=500)
 class PasswordIn(BaseModel): current_password: str; new_password: str = Field(min_length=8, max_length=128)
 class ClassJoinIn(BaseModel): invite_code: str = Field(min_length=4, max_length=12)
@@ -1237,6 +1248,155 @@ def own_submission(db: Session, a: Assignment, user: User):
     _, x = require_team(db, a.class_id, user); return db.scalar(select(Submission).where(Submission.assignment_id == a.id, Submission.owner_team_id == x.id)), x
 
 
+def workspace_scope(db: Session, assignment: Assignment, user: User) -> tuple[UUID | None, UUID | None, Team | None]:
+    if user.role != "STUDENT": raise ApiError(403, "STUDENT_REQUIRED", "仅学生可编辑作业草稿")
+    require_writable_class(db, user, assignment.class_id)
+    if assignment.status != "PUBLISHED": raise ApiError(409, "ASSIGNMENT_NOT_WRITABLE", "作业当前不可编辑")
+    if assignment.starts_at and assignment.starts_at > now(): raise ApiError(409, "ASSIGNMENT_NOT_STARTED", "作业尚未开始")
+    if assignment.due_at < now() and not assignment.allow_late: raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止，不能继续编辑")
+    if assignment.submitter_type == "INDIVIDUAL": return user.id, None, None
+    _, team = require_team(db, assignment.class_id, user)
+    return None, team.id, team
+
+
+def document_is_criteria(db: Session, item: SubmissionDocument) -> bool:
+    source = db.get(FileObject, item.source_file_id) if item.source_file_id else None
+    return bool(source and source.material_type == "CRITERIA")
+
+
+def document_json(db: Session, item: SubmissionDocument, locked: bool = False) -> dict:
+    editor = db.get(User, item.updated_by)
+    return {"id": str(item.id), "name": item.name, "content_html": "" if locked else item.content_html, "markdown_content": "" if locked else item.markdown_content, "sort_order": item.sort_order, "revision": item.revision, "updated_at": item.updated_at, "updated_by": editor.display_name if editor else "", "locked": locked}
+
+
+def workspace_json(db: Session, workspace: SubmissionWorkspace, user: User) -> dict:
+    documents = db.scalars(select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id).order_by(SubmissionDocument.sort_order, SubmissionDocument.created_at)).all()
+    submission = db.scalar(select(Submission).where(Submission.assignment_id == workspace.assignment_id, Submission.owner_user_id == workspace.owner_user_id)) if workspace.owner_user_id else db.scalar(select(Submission).where(Submission.assignment_id == workspace.assignment_id, Submission.owner_team_id == workspace.owner_team_id))
+    criteria_locked = not submission or submission.status != "SUBMITTED"
+    return {"id": str(workspace.id), "documents": [document_json(db, item, criteria_locked and document_is_criteria(db, item)) for item in documents], "updated_at": workspace.updated_at}
+
+
+def repair_corrupted_workspace(db: Session, workspace: SubmissionWorkspace, user: User) -> bool:
+    repaired = False
+    documents = db.scalars(select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id, SubmissionDocument.source_file_id.is_not(None))).all()
+    for document in documents:
+        source_file = db.get(FileObject, document.source_file_id)
+        if not source_file: continue
+        try: source = decode_text_file(storage.get_object_bytes(source_file.storage_path))
+        except (OssError, UnicodeDecodeError):
+            continue
+        corrupted_text = "???" in document.name or document.markdown_content.count("?") >= 5
+        restored = source if corrupted_text else restore_embedded_images(source, document.markdown_content)
+        if restored != document.markdown_content or document.name != Path(source_file.original_name).name:
+            document.name = Path(source_file.original_name).name
+            document.markdown_content = restored
+            document.content_html = clean_file_html(markdown.markdown(restored, extensions=["fenced_code", "tables", "sane_lists"]))
+            document.revision += 1
+            document.updated_by = user.id
+            repaired = True
+    return repaired
+
+
+def remove_criteria_workspace_documents(db: Session, workspace: SubmissionWorkspace) -> bool:
+    documents = db.scalars(select(SubmissionDocument).join(FileObject, FileObject.id == SubmissionDocument.source_file_id).where(SubmissionDocument.workspace_id == workspace.id, FileObject.material_type == "CRITERIA")).all()
+    for document in documents:
+        db.delete(document)
+    return bool(documents)
+
+
+def restore_embedded_images(template: str, draft: str) -> str:
+    image_pattern = re.compile(r"!\[[^\]]*\]\(data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+\)", re.IGNORECASE)
+    result = draft
+    for match in image_pattern.finditer(template):
+        image_markdown = match.group(0)
+        if image_markdown in result: continue
+        prefix_lines = [line for line in template[:match.start()].splitlines() if line.strip()]
+        anchor = next((line for line in reversed(prefix_lines) if line in result), None)
+        if anchor:
+            position = result.find(anchor) + len(anchor)
+            result = f"{result[:position]}\n\n{image_markdown}{result[position:]}"
+        else:
+            result = f"{image_markdown}\n\n{result}"
+    return result
+
+
+def require_workspace_document(db: Session, aid: UUID, document_id: UUID, user: User) -> tuple[Assignment, SubmissionWorkspace, SubmissionDocument, Team | None]:
+    assignment = db.get(Assignment, aid)
+    if not assignment: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    owner_user_id, owner_team_id, team = workspace_scope(db, assignment, user)
+    workspace = db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_user_id == owner_user_id)) if owner_user_id else db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_team_id == owner_team_id))
+    document = db.get(SubmissionDocument, document_id)
+    if not workspace or not document or document.workspace_id != workspace.id: raise ApiError(404, "DOCUMENT_NOT_FOUND", "在线文档不存在")
+    if document_is_criteria(db, document): raise ApiError(403, "CRITERIA_READ_ONLY", "判定标准仅供提交后查看，不能编辑")
+    return assignment, workspace, document, team
+
+
+@app.post("/api/v1/assignments/{aid}/workspace")
+def initialize_workspace(aid: UUID, user: CsrfUser, db: Db):
+    assignment = db.get(Assignment, aid)
+    if not assignment: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    owner_user_id, owner_team_id, _ = workspace_scope(db, assignment, user)
+    workspace = db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_user_id == owner_user_id)) if owner_user_id else db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_team_id == owner_team_id))
+    if workspace:
+        repaired = repair_corrupted_workspace(db, workspace, user)
+        removed_criteria = remove_criteria_workspace_documents(db, workspace)
+        if repaired or removed_criteria: db.commit()
+        return workspace_json(db, workspace, user)
+    workspace = SubmissionWorkspace(assignment_id=aid, owner_user_id=owner_user_id, owner_team_id=owner_team_id)
+    db.add(workspace); db.flush()
+    templates = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT", FileObject.active == True, or_(FileObject.material_type.is_(None), FileObject.material_type != "CRITERIA"), FileObject.original_name.like("%.md")).order_by(FileObject.created_at)).all()  # noqa: E712
+    used_names = set()
+    for index, template in enumerate(templates):
+        name = Path(template.original_name).name
+        if name.casefold() in used_names:
+            name = f"{Path(name).stem}-{index + 1}.md"
+        used_names.add(name.casefold())
+        try: source = decode_text_file(storage.get_object_bytes(template.storage_path))
+        except (OssError, UnicodeDecodeError):
+            source = ""
+        rendered = markdown.markdown(source, extensions=["fenced_code", "tables", "sane_lists"])
+        db.add(SubmissionDocument(workspace_id=workspace.id, source_file_id=template.id, name=name, content_html=clean_file_html(rendered), markdown_content=source, sort_order=index, updated_by=user.id))
+    audit(db, user, "SUBMISSION_WORKSPACE_CREATED", "submission_workspace", str(workspace.id)); db.commit()
+    return workspace_json(db, workspace, user)
+
+
+@app.post("/api/v1/assignments/{aid}/workspace/documents", status_code=201)
+def create_workspace_document(aid: UUID, data: SubmissionDocumentIn, user: CsrfUser, db: Db):
+    assignment = db.get(Assignment, aid)
+    if not assignment: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    owner_user_id, owner_team_id, _ = workspace_scope(db, assignment, user)
+    workspace = db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_user_id == owner_user_id)) if owner_user_id else db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_team_id == owner_team_id))
+    if not workspace: raise ApiError(409, "WORKSPACE_REQUIRED", "请先打开在线作业工作区")
+    name = Path(data.name.strip()).name
+    if not name.lower().endswith(".md"): name += ".md"
+    if db.scalar(select(SubmissionDocument.id).where(SubmissionDocument.workspace_id == workspace.id, func.lower(SubmissionDocument.name) == name.lower())): raise ApiError(409, "DOCUMENT_NAME_EXISTS", "同名文档已经存在")
+    order = db.scalar(select(func.max(SubmissionDocument.sort_order)).where(SubmissionDocument.workspace_id == workspace.id))
+    item = SubmissionDocument(workspace_id=workspace.id, name=name, content_html="<p></p>", markdown_content="", sort_order=(order if order is not None else -1) + 1, updated_by=user.id)
+    db.add(item); db.commit(); return document_json(db, item)
+
+
+@app.put("/api/v1/assignments/{aid}/workspace/documents/{document_id}")
+def update_workspace_document(aid: UUID, document_id: UUID, data: SubmissionDocumentUpdateIn, user: CsrfUser, db: Db):
+    assignment, workspace, document, _ = require_workspace_document(db, aid, document_id, user)
+    locked = db.scalar(select(SubmissionDocument).where(SubmissionDocument.id == document.id).with_for_update())
+    if locked.revision != data.revision:
+        raise ApiError(409, "DOCUMENT_VERSION_CONFLICT", f"{db.get(User, locked.updated_by).display_name} 已更新此文档，请刷新后继续", {"document": document_json(db, locked)})
+    locked.content_html = clean_file_html(data.content_html)
+    locked.markdown_content = data.markdown_content.replace("\x00", "")
+    locked.revision += 1; locked.updated_by = user.id; workspace.updated_at = now()
+    publish_event(db, class_id=assignment.class_id, scopes=["workspace"], resource_type="submission_document", resource_id=document.id, roles=["STUDENT"], source_client_id=request_client_id.get())
+    db.commit(); return document_json(db, locked)
+
+
+@app.delete("/api/v1/assignments/{aid}/workspace/documents/{document_id}", status_code=204)
+def delete_workspace_document(aid: UUID, document_id: UUID, user: CsrfUser, db: Db):
+    _, workspace, document, _ = require_workspace_document(db, aid, document_id, user)
+    if document.source_file_id: raise ApiError(403, "SOURCE_DOCUMENT_DELETE_FORBIDDEN", "教师提供的作业文档不能删除")
+    count = db.scalar(select(func.count()).select_from(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id)) or 0
+    if count <= 1: raise ApiError(409, "LAST_DOCUMENT_REQUIRED", "作业至少需要保留一份 Markdown 文档")
+    db.delete(document); db.commit(); return Response(status_code=204)
+
+
 @app.post("/api/v1/assignments/{aid}/files", status_code=201)
 def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purpose: Literal["ATTACHMENT", "REVIEW_CRITERIA"] | None = Query(None), material_type: Literal["TASK", "ATTACHMENT", "CRITERIA"] | None = Query(None)):
     a = db.get(Assignment, aid)
@@ -1253,6 +1413,8 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
         if a.starts_at and a.starts_at > now(): raise ApiError(409, "ASSIGNMENT_NOT_STARTED", "作业尚未开始")
         _, team = require_team(db, a.class_id, user)
     suffix = Path(file.filename or "file").suffix.lower()
+    if selected_material_type == "CRITERIA" and suffix != ".md":
+        raise ApiError(422, "CRITERIA_FILE_TYPE_INVALID", "判定标准仅支持 Markdown 文档")
     supported = PREVIEWABLE_FILE_SUFFIXES if user.role == "STUDENT" else PREVIEWABLE_FILE_SUFFIXES | DOWNLOAD_ONLY_FILE_SUFFIXES
     if suffix not in supported:
         message = "学生提交仅支持可在线预览的 Markdown、HTML、PDF 和常见图片" if user.role == "STUDENT" else "仅支持 Markdown、HTML、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包"
@@ -1277,7 +1439,7 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
             while chunk := file.file.read(1024 * 1024):
                 size += len(chunk)
                 if size > settings.max_file_size_bytes:
-                    raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空且不得超过 100 MB")
+                    raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空且不得超过 500 MB")
                 output.write(chunk)
         if not size: raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空")
         storage.put_object(relative, temporary)
@@ -1298,7 +1460,14 @@ def assignment_files(aid: UUID, user: CurrentUser, db: Db):
     if not assignment: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_class(db, user, assignment.class_id)
     team = require_team(db, assignment.class_id, user)[1] if user.role == "STUDENT" else None
-    materials = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT").order_by(FileObject.created_at)).all()
+    submitted = False
+    if user.role == "STUDENT":
+        own, _ = own_submission(db, assignment, user)
+        submitted = bool(own and own.status == "SUBMITTED")
+    material_query = select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT")
+    if user.role == "STUDENT" and not submitted:
+        material_query = material_query.where(or_(FileObject.material_type.is_(None), FileObject.material_type != "CRITERIA"))
+    materials = db.scalars(material_query.order_by(FileObject.created_at)).all()
     criteria = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "REVIEW_CRITERIA").order_by(FileObject.created_at)).all()
     drafts = []
     if user.role == "STUDENT":
@@ -1326,6 +1495,10 @@ def download_assignment_materials(aid: UUID, user: CurrentUser, db: Db, file_ids
     ).order_by(FileObject.created_at)).all()
     if len(files) != len(set(file_ids)):
         raise ApiError(422, "MATERIAL_FILE_INVALID", "部分文件不存在或不属于该作业资料")
+    if user.role == "STUDENT" and any(file.material_type == "CRITERIA" for file in files):
+        submission, _ = own_submission(db, assignment, user)
+        if not submission or submission.status != "SUBMITTED":
+            raise ApiError(403, "CRITERIA_REQUIRES_SUBMISSION", "提交作业后才能查看判定标准")
     archive = TemporaryFile()
     try:
         used_names = set()
@@ -1386,6 +1559,8 @@ def retype_file(fid: UUID, body: MaterialTypeIn, user: CsrfUser, db: Db):
     require_writable_class(db, user, assignment.class_id)
     if file.owner_id != user.id: raise ApiError(403, "FILE_FORBIDDEN", "只能修改自己上传的文件")
     if file.purpose != "ATTACHMENT": raise ApiError(422, "FILE_TYPE_NOT_APPLICABLE", "只有作业资料附件可以分类")
+    if body.material_type == "CRITERIA" and Path(file.original_name).suffix.lower() != ".md":
+        raise ApiError(422, "CRITERIA_FILE_TYPE_INVALID", "判定标准仅支持 Markdown 文档")
     file.material_type = body.material_type
     db.commit()
     return file_json(file, user.display_name)
@@ -1420,6 +1595,19 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
         if team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "小组作业仅组长可正式提交")
     if a.due_at < now() and not a.allow_late: raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止且不允许迟交")
     file_scope = FileObject.owner_id == user.id if not team else FileObject.team_id == team.id
+    workspace = db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_user_id == user.id)) if not team else db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_team_id == team.id))
+    if workspace:
+        documents = [document for document in db.scalars(select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id).order_by(SubmissionDocument.sort_order, SubmissionDocument.created_at)).all() if not document_is_criteria(db, document)]
+        if not documents: raise ApiError(422, "SUBMISSION_DOCUMENTS_REQUIRED", "在线作业中至少需要一份 Markdown 文档")
+        empty = next((document for document in documents if not document.markdown_content.strip()), None)
+        if empty: raise ApiError(422, "SUBMISSION_DOCUMENT_EMPTY", f"文档 {empty.name} 不能为空")
+        db.execute(FileObject.__table__.update().where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).values(active=False))  # noqa: E712
+        for document in documents:
+            content = document.markdown_content.encode("utf-8")
+            fid = uuid4(); relative = f"{aid}/{fid.hex}.md"
+            storage.put_bytes(relative, content)
+            db.add(FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team.id if team else None, purpose="SUBMISSION", storage_path=relative, original_name=document.name, size_bytes=len(content), detected_mime="text/markdown", preview_status="READY"))
+        db.flush()
     files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).order_by(FileObject.created_at)).all()  # noqa: E712
     if not files: raise ApiError(422, "SUBMISSION_FILES_REQUIRED", "请先上传作业附件")
     if not s: s = Submission(assignment_id=aid, owner_user_id=user.id if not team else None, owner_team_id=team.id if team else None); db.add(s); db.flush()
@@ -1826,6 +2014,9 @@ def require_file_access(db: Session, user: User, fid: UUID) -> FileObject:
         own_membership = membership(db, a.class_id, user.id)
         mine = own_membership[1] if own_membership else None
         if f.purpose in {"ATTACHMENT", "REVIEW_CRITERIA"}: allowed = True
+        if f.purpose == "ATTACHMENT" and f.material_type == "CRITERIA":
+            submission, _ = own_submission(db, a, user)
+            allowed = bool(submission and submission.status == "SUBMITTED")
         elif f.team_id: allowed = bool(mine and f.team_id == mine.id)
         elif not allowed:
             frozen = db.scalar(select(ReviewAssignment.id).join(ReviewCampaign, ReviewCampaign.id == ReviewAssignment.campaign_id).join(VersionFile, VersionFile.version_id == ReviewAssignment.submission_version_id).where(ReviewCampaign.assignment_id == a.id, ReviewAssignment.reviewer_id == user.id, VersionFile.file_id == f.id, ReviewAssignment.status.in_(["PENDING", "COMPLETED"])).limit(1))

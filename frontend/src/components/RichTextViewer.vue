@@ -1,14 +1,45 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import mermaid from 'mermaid'
 
 const props = defineProps({ html: { type: String, default: '' }, annotations: { type: Array, default: () => [] }, editable: Boolean, selectedAnnotationId: { type: String, default: '' } })
 const emit = defineEmits(['selection', 'select'])
 const root = ref(null)
 const highlights = ref([])
 const blockSelector = 'p,h1,h2,h3,h4,li,blockquote,pre,td,th'
+let mermaidRenderVersion = 0
+
+mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' })
+
+async function renderMermaidBlocks() {
+  const version = ++mermaidRenderVersion
+  const blocks = [...(root.value?.querySelectorAll('pre > code.language-mermaid') || [])]
+  await Promise.all(blocks.map(async (code, index) => {
+    const pre = code.parentElement
+    try {
+      const { svg } = await mermaid.render(`mermaid-viewer-${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`, code.textContent || '')
+      if (version !== mermaidRenderVersion || !pre?.isConnected) return
+      pre.classList.add('mermaid-rendered-block')
+      pre.innerHTML = svg
+    } catch (error) {
+      if (version !== mermaidRenderVersion || !pre?.isConnected) return
+      pre.classList.add('mermaid-render-error')
+      pre.textContent = 'Mermaid 图表语法有误'
+    }
+  }))
+}
 
 function assignBlocks() {
   root.value?.querySelectorAll(blockSelector).forEach((element, index) => { element.dataset.annotationBlock = `b${index}` })
+}
+
+function applyMediaDimensions() {
+  root.value?.querySelectorAll('.rich-document-content img').forEach(image => {
+    const width = image.getAttribute('width') || ''
+    const height = image.getAttribute('height') || ''
+    if (/^(?:\d{1,3}%|\d{1,4}px|\d{1,4})$/.test(width)) image.style.width = width
+    if (/^(?:\d{1,4}px|\d{1,4})$/.test(height)) image.style.height = height.endsWith('px') ? height : `${height}px`
+  })
 }
 
 function pointOffset(block, node, offset) {
@@ -57,6 +88,8 @@ function rebuildHighlights() {
 
 async function refresh() {
   await nextTick()
+  applyMediaDimensions()
+  await renderMermaidBlocks()
   assignBlocks()
   rebuildHighlights()
 }
@@ -119,7 +152,7 @@ watch(() => props.html, refresh)
 watch(() => props.annotations, refresh, { deep: true })
 watch(() => props.selectedAnnotationId, focusAnnotation)
 onMounted(() => { refresh(); window.addEventListener('resize', rebuildHighlights) })
-onBeforeUnmount(() => window.removeEventListener('resize', rebuildHighlights))
+onBeforeUnmount(() => { mermaidRenderVersion += 1; window.removeEventListener('resize', rebuildHighlights) })
 </script>
 
 <template>
@@ -137,4 +170,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', rebuildHighlights))
 .rich-annotation-highlight.selected{z-index:3;outline:0}.rich-comment-bubble.selected{z-index:5}
 .rich-annotation-highlight.color-purple{--mark:#8b5cf6;--mark-bg:rgba(139,92,246,.27)}.rich-comment-bubble.color-purple{background:#7c3aed}.rich-comment-bubble.color-purple.selected{background:#6d28d9;outline-color:rgba(139,92,246,.22)}
 .rich-annotation-highlight.mark-comment{pointer-events:none}
+.rich-document :deep(pre.mermaid-rendered-block){display:grid;place-items:center;min-height:160px;padding:20px;overflow:auto;border:1px solid #dce4e7;background:#fbfcfc}.rich-document :deep(pre.mermaid-rendered-block svg){display:block;max-width:100%;height:auto}.rich-document :deep(pre.mermaid-render-error){color:#b34f49;text-align:center}
+.rich-document{width:min(980px,100%);padding:48px 64px 72px;color:#27353d;font-size:15px;line-height:1.8}.rich-document :deep(h1){margin:0 0 26px;color:#182932;font-size:30px;line-height:1.3}.rich-document :deep(h2){margin:34px 0 14px;color:#22363f;font-size:21px;line-height:1.4}.rich-document :deep(p){margin:0 0 14px}.rich-document :deep(blockquote){margin:18px 0;padding:10px 16px;border-left:3px solid #25866f;background:#f3f8f6;color:#53666e}.rich-document :deep(pre){overflow:auto;padding:14px;border-radius:4px;background:#f4f6f8}.rich-document :deep(img){display:block;max-width:100%;margin:22px auto;border:0;border-radius:0}.rich-document :deep(pre.mermaid-rendered-block){min-height:136px;padding:0;border:0;background:transparent}
+@media(max-width:760px){.rich-document{padding:28px 20px}}
 </style>

@@ -61,7 +61,11 @@ export async function api(path, options = {}) {
         return `${label}格式不正确`
       }).join('；')
       : ''
-    throw new Error(validationDetail || data?.message || detail || `请求失败（${response.status}）`)
+    const error = new Error(validationDetail || data?.message || detail || `请求失败（${response.status}）`)
+    error.code = data?.code
+    error.details = data?.details
+    error.status = response.status
+    throw error
   }
   return data
 }

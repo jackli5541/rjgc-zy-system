@@ -18,9 +18,8 @@ class Settings(BaseSettings):
     session_hours: int = 24
     secure_cookies: bool = False
     trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"
-    max_file_size_bytes: int = 100 * 1024 * 1024
+    max_file_size_bytes: int = 500 * 1024 * 1024
     frontend_dist: Path = PROJECT_ROOT / "frontend" / "dist"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
 
 settings = Settings()

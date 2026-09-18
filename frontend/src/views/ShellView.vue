@@ -8,6 +8,7 @@ import StarterKit from '@tiptap/starter-kit'
 import { api, apiClientId, randomUUID } from '../api'
 import FileReviewDrawer from '../components/FileReviewDrawer.vue'
 import AssignmentMaterials from '../components/AssignmentMaterials.vue'
+import OnlineMarkdownWorkspace from '../components/OnlineMarkdownWorkspace.vue'
 import ShellHeader from '../components/ShellHeader.vue'
 import StudentPortfolioDrawer from '../components/StudentPortfolioDrawer.vue'
 import AssignmentsPage from './shell/AssignmentsPage.vue'
@@ -65,6 +66,8 @@ const materialTypeOptions = [{ label: '任务型', value: 'TASK', color: 'blue' 
 const reviewCriteriaFiles = ref([])
 const pendingAssignmentFiles = ref([])
 const draftFiles = ref([])
+const onlineWorkspace = ref(null)
+const onlineWorkspaceData = ref(null)
 const boardFilter = ref('ALL')
 const boardQuery = ref('')
 const boardTeamFilter = ref('ALL')
@@ -168,9 +171,13 @@ const studentUpcomingAssignments = computed(() => {
 })
 const studentPendingReviews = computed(() => campaigns.value.reduce((total, item) => total + Number(item.pending_count || 0), 0))
 const assignmentSubmitted = computed(() => selectedAssignment.value?.submission?.status === 'SUBMITTED')
+const studentCriteriaMaterials = computed(() => assignmentAttachments.value.filter(file => file.material_type === 'CRITERIA'))
 const assignmentBeforeDue = computed(() => Boolean(selectedAssignment.value && new Date(selectedAssignment.value.due_at) > new Date()))
 const assignmentIsUpdate = computed(() => assignmentSubmitted.value && assignmentBeforeDue.value)
-const canManageTeamSubmission = computed(() => selectedAssignment.value?.submitter_type !== 'TEAM' || session.context?.team_membership?.role === 'LEADER')
+const canManageTeamSubmission = computed(() => {
+  if (selectedAssignment.value?.submitter_type !== 'TEAM') return true
+  return session.context?.team_membership?.role === 'LEADER' && currentTeam.value?.is_leader === true
+})
 const teacherSubmissionSummary = computed(() => {
   const board = selectedAssignment.value?.board || []
   const submitted = board.filter(item => item.status === 'SUBMITTED')
@@ -187,6 +194,11 @@ const canSubmitAssignment = computed(() => {
   if (assignment.status !== 'PUBLISHED') return false
   if (!canManageTeamSubmission.value) return false
   return new Date(assignment.due_at) > new Date() || (!assignmentSubmitted.value && assignment.allow_late)
+})
+const canEditAssignment = computed(() => {
+  const assignment = selectedAssignment.value
+  if (!assignment || assignment.status !== 'PUBLISHED') return false
+  return new Date(assignment.due_at) > new Date() || assignment.allow_late
 })
 const selectedReviewCandidate = computed(() => reviewTask.value?.candidates?.find(item => item.user_id === reviewForm.reviewee_id) || null)
 const reviewConfigEditable = computed(() => Boolean(selectedAssignment.value && selectedAssignment.value.status !== 'CLOSED' && new Date(selectedAssignment.value.due_at) > new Date() && !selectedCampaign.value))
@@ -768,9 +780,11 @@ function deleteDraft(file) {
   })
 }
 async function submitAssignment() {
-  if (!draftFiles.value.length) return message.warning('请先上传附件')
+  if (!canManageTeamSubmission.value) return message.warning('小组作业仅组长可以正式提交')
+  if (!await onlineWorkspace.value?.save()) return message.warning('请先解决文档保存问题')
   const updating = assignmentIsUpdate.value
-  Modal.confirm({ title: updating ? '确认更新提交？' : '确认正式提交？', content: `将以当前 ${draftFiles.value.length} 个附件${updating?'覆盖原提交内容':'完成正式提交'}。`, okText: updating ? '确认更新' : '确认提交', cancelText: '继续检查', onOk: async () => action(async () => { await api(`/assignments/${selectedAssignment.value.id}/submission`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: JSON.stringify({}) }); await loadAssignmentDetail(selectedAssignment.value) }, updating ? '提交已更新' : '提交成功') })
+  const count = onlineWorkspaceData.value?.documents?.length || 0
+  Modal.confirm({ title: updating ? '确认更新提交？' : '确认正式提交？', content: `将提交在线工作区中的 ${count} 份 Markdown 文档${updating?'并生成新的提交版本':''}。`, okText: updating ? '确认更新' : '确认提交', cancelText: '继续检查', onOk: async () => action(async () => { await api(`/assignments/${selectedAssignment.value.id}/submission`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: JSON.stringify({}) }); await loadAssignmentDetail(selectedAssignment.value) }, updating ? '提交已更新' : '提交成功') })
 }
 function openSubmissionDetail(record) {
   const targets = (selectedAssignment.value?.board || []).filter(item => item.status === 'SUBMITTED' && item.files?.length)
@@ -1016,6 +1030,7 @@ function handleRealtimeEvent(event) {
   try {
     const payload = JSON.parse(event.data || '{}')
     if (payload.source_client_id && payload.source_client_id === apiClientId) return
+    if ((payload.scopes || []).includes('workspace')) window.dispatchEvent(new CustomEvent('workspace-changed', { detail: { assignmentId: selectedAssignment.value?.id, payload } }))
     scheduleRealtimeRefresh(payload.scopes)
   } catch (_) { scheduleRealtimeRefresh() }
 }
@@ -1110,14 +1125,28 @@ provide(shellContextKey, {
          <a-tooltip v-if="role==='TEACHER'" :open="assignmentDrawerAnimating?false:undefined" :title="assignmentDrawerExpanded?'收回':'展开至全屏'" placement="right"><button type="button" class="assignment-drawer-expand-button" :aria-label="assignmentDrawerExpanded?'收回作业详情':'将作业详情展开至全屏'" @click="toggleAssignmentDrawerExpanded"><RightOutlined v-if="assignmentDrawerExpanded"/><ExpandOutlined v-else/></button></a-tooltip>
          <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag color="blue">{{selectedAssignment.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="closeAssignmentDrawer"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
          <section class="assignment-workspace">
-           <a-tabs :active-key="assignmentDetailTab" :animated="{inkBar:true,tabPane:true}" class="assignment-detail-tabs" @change="changeAssignmentDetailTab">
+           <template v-if="role==='STUDENT'">
+             <div class="student-assignment-content">
+               <header class="student-workspace-intro">
+                 <div><span class="student-workspace-label">作业要求</span><div class="rich-text detail-description" v-html="selectedAssignment.description"></div></div>
+                 <div class="student-workspace-state" :class="{submitted:assignmentSubmitted,closed:!canEditAssignment&&!assignmentSubmitted}"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/><div><strong>{{assignmentSubmitted?'已提交':new Date(selectedAssignment.due_at)<=new Date()&&!selectedAssignment.allow_late?'已截止':'在线编写中'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · 可继续修改`:`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div>
+               </header>
+               <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" :criteria-files="assignmentSubmitted?studentCriteriaMaterials:[]" @ready="onlineWorkspaceData=$event" @preview-criteria="openFilePreview"/>
+               <footer class="student-submit-bar">
+                 <span v-if="selectedAssignment.submitter_type==='TEAM'&&!canManageTeamSubmission">小组成员均可协作编辑，由组长正式提交</span>
+                 <span v-else>{{onlineWorkspaceData?.documents?.length||0}} 份 Markdown 文档将作为一个版本提交</span>
+                 <a-button v-if="canSubmitAssignment" type="primary" :disabled="!onlineWorkspaceData?.documents?.length" @click="submitAssignment">{{assignmentIsUpdate?'更新提交':'提交当前版本'}}</a-button>
+               </footer>
+             </div>
+           </template>
+           <a-tabs v-else :active-key="assignmentDetailTab" :animated="{inkBar:true,tabPane:true}" class="assignment-detail-tabs" @change="changeAssignmentDetailTab">
             <a-tab-pane key="details" :tab="role==='TEACHER'?'详情':'作业详情'">
               <section class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业说明</h2></div>
                 <div class="rich-text detail-description" v-html="selectedAssignment.description"></div>
               </section>
               <section class="assignment-pane">
-                <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-segmented v-if="role==='TEACHER'" v-model:value="uploadMaterialType" size="small" :options="materialTypeOptions"/><a-upload v-if="role==='TEACHER'" :custom-request="uploadMaterialFile" :show-upload-list="false" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
+                <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-segmented v-if="role==='TEACHER'" v-model:value="uploadMaterialType" size="small" :options="materialTypeOptions"/><a-upload v-if="role==='TEACHER'" :custom-request="uploadMaterialFile" :show-upload-list="false" :accept="uploadMaterialType==='CRITERIA'?'.md':undefined" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
                 <a-empty v-if="!assignmentAttachments.length" class="detail-empty" description="暂无作业资料"/>
                 <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" :can-download="role==='TEACHER'" :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials" @retype="retypeMaterial"/>
               </section>
@@ -1140,12 +1169,11 @@ provide(shellContextKey, {
                 </section>
               </template>
               <template v-else>
-              <div class="submission-summary" :class="{submitted:assignmentSubmitted,closed:!canSubmitAssignment&&!assignmentSubmitted}"><span class="submission-summary-icon"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/></span><div><strong>{{assignmentSubmitted?'已提交':!canManageTeamSubmission?'待组长提交':new Date(selectedAssignment.due_at)<=new Date()?'已截止':'待提交'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · ${draftFiles.length} 个附件`:!canManageTeamSubmission?'小组作业仅需组长统一上交':`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div>
-              <section class="assignment-pane submission-files-pane">
-                <div class="assignment-pane-heading"><h2>提交附件</h2><a-upload v-if="canSubmitAssignment" :custom-request="uploadFile" accept=".md,.html,.htm,.pdf,.png,.jpg,.jpeg,.gif,.webp" multiple><a-button><UploadOutlined/> 上传附件</a-button></a-upload></div>
-                <a-empty v-if="!draftFiles.length" class="detail-empty" description="暂无提交附件"/>
-                <div v-else class="assignment-file-list"><div v-for="file in draftFiles" :key="file.id" class="assignment-file-row"><span class="assignment-file-icon"><FileTextOutlined/></span><button type="button" class="file-preview-link" @click="openFilePreview(file,draftFiles)">{{file.name}}<small v-if="file.download_only">（下载查看）</small></button><a-tooltip v-if="canSubmitAssignment" :title="file.submitted?'从待更新附件中移除':'删除附件'"><a-button danger type="text" shape="circle" @click="deleteDraft(file)"><DeleteOutlined/></a-button></a-tooltip></div></div>
-                <div v-if="canSubmitAssignment" class="submission-actions"><a-button type="primary" :disabled="!draftFiles.length" @click="submitAssignment">{{assignmentIsUpdate?'更新提交':'提交'}}</a-button></div>
+              <div class="submission-summary" :class="{submitted:assignmentSubmitted,closed:!canEditAssignment&&!assignmentSubmitted}"><span class="submission-summary-icon"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/></span><div><strong>{{assignmentSubmitted?'已提交':new Date(selectedAssignment.due_at)<=new Date()&&!selectedAssignment.allow_late?'已截止':'在线编写中'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · 可继续编辑并更新提交`:`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div>
+              <section class="assignment-pane online-workspace-pane">
+                <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" @ready="onlineWorkspaceData=$event"/>
+                <div v-if="canSubmitAssignment" class="submission-actions"><a-button type="primary" :disabled="!onlineWorkspaceData?.documents?.length" @click="submitAssignment">{{assignmentIsUpdate?'更新提交':'提交当前版本'}}</a-button></div>
+                <a-alert v-else-if="selectedAssignment.submitter_type==='TEAM'&&canEditAssignment" type="info" show-icon message="小组成员均可协作编辑，由组长正式提交"/>
               </section>
               </template>
             </a-tab-pane>
