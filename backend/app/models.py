@@ -112,7 +112,9 @@ class Team(Base):
     max_members: Mapped[int] = mapped_column(Integer, default=5)
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (UniqueConstraint("class_id", "normalized_name", name="uq_team_name"),)
+
+
+Index("uq_team_name", Team.class_id, Team.normalized_name, unique=True, mssql_where=Team.status == "ACTIVE")
 
 
 class TeamMember(Base):
