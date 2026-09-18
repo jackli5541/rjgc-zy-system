@@ -50,6 +50,13 @@ def object_exists(key: str) -> bool:
     return _bucket_client().object_exists(_object_key(key))
 
 
+def delete_prefix(prefix: str) -> None:
+    bucket = _bucket_client()
+    keys = [item.key for item in oss2.ObjectIterator(bucket, prefix=_object_key(prefix))]
+    if keys:
+        bucket.batch_delete_objects(keys)
+
+
 def bucket_reachable() -> bool:
     _bucket_client().get_bucket_info()
     return True
