@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import { api } from '../api'
+import { api, randomUUID } from '../api'
 import PdfDocumentViewer from './PdfDocumentViewer.vue'
 import RichTextEditor from './RichTextEditor.vue'
 import RichTextViewer from './RichTextViewer.vue'
@@ -202,7 +202,7 @@ function handleSelection(payload) {
 
 function addAnnotation(payload, markType, color, comment = '') {
   if (!props.editable || !payload.fileId) return null
-  const annotation = { id: crypto.randomUUID(), file_id: payload.fileId, kind: payload.kind, mark_type: markType, color, anchor: payload.anchor, comment }
+  const annotation = { id: randomUUID(), file_id: payload.fileId, kind: payload.kind, mark_type: markType, color, anchor: payload.anchor, comment }
   feedback.annotations.push(annotation)
   selectedAnnotationId.value = annotation.id
   return annotation

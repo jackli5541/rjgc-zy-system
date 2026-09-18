@@ -5,7 +5,7 @@ import { message, Modal } from 'ant-design-vue'
 import { ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
-import { api, apiClientId } from '../api'
+import { api, apiClientId, randomUUID } from '../api'
 import FileReviewDrawer from '../components/FileReviewDrawer.vue'
 import AssignmentMaterials from '../components/AssignmentMaterials.vue'
 import ShellHeader from '../components/ShellHeader.vue'
@@ -212,10 +212,7 @@ const menu = computed(() => {
 })
 
 function iso(value) { return value ? new Date(value).toISOString() : null }
-function idempotencyKey() {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('')
-}
+function idempotencyKey() { return randomUUID() }
 function localDateTime(value) { if (!value) return ''; const date = new Date(value); return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) }
 function formatTime(value) { return value ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '-' }
 function assignmentCountdown(item) {
