@@ -9,7 +9,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     database_url: str = "mssql+pyodbc://sa:Coursework_2026!@localhost:1433/coursework?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
     cors_origins: str = "http://localhost:8080,http://localhost:5173"
-    file_root: Path = Path("./data/files")
+    oss_endpoint: str = "https://oss-cn-hangzhou.aliyuncs.com"
+    oss_bucket: str = "se-lab"
+    oss_access_key_id: str = ""
+    oss_access_key_secret: str = ""
+    oss_key_prefix: str = ""
     session_hours: int = 24
     secure_cookies: bool = False
     trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"

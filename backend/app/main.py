@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from ipaddress import ip_address, ip_network
 from typing import Annotated, Literal
+from urllib.parse import quote
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,8 @@ from starlette.middleware.gzip import GZipMiddleware
 import bleach
 import markdown
 import zipfile
+from oss2.exceptions import NoSuchKey
+import tempfile
 from tempfile import TemporaryFile
 from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel, Field
@@ -33,6 +36,7 @@ from app.grading import final_score, finalize_campaign
 from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionVersion, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
+from app import storage
 from app.realtime import hub as realtime_hub, publish_event
 
 @asynccontextmanager
@@ -113,17 +117,24 @@ def scope_preview_css(value: str) -> str:
     return "\n".join(rules)
 
 
-def render_rich_file(path: Path) -> tuple[str, str]:
-    if path.stat().st_size > 5 * 1024 * 1024:
+def render_rich_file(data: bytes, suffix: str) -> tuple[str, str]:
+    if len(data) > 5 * 1024 * 1024:
         raise ApiError(413, "RICH_TEXT_PREVIEW_TOO_LARGE", "Markdown 或 HTML 文件超过 5 MB，请下载原文件查看")
     try:
-        source = path.read_text(encoding="utf-8-sig")
+        source = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         raise ApiError(422, "RICH_TEXT_ENCODING_INVALID", "Markdown 或 HTML 文件必须使用 UTF-8 编码")
-    if path.suffix.lower() == ".md":
+    if suffix.lower() == ".md":
         source = re.sub(r"(?m)^(\s*[-*]\s+)\[([ xX])\]\s+", lambda match: f'{match.group(1)}<input type="checkbox" disabled{" checked" if match.group(2).lower() == "x" else ""}> ', source)
         source = markdown.markdown(source, extensions=["fenced_code", "tables", "sane_lists"])
-    return clean_file_html(source), hashlib.sha256(path.read_bytes()).hexdigest()
+    return clean_file_html(source), hashlib.sha256(data).hexdigest()
+
+
+def content_disposition(filename: str, disposition: str = "attachment") -> str:
+    quoted = quote(filename)
+    if quoted != filename:
+        return f"{disposition}; filename*=utf-8''{quoted}"
+    return f'{disposition}; filename="{filename}"'
 
 
 def render_description(value: str) -> str:
@@ -447,7 +458,7 @@ def ready(response: Response):
     try:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
-        settings.file_root.mkdir(parents=True, exist_ok=True)
+        storage.bucket_reachable()
         return {"status": "ready", "database": "ok", "storage": "ok"}
     except Exception:
         response.status_code = 503; return {"status": "not_ready", "database": "unavailable", "storage": "unknown"}
@@ -1151,7 +1162,7 @@ def delete_assignment(aid: UUID, user: CsrfUser, db: Db):
     teacher(user); assignment = db.scalar(select(Assignment).where(Assignment.id == aid).with_for_update())
     if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, assignment.class_id)
-    paths = [settings.file_root / item.storage_path for item in db.scalars(select(FileObject).where(FileObject.assignment_id == aid)).all()]
+    keys = [item.storage_path for item in db.scalars(select(FileObject).where(FileObject.assignment_id == aid)).all()]
     title = assignment.title
     audit(db, user, "ASSIGNMENT_DELETED", "assignment", str(aid), {"title": title})
     submission_ids = select(Submission.id).where(Submission.assignment_id == aid)
@@ -1173,10 +1184,8 @@ def delete_assignment(aid: UUID, user: CsrfUser, db: Db):
     db.execute(delete(FileObject).where(FileObject.assignment_id == aid))
     db.delete(assignment)
     db.commit()
-    for path in paths:
-        if path.is_file(): path.unlink()
-    export_path = settings.file_root / "exports" / f"{aid}.zip"
-    if export_path.is_file(): export_path.unlink()
+    for key in keys:
+        storage.delete_object(key)
     return Response(status_code=204)
 
 
@@ -1217,8 +1226,8 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
     }
     if suffix in expected_mimes and file.content_type and file.content_type not in expected_mimes[suffix]:
         raise ApiError(422, "FILE_MIME_INVALID", "文件 MIME 类型与扩展名不匹配")
-    fid = uuid4(); relative = f"{aid}/{fid.hex}{suffix}"; target = settings.file_root / relative; target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.uploading")
+    fid = uuid4(); relative = f"{aid}/{fid.hex}{suffix}"
+    temporary = Path(tempfile.gettempdir()) / f"upload-{fid.hex}{suffix}"
     size = 0
     try:
         with temporary.open("wb") as output:
@@ -1228,12 +1237,10 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
                     raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空且不得超过 100 MB")
                 output.write(chunk)
         if not size: raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空")
-        os.replace(temporary, target)
-    except Exception:
-        if temporary.exists(): temporary.unlink()
-        raise
+        storage.put_object(relative, temporary)
     finally:
         file.file.close()
+        temporary.unlink(missing_ok=True)
     team_id = team.id if team and a.submitter_type == "TEAM" else None
     preview_status = "READY" if suffix in PREVIEWABLE_FILE_SUFFIXES else "NOT_AVAILABLE"
     x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, material_type=selected_material_type, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
@@ -1281,15 +1288,18 @@ def download_assignment_materials(aid: UUID, user: CurrentUser, db: Db, file_ids
         used_names = set()
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
             for file in files:
-                path = settings.file_root / file.storage_path
-                if not path.is_file(): raise ApiError(404, "FILE_MISSING", "文件存储不可用")
                 original = Path(file.original_name).name
                 name, index = original, 1
                 while name.casefold() in used_names:
                     name = f"{Path(original).stem} ({index}){Path(original).suffix}"
                     index += 1
                 used_names.add(name.casefold())
-                bundle.write(path, name)
+                try:
+                    with bundle.open(name, "w") as dest:
+                        for chunk in storage.get_object_stream(file.storage_path):
+                            dest.write(chunk)
+                except NoSuchKey:
+                    raise ApiError(404, "FILE_MISSING", "文件存储不可用")
         archive.seek(0)
     except Exception:
         archive.close()
@@ -1321,8 +1331,8 @@ def delete_file(fid: UUID, user: CsrfUser, db: Db):
         file.active = False
         db.commit()
         return Response(status_code=204)
-    path = settings.file_root / file.storage_path; db.delete(file); db.commit()
-    if path.is_file(): path.unlink()
+    key = file.storage_path; db.delete(file); db.commit()
+    storage.delete_object(key)
     return Response(status_code=204)
 
 
@@ -1390,15 +1400,15 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
     s.status = "SUBMITTED"
     for f in files: db.add(VersionFile(version_id=v.id, file_id=f.id))
     db.flush()
-    stale_paths = []
+    stale_keys = []
     inactive = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == False, file_scope)).all()  # noqa: E712
     for file in inactive:
         if not db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == file.id).limit(1)):
-            stale_paths.append(settings.file_root / file.storage_path)
+            stale_keys.append(file.storage_path)
             db.delete(file)
     audit(db, user, "SUBMISSION_CREATED", "submission", str(s.id)); db.commit()
-    for path in stale_paths:
-        if path.is_file(): path.unlink()
+    for key in stale_keys:
+        storage.delete_object(key)
     return {"id": str(s.id), "submitted_at": v.submitted_at, "is_late": v.is_late}
 
 
@@ -1765,8 +1775,7 @@ def delete_submission_feedback(version_id: UUID, user: CsrfUser, db: Db):
     return result
 
 
-@app.get("/api/v1/files/{fid}")
-def download(fid: UUID, user: CurrentUser, db: Db):
+def require_file_access(db: Session, user: User, fid: UUID) -> FileObject:
     f = db.get(FileObject, fid); a = db.get(Assignment, f.assignment_id) if f else None
     if not f or not a: raise ApiError(404, "FILE_NOT_FOUND", "文件不存在")
     require_class(db, user, a.class_id); allowed = user.role == "TEACHER" or f.owner_id == user.id
@@ -1784,9 +1793,17 @@ def download(fid: UUID, user: CurrentUser, db: Db):
                 linked = db.execute(select(SubmissionVersion, Submission).join(Submission, Submission.id == SubmissionVersion.submission_id).join(VersionFile, VersionFile.version_id == SubmissionVersion.id).where(VersionFile.file_id == f.id, Submission.status == "SUBMITTED", Submission.current_version_no == SubmissionVersion.version_no)).first()
                 allowed = bool(owner and mine and owner[1].id == mine.id and linked)
     if not allowed: raise ApiError(403, "FILE_FORBIDDEN", "无权访问该文件")
-    path = settings.file_root / f.storage_path
-    if not path.is_file(): raise ApiError(404, "FILE_MISSING", "文件存储不可用")
-    return FileResponse(path, media_type=f.detected_mime, filename=f.original_name)
+    return f
+
+
+@app.get("/api/v1/files/{fid}")
+def download(fid: UUID, user: CurrentUser, db: Db):
+    f = require_file_access(db, user, fid)
+    try:
+        stream = storage.get_object_stream(f.storage_path)
+    except NoSuchKey:
+        raise ApiError(404, "FILE_MISSING", "文件存储不可用")
+    return StreamingResponse(stream, media_type=f.detected_mime, headers={"Content-Disposition": content_disposition(f.original_name)})
 
 
 @app.post("/api/v1/review-campaigns", status_code=201)
@@ -2253,8 +2270,8 @@ def export_xlsx(kind: Literal["members", "teams", "grades", "reviews"], user: Cu
     teacher(user); require_class(db, user, class_id); workbook = Workbook(); sheet = workbook.active; sheet.title = "导出数据"
     for row in export_rows(kind, class_id, user, db, assignment_id): sheet.append([export_cell(value) for value in row])
     suffix = f"-{assignment_id}" if kind == "grades" else ""
-    target = settings.file_root / "exports" / f"{kind}-{class_id}{suffix}.xlsx"; target.parent.mkdir(parents=True, exist_ok=True); workbook.save(target)
-    return FileResponse(target, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=f"{kind}{suffix}.xlsx")
+    buffer = io.BytesIO(); workbook.save(buffer); buffer.seek(0)
+    return Response(content=buffer.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": content_disposition(f"{kind}{suffix}.xlsx")})
 
 
 @app.patch("/api/v1/classes/{cid}")
@@ -2430,29 +2447,29 @@ def close_campaign(cid: UUID, user: CsrfUser, db: Db):
 
 @app.get("/api/v1/files/{fid}/preview")
 def preview_file(fid: UUID, user: CurrentUser, db: Db):
-    file = db.get(FileObject, fid)
-    if not file: raise ApiError(404, "FILE_NOT_FOUND", "文件不存在")
-    response = download(fid, user, db)
-    path = settings.file_root / file.storage_path
-    if path.suffix.lower() in {".md", ".html", ".htm"}:
-        rendered, _ = render_rich_file(path)
+    file = require_file_access(db, user, fid)
+    suffix = Path(file.storage_path).suffix.lower()
+    if suffix in {".md", ".html", ".htm"}:
+        rendered, _ = render_rich_file(storage.get_object_bytes(file.storage_path), suffix)
         return HTMLResponse(rendered)
-    if path.suffix.lower() in {".docx", ".pptx", ".xlsx"}:
-        return response
-    # Preview endpoints must render in the browser; the download endpoint keeps
-    # the original filename and attachment disposition.
-    return FileResponse(path, media_type=file.detected_mime, headers={"Content-Disposition": "inline"})
+    if suffix in {".docx", ".pptx", ".xlsx"}:
+        # Preview endpoints must render in the browser; the download endpoint keeps
+        # the original filename and attachment disposition.
+        return download(fid, user, db)
+    try:
+        stream = storage.get_object_stream(file.storage_path)
+    except NoSuchKey:
+        raise ApiError(404, "FILE_MISSING", "文件存储不可用")
+    return StreamingResponse(stream, media_type=file.detected_mime, headers={"Content-Disposition": "inline"})
 
 
 @app.get("/api/v1/files/{fid}/render")
 def render_file(fid: UUID, user: CurrentUser, db: Db):
-    file = db.get(FileObject, fid)
-    if not file: raise ApiError(404, "FILE_NOT_FOUND", "文件不存在")
-    download(fid, user, db)
-    path = settings.file_root / file.storage_path
-    if path.suffix.lower() not in {".md", ".html", ".htm"}:
+    file = require_file_access(db, user, fid)
+    suffix = Path(file.storage_path).suffix.lower()
+    if suffix not in {".md", ".html", ".htm"}:
         raise ApiError(422, "FILE_RENDER_TYPE_INVALID", "该文件不使用富文本渲染接口")
-    rendered, content_hash = render_rich_file(path)
+    rendered, content_hash = render_rich_file(storage.get_object_bytes(file.storage_path), suffix)
     return {"render_type": "RICH_TEXT", "html": rendered, "content_hash": content_hash}
 
 
@@ -2460,7 +2477,6 @@ def render_file(fid: UUID, user: CurrentUser, db: Db):
 def download_submissions(aid: UUID, user: CurrentUser, db: Db):
     teacher(user); assignment = db.get(Assignment, aid)
     if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-    target = settings.file_root / "exports" / f"{aid}.zip"; target.parent.mkdir(parents=True, exist_ok=True)
     rows = db.execute(
         select(Submission, SubmissionVersion)
         .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
@@ -2475,13 +2491,30 @@ def download_submissions(aid: UUID, user: CurrentUser, db: Db):
     team_ids = {submission.owner_team_id for submission, _ in rows if submission.owner_team_id}
     users = {item.id: item for item in db.scalars(select(User).where(User.id.in_(user_ids))).all()} if user_ids else {}
     teams = {item.id: item for item in db.scalars(select(Team).where(Team.id.in_(team_ids))).all()} if team_ids else {}
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
-        for submission, version in rows:
-            owner = users.get(submission.owner_user_id) if submission.owner_user_id else teams.get(submission.owner_team_id)
-            owner_name = owner.login_name if isinstance(owner, User) else owner.name
-            for file in files_by_version.get(version.id, []):
-                archive.write(settings.file_root / file.storage_path, arcname=f"{owner_name}/{file.original_name}")
-    audit(db, user, "SUBMISSIONS_EXPORTED", "assignment", str(aid)); db.commit(); return FileResponse(target, media_type="application/zip", filename=f"{assignment.title}.zip")
+    archive = TemporaryFile()
+    try:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
+            for submission, version in rows:
+                owner = users.get(submission.owner_user_id) if submission.owner_user_id else teams.get(submission.owner_team_id)
+                owner_name = owner.login_name if isinstance(owner, User) else owner.name
+                for file in files_by_version.get(version.id, []):
+                    with bundle.open(f"{owner_name}/{file.original_name}", "w") as dest:
+                        for chunk in storage.get_object_stream(file.storage_path):
+                            dest.write(chunk)
+        archive.seek(0)
+    except Exception:
+        archive.close()
+        raise
+    audit(db, user, "SUBMISSIONS_EXPORTED", "assignment", str(aid)); db.commit()
+
+    def chunks():
+        try:
+            while chunk := archive.read(1024 * 1024):
+                yield chunk
+        finally:
+            archive.close()
+
+    return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": content_disposition(f"{assignment.title}.zip")})
 
 
 @app.get("/api/v1/teams/{tid}/coursework.zip")
@@ -2535,7 +2568,9 @@ def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
                 files = files_by_version.get(version.id, []) if version else []
                 homework_rows.append([assignment.title, assignment.due_at, "已提交" if version else "未提交", version.submitted_at if version else None, "是" if version and version.is_late else "否", len(files)])
                 for file in files:
-                    archive.write(settings.file_root / file.storage_path, arcname=f"小组作业/{assignment.id}/{file.id}-{Path(file.original_name).name}")
+                    with archive.open(f"小组作业/{assignment.id}/{file.id}-{Path(file.original_name).name}", "w") as dest:
+                        for chunk in storage.get_object_stream(file.storage_path):
+                            dest.write(chunk)
             archive.writestr("小组作业提交记录.csv", csv_bytes(homework_rows))
 
             grade_rows = [["作业", "提交状态", "学生互评等级", "教师等级", "最终等级", "成绩来源", "评分状态"]]

@@ -13,8 +13,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from sqlalchemy import select
 
+from app import storage
 from app.models import Assignment, ClassMember, FileObject, Grade, PeerReview, ReviewCampaign, SubmissionAssessment, User, VersionFile
-from app.settings import settings
 
 
 def plain_text(value):
@@ -105,8 +105,7 @@ def write_student_archive(bundle, db, data, root=""):
         used = set()
         for file_info in item["files"]:
             file = db.get(FileObject, UUID(file_info["id"]))
-            path = (settings.file_root / file.storage_path).resolve()
-            if not path.is_relative_to(settings.file_root.resolve()) or not path.is_file():
+            if not storage.object_exists(file.storage_path):
                 raise ApiError(404, "FILE_MISSING", "附件存储不可用，导出已取消")
             original = safe_name(file.original_name)
             name, suffix = original, 1
@@ -114,7 +113,9 @@ def write_student_archive(bundle, db, data, root=""):
                 name = f"{Path(original).stem} ({suffix}){Path(original).suffix}"
                 suffix += 1
             used.add(name.casefold())
-            bundle.write(path, directory + name)
+            with bundle.open(directory + name, "w") as dest:
+                for chunk in storage.get_object_stream(file.storage_path):
+                    dest.write(chunk)
 
 
 def export_portfolios(db, course, user, uid=None):

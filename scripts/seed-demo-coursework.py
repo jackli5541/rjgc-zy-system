@@ -31,7 +31,7 @@ from app.models import (  # noqa: E402
     User,
     VersionFile,
 )
-from app.settings import settings  # noqa: E402
+from app import storage  # noqa: E402
 
 
 CLASS_NAMES = ("24计算机1", "24计算机1班")
@@ -69,9 +69,7 @@ def write_submission_file(assignment: Assignment, owner: User, team: Team | None
     file_id = uuid4()
     suffix = Path(name).suffix
     relative = f"{assignment.id}/{file_id.hex}{suffix}"
-    target = settings.file_root / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(content)
+    storage.put_bytes(relative, content)
     return FileObject(
         id=file_id,
         owner_id=owner.id,
