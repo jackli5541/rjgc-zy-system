@@ -266,7 +266,7 @@ async function changeAuditPage(page) { auditPage.value = page; await loadView({ 
 function statusLabel(value) { return statusLabels[value] || value || '-' }
 function roleLabel(value) { return roleLabels[value] || value || '-' }
 function objectLabel(value) { return objectLabels[value] || (value ? '其他业务对象' : '-') }
-function actionLabel(value) { return value === 'TEAM_RECRUITMENT_CLOSED' ? '截止小组招募' : actionLabels[value] || (value ? '其他系统操作' : '-') }
+function actionLabel(value) { return value === 'TEAM_RECRUITMENT_CLOSED' ? '截止小组招募' : value === 'TEAM_RECRUITMENT_OPENED' ? '继续小组招募' : actionLabels[value] || (value ? '其他系统操作' : '-') }
 function gradeSourceLabel(value) { return value === 'TEACHER' ? '教师评分' : value === 'PEER' ? '学生互评' : value === 'SYSTEM' ? '系统判定' : '-' }
 async function action(fn, success) {
   const originPath = route.fullPath
@@ -528,10 +528,16 @@ async function respondInvitation(item, decision) { await action(() => api(`/team
 async function leaveTeam() { await action(async () => { await api(`/teams/${selectedTeam.value.id}/leave`, { method: 'POST' }); selectedTeam.value = null; await session.refreshContext(); await router.replace('/teams') }, '已退出小组') }
 function closeTeamRecruitment(item) {
   const teamId = item.id
-  Modal.confirm({ title: '确认截止招募？', content: '截止后不再接受新的入组申请，已有申请仍可处理。', okText: '截止招募', onOk: () => action(async () => {
+  Modal.confirm({ title: '确认截止招募？', content: '所有待处理的入组申请和邀请将被取消。截止后不能邀请或加入，继续招募后需重新申请或邀请。', okText: '截止招募', onOk: () => action(async () => {
     const saved = await api(`/teams/${teamId}/close-recruitment`, { method: 'POST' })
     if (selectedTeam.value?.id === teamId) Object.assign(selectedTeam.value, saved)
   }, '已截止招募') })
+}
+async function openTeamRecruitment(item) {
+  await action(async () => {
+    const saved = await api(`/teams/${item.id}/open-recruitment`, { method: 'POST' })
+    if (selectedTeam.value?.id === item.id) Object.assign(selectedTeam.value, saved)
+  }, '已继续招募')
 }
 async function transferLeader(uid) { await action(async () => { await api(`/teams/${selectedTeam.value.id}/transfer`, { method: 'POST', body: JSON.stringify({ new_leader_id: uid }) }); selectedTeam.value = null }, '组长已移交') }
 function disbandTeam() { Modal.confirm({ title: '确认解散小组？', content: '组员将重新进入组队流程。', okText: '确认解散', okType: 'danger', onOk: () => action(async () => { await api(`/teams/${selectedTeam.value.id}`, { method: 'DELETE' }); selectedTeam.value = null; await session.refreshContext(); await router.replace('/teams') }, '小组已解散') }) }
@@ -1022,7 +1028,7 @@ provide(shellContextKey, {
   studentPendingAssignments, studentUpcomingAssignments, studentPendingReviews, studentLatestGrade,
   changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, roleLabel, gradeSourceLabel, searchAudits, changeAuditSemester, changeAuditPage, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
   manageClass, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
-  applyTeam, openTeam, closeTeamDrawer, inviteTarget, inviteMember, closeTeamRecruitment, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
+  applyTeam, openTeam, closeTeamDrawer, inviteTarget, inviteMember, closeTeamRecruitment, openTeamRecruitment, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
   openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading
 })
 </script>
@@ -1061,7 +1067,7 @@ provide(shellContextKey, {
               <section class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-segmented v-if="role==='TEACHER'" v-model:value="uploadMaterialType" size="small" :options="materialTypeOptions"/><a-upload v-if="role==='TEACHER'" :custom-request="uploadMaterialFile" :show-upload-list="false" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
                 <a-empty v-if="!assignmentAttachments.length" class="detail-empty" description="暂无作业资料"/>
-                <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials" @retype="retypeMaterial"/>
+                <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" :can-download="role==='TEACHER'" :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials" @retype="retypeMaterial"/>
               </section>
               <section v-if="role==='TEACHER'" class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业操作</h2></div>
@@ -1122,6 +1128,7 @@ provide(shellContextKey, {
       :peer-feedback-enabled="filePreview.mode==='TEACHER'&&Boolean(selectedSubmission?.peer_feedbacks?.length)"
       :peer-grade="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
       :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
+      :allow-download="role==='TEACHER'"
       :expanded="assignmentDrawerExpanded"
       @close="closeFilePreview"
       @update:expanded="assignmentDrawerExpanded=$event"
@@ -1161,7 +1168,7 @@ provide(shellContextKey, {
         <a-form-item label="开始时间"><a-input v-model:value="assignmentForm.starts_at" type="datetime-local"/></a-form-item>
         <a-form-item label="截止时间" required><a-input v-model:value="assignmentForm.due_at" type="datetime-local"/></a-form-item>
         <a-form-item label="说明" required><div class="editor-shell"><div v-if="descriptionEditor" class="editor-toolbar"><a-tooltip title="二级标题"><a-button size="small" :type="descriptionEditor.isActive('heading',{level:2})?'primary':'default'" @click="descriptionEditor.chain().focus().toggleHeading({level:2}).run()">H2</a-button></a-tooltip><a-tooltip title="粗体"><a-button size="small" :type="descriptionEditor.isActive('bold')?'primary':'default'" @click="descriptionEditor.chain().focus().toggleBold().run()"><BoldOutlined/></a-button></a-tooltip><a-tooltip title="无序列表"><a-button size="small" @click="descriptionEditor.chain().focus().toggleBulletList().run()"><UnorderedListOutlined/></a-button></a-tooltip><a-tooltip title="有序列表"><a-button size="small" @click="descriptionEditor.chain().focus().toggleOrderedList().run()"><OrderedListOutlined/></a-button></a-tooltip><a-tooltip title="链接"><a-button size="small" @click="setDescriptionLink"><LinkOutlined/></a-button></a-tooltip><a-tooltip title="代码块"><a-button size="small" @click="descriptionEditor.chain().focus().toggleCodeBlock().run()"><CodeOutlined/></a-button></a-tooltip></div><EditorContent :editor="descriptionEditor"/></div></a-form-item>
-        <a-form-item label="作业附件"><AssignmentMaterials v-if="assignmentForm.id&&assignmentAttachments.length" :files="assignmentAttachments" can-delete :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials"/><a-upload :before-upload="queueAssignmentAttachment" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.pptx,.xlsx,.zip,.rar,.7z"><a-button><UploadOutlined/> 选择附件</a-button></a-upload><div v-for="(file,index) in pendingAssignmentFiles" :key="file.uid||`${file.name}-${index}`" class="uploaded-file"><span>{{file.name}}</span><a-button danger type="link" @click="removePendingAssignmentAttachment(index)">移除</a-button></div></a-form-item>
+        <a-form-item label="作业附件"><AssignmentMaterials v-if="assignmentForm.id&&assignmentAttachments.length" :files="assignmentAttachments" can-delete can-download :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials"/><a-upload :before-upload="queueAssignmentAttachment" :show-upload-list="false" multiple accept=".md,.pdf,.png,.jpg,.jpeg,.gif,.webp,.docx,.pptx,.xlsx,.zip,.rar,.7z"><a-button><UploadOutlined/> 选择附件</a-button></a-upload><div v-for="(file,index) in pendingAssignmentFiles" :key="file.uid||`${file.name}-${index}`" class="uploaded-file"><span>{{file.name}}</span><a-button danger type="link" @click="removePendingAssignmentAttachment(index)">移除</a-button></div></a-form-item>
         <a-checkbox v-model:checked="assignmentForm.allow_late">允许迟交并标记</a-checkbox>
         <div class="modal-actions"><a-button @click="modals.assignment=false">取消</a-button><a-button @click="createAssignment(false)">{{assignmentForm.id?'保存修改':'保存草稿'}}</a-button><a-button type="primary" @click="createAssignment(true)">{{assignmentForm.id?'保存并再次发布':'发布'}}</a-button></div>
       </a-form>

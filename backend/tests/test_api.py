@@ -15,7 +15,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app, parse_roster
 from app.grading import final_score
-from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, Team
+from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, Team, TeamRequest
 from app.worker import process_auto_review, process_due_campaign
 
 
@@ -79,6 +79,9 @@ def test_team_leader_can_close_recruitment():
     team = leader.post("/api/v1/teams", headers=leader_headers, json={"class_id": course["id"], "name": "招募小组"}).json()
     url = f"/api/v1/teams/{team['id']}/close-recruitment"
     application = applicant.post(f"/api/v1/teams/{team['id']}/applications", headers=applicant_headers).json()
+    other_id = other.get("/api/v1/auth/session").json()["user"]["id"]
+    invitation = leader.post(f"/api/v1/teams/{team['id']}/invitations", headers=leader_headers, json={"student_id": other_id})
+    assert invitation.status_code == 201, invitation.text
     assert other.post(url, headers=other_headers).status_code == 403
     assert teacher.post(url, headers=headers).status_code == 403
     assert leader.post(url).status_code == 403
@@ -86,17 +89,54 @@ def test_team_leader_can_close_recruitment():
     assert closed.status_code == 200, closed.text
     assert closed.json()["open_recruitment"] is False
     assert closed.json()["version"] == team["version"] + 1
+    cancelled = leader.get(f"/api/v1/team-requests?class_id={course['id']}").json()["items"]
+    assert len(cancelled) == 2 and all(item["status"] == "CANCELLED" for item in cancelled)
+    assert closed.json()["pending_count"] == 0
     repeated = leader.post(url, headers=leader_headers)
     assert repeated.json()["version"] == closed.json()["version"]
     blocked = other.post(f"/api/v1/teams/{team['id']}/applications", headers=other_headers)
     assert blocked.status_code == 409
     assert blocked.json()["code"] == "TEAM_NOT_OPEN"
+    invite_blocked = leader.post(f"/api/v1/teams/{team['id']}/invitations", headers=leader_headers, json={"student_id": other_id})
+    assert invite_blocked.status_code == 409 and invite_blocked.json()["code"] == "TEAM_NOT_OPEN"
+    accept_blocked = other.post(f"/api/v1/team-requests/{invitation.json()['id']}/respond?decision=APPROVED", headers=other_headers)
+    assert accept_blocked.status_code == 409 and accept_blocked.json()["code"] == "INVITATION_NOT_PENDING"
+    approval_blocked = leader.post(f"/api/v1/team-requests/{application['id']}/decision?decision=APPROVED", headers=leader_headers)
+    assert approval_blocked.status_code == 409 and approval_blocked.json()["code"] == "REQUEST_NOT_PENDING"
+    assert leader.get(f"/api/v1/teams/{team['id']}").json()["member_count"] == 1
+    open_url = f"/api/v1/teams/{team['id']}/open-recruitment"
+    assert other.post(open_url, headers=other_headers).status_code == 403
+    assert teacher.post(open_url, headers=headers).status_code == 403
+    assert leader.post(open_url).status_code == 403
+    reopened = leader.post(open_url, headers=leader_headers)
+    assert reopened.status_code == 200, reopened.text
+    assert reopened.json()["open_recruitment"] is True
+    assert reopened.json()["version"] == closed.json()["version"] + 1
+    assert leader.post(open_url, headers=leader_headers).json()["version"] == reopened.json()["version"]
+    assert leader.post(f"/api/v1/team-requests/{application['id']}/decision?decision=APPROVED", headers=leader_headers).status_code == 409
+    assert other.post(f"/api/v1/team-requests/{invitation.json()['id']}/respond?decision=APPROVED", headers=other_headers).status_code == 409
+    application = applicant.post(f"/api/v1/teams/{team['id']}/applications", headers=applicant_headers).json()
+    invitation = leader.post(f"/api/v1/teams/{team['id']}/invitations", headers=leader_headers, json={"student_id": other_id})
+    assert invitation.status_code == 201, invitation.text
     decision = leader.post(f"/api/v1/team-requests/{application['id']}/decision?decision=APPROVED", headers=leader_headers)
     assert decision.status_code == 200, decision.text
+    accepted = other.post(f"/api/v1/team-requests/{invitation.json()['id']}/respond?decision=APPROVED", headers=other_headers)
+    assert accepted.status_code == 200, accepted.text
+    assert leader.post(url, headers=leader_headers).status_code == 200
     detail = leader.get(f"/api/v1/teams/{team['id']}").json()
-    assert detail["member_count"] == 2 and detail["open_recruitment"] is False
-    teacher.patch(f"/api/v1/classes/{course['id']}", headers=headers, json={"status": "ARCHIVED", "version": course["version"]})
+    assert detail["member_count"] == 3 and detail["open_recruitment"] is False
+    processed = leader.get(f"/api/v1/team-requests?class_id={course['id']}").json()["items"]
+    assert sum(item["status"] == "APPROVED" for item in processed) == 2
+    with SessionLocal() as db:
+        records = db.scalars(select(TeamRequest).where(TeamRequest.team_id == UUID(team["id"]))).all()
+        assert all(record.resolved_at is not None for record in records if record.status == "CANCELLED")
+    deadline = teacher.patch(f"/api/v1/classes/{course['id']}", headers=headers, json={"team_deadline": "2020-01-01T00:00:00+08:00", "version": course["version"]})
+    assert deadline.status_code == 200, deadline.text
+    expired = leader.post(open_url, headers=leader_headers)
+    assert expired.status_code == 409 and expired.json()["code"] == "TEAM_DEADLINE_PASSED"
+    teacher.patch(f"/api/v1/classes/{course['id']}", headers=headers, json={"status": "ARCHIVED", "version": deadline.json()["version"]})
     assert leader.post(url, headers=leader_headers).status_code == 409
+    assert leader.post(open_url, headers=leader_headers).status_code == 409
 
 
 def test_password_changes_revoke_existing_sessions():
@@ -899,7 +939,13 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
     assert class_mode.status_code == 422
 
 
-def test_rich_preview_feedback_annotations_and_resubmission_history():
+def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch):
+    stored_objects = {}
+    monkeypatch.setattr("app.storage.put_object", lambda key, path: stored_objects.__setitem__(key, path.read_bytes()))
+    monkeypatch.setattr("app.storage.get_object_bytes", lambda key: stored_objects[key])
+    monkeypatch.setattr("app.storage.get_object_stream", lambda key: iter([stored_objects[key]]))
+    monkeypatch.setattr("app.storage.delete_object", lambda key: stored_objects.pop(key, None))
+    monkeypatch.setattr("app.storage.object_exists", lambda key: key in stored_objects)
     teacher, teacher_headers = login("teacher", "123456", "teacher")
     course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2035 春季", "name": "在线批注测试班"}).json()
     class_id = course["id"]
@@ -911,17 +957,30 @@ def test_rich_preview_feedback_annotations_and_resubmission_history():
     markdown_content = b"# Heading\n\n- [x] Done\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n![chart](data:image/png;base64,iVBORw0KGgo=)\n\n![unsafe](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)"
     markdown_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("report.md", markdown_content, "text/markdown")}).json()
     pdf_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("diagram.pdf", b"%PDF-1.4", "application/pdf")}).json()
-    html_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("appendix.html", b'<h2>Safe</h2><script>alert(1)</script><img src="/private.png"><img src="https://example.com/ok.png"><a href="javascript:alert(1)">bad</a>', "text/html")})
+    html_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("appendix.html", b'<h2>Safe</h2><script>alert(1)</script><img src="/private.png"><img src="http://localhost:9005/ok.png"><img src="https://example.com/ok.png"><a href="javascript:alert(1)">bad</a>', "text/html")})
     assert html_file.status_code == 201 and html_file.json()["render_type"] == "RICH_TEXT"
     submitted = student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "annotation-v1"}, json={})
     assert submitted.status_code == 201, submitted.text
     board_item = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"][0]
     version_id = board_item["submission_version_id"]
 
+    signed = {}
+    def fake_sign_get_url(key, expires, params=None):
+        signed.update({"key": key, "expires": expires, "params": params})
+        return "https://se-lab.example.test/signed-report.md"
+    monkeypatch.setattr("app.storage.sign_get_url", fake_sign_get_url)
+    direct_preview = teacher.get(f"/api/v1/files/{markdown_file['id']}/preview-url")
+    assert direct_preview.status_code == 200
+    assert direct_preview.json() == {"url": "https://se-lab.example.test/signed-report.md", "expires_in": 300}
+    assert signed["key"].endswith(".md") and signed["expires"] == 300
+    assert signed["params"] == {"response-content-disposition": 'inline; filename="report.md"'}
+    blocked_direct_preview = teacher.get(f"/api/v1/files/{pdf_file['id']}/preview-url")
+    assert blocked_direct_preview.status_code == 422 and blocked_direct_preview.json()["code"] == "FILE_PREVIEW_TYPE_INVALID"
+
     rendered = teacher.get(f"/api/v1/files/{html_file.json()['id']}/render")
     assert rendered.status_code == 200 and rendered.json()["render_type"] == "RICH_TEXT"
     assert "<script" not in rendered.json()["html"] and "javascript:" not in rendered.json()["html"]
-    assert 'src="/private.png"' not in rendered.json()["html"] and "https://example.com/ok.png" in rendered.json()["html"]
+    assert 'src="/private.png"' not in rendered.json()["html"] and "http://localhost:9005/ok.png" in rendered.json()["html"] and "https://example.com/ok.png" in rendered.json()["html"]
     rendered_markdown = teacher.get(f"/api/v1/files/{markdown_file['id']}/render")
     assert "data:image/png;base64,iVBORw0KGgo=" in rendered_markdown.json()["html"]
     assert "data:image/svg+xml" not in rendered_markdown.json()["html"]

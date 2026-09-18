@@ -39,6 +39,10 @@ def get_object_bytes(key: str) -> bytes:
     return _bucket_client().get_object(_object_key(key)).read()
 
 
+def sign_get_url(key: str, expires: int, params: dict[str, str] | None = None) -> str:
+    return _bucket_client().sign_url("GET", _object_key(key), expires, params=params)
+
+
 def delete_object(key: str) -> None:
     try:
         _bucket_client().delete_object(_object_key(key))

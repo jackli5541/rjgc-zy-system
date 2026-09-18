@@ -45,6 +45,7 @@ services:
       OSS_BUCKET: "${OSS_BUCKET:-se-lab}"
       OSS_ACCESS_KEY_ID: "${OSS_ACCESS_KEY_ID}"
       OSS_ACCESS_KEY_SECRET: "${OSS_ACCESS_KEY_SECRET}"
+      OSS_PREVIEW_URL_TTL_SECONDS: "${OSS_PREVIEW_URL_TTL_SECONDS:-300}"
       TRUSTED_PROXY_CIDRS: 172.16.0.0/12
     depends_on:
       migrate:
@@ -135,6 +136,7 @@ services:
       OSS_ACCESS_KEY_ID: "${OSS_ACCESS_KEY_ID}"
       OSS_ACCESS_KEY_SECRET: "${OSS_ACCESS_KEY_SECRET}"
       OSS_KEY_PREFIX: "test/"
+      OSS_PREVIEW_URL_TTL_SECONDS: "${OSS_PREVIEW_URL_TTL_SECONDS:-300}"
     depends_on:
       test-migrate:
         condition: service_completed_successfully

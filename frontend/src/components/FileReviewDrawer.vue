@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { api, randomUUID } from '../api'
+import { loadMarkdownPreview } from '../markdownPreview'
 import PdfDocumentViewer from './PdfDocumentViewer.vue'
 import RichTextEditor from './RichTextEditor.vue'
 import RichTextViewer from './RichTextViewer.vue'
@@ -22,6 +23,7 @@ const props = defineProps({
   peerFeedbackEnabled: Boolean,
   peerGrade: { type: String, default: '' },
   peerFeedbacks: { type: Array, default: () => [] },
+  allowDownload: Boolean,
   expanded: Boolean
 })
 const emit = defineEmits(['close', 'feedback-published', 'clear-feedback', 'target-change', 'external-target', 'update:expanded'])
@@ -126,14 +128,20 @@ async function loadFile() {
   const file = activeFile.value
   if (!file) return
   if (!file.previewable || file.download_only || renderType.value === 'DOWNLOAD_ONLY') {
-    error.value = file.preview_error || '该文件格式暂不支持在线预览，可下载原文件查看。'
+    error.value = file.preview_error || '该文件格式暂不支持在线预览。'
     return
   }
   loading.value = true
   try {
     if (renderType.value === 'RICH_TEXT') {
-      const rendered = await api(`/files/${file.id}/render`)
-      if (sequence === loadSequence) richHtml.value = rendered.html
+      if (/\.md$/i.test(file.name || '')) {
+        const { url } = await api(`/files/${file.id}/preview-url`)
+        const html = await loadMarkdownPreview(url)
+        if (sequence === loadSequence) richHtml.value = html
+      } else {
+        const rendered = await api(`/files/${file.id}/render`)
+        if (sequence === loadSequence) richHtml.value = rendered.html
+      }
     } else if (renderType.value === 'IMAGE') {
       const response = await fetch(`/api/v1/files/${file.id}/preview`, { credentials: 'include' })
       if (!response.ok) throw new Error('图片加载失败')
@@ -400,12 +408,12 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <span v-if="visiblePeerFeedbacks.length&&feedback.grade" class="review-score-divider"></span>
         <div v-if="feedback.grade" class="review-score-group teacher-score"><strong>教师评分</strong><a-tag :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
       </div>
-      <a-button v-if="activeFile" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button>
+      <a-button v-if="activeFile&&allowDownload" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button>
     </div>
     <div ref="drawerRoot" class="file-review-workspace" :class="{'with-feedback':hasFeedbackPanel}">
       <main ref="documentStage" class="review-document-stage">
         <a-spin v-if="loading" size="large" tip="正在加载文件"/>
-        <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile" type="primary" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button></template></a-result>
+        <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile&&allowDownload" type="primary" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button></template></a-result>
         <PdfDocumentViewer v-else-if="renderType==='PDF'&&binaryUrl" ref="documentViewer" :url="binaryUrl" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation" @layout="scheduleComposerPosition" @error="error=$event"/>
         <div v-else-if="renderType==='RICH_TEXT'&&richHtml" class="rich-document-scroll"><RichTextViewer ref="documentViewer" :html="richHtml" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation"/></div>
         <img v-else-if="renderType==='IMAGE'&&binaryUrl" class="review-image" :src="binaryUrl" :alt="activeFile?.name" @error="error='图片加载失败'"/>

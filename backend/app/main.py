@@ -80,7 +80,7 @@ def clean_file_html(value: str) -> str:
         if tag == "a" and name == "href": return attribute_value.startswith(("https://", "mailto:"))
         if tag == "img" and name in {"alt", "title", "width", "height"}: return True
         if tag == "img" and name == "src":
-            return attribute_value.startswith("https://") or bool(SAFE_IMAGE_DATA_URL.fullmatch(attribute_value))
+            return attribute_value.startswith(("http://", "https://")) or bool(SAFE_IMAGE_DATA_URL.fullmatch(attribute_value))
         if tag == "input" and name in {"type", "checked", "disabled"}: return name != "type" or attribute_value == "checkbox"
         if tag == "code" and name == "class" and attribute_value.startswith("language-"): return True
         if name in {"class", "id"}: return bool(re.fullmatch(r"[A-Za-z0-9_\- ]{1,200}", attribute_value))
@@ -88,7 +88,7 @@ def clean_file_html(value: str) -> str:
 
     styles = re.findall(r"<style\b[^>]*>(.*?)</style\s*>", value, flags=re.IGNORECASE | re.DOTALL)
     without_styles = re.sub(r"<style\b[^>]*>.*?</style\s*>", "", value, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = bleach.clean(without_styles, tags=SAFE_HTML_TAGS, attributes=allowed_attribute, protocols=["https", "mailto", "data"], strip=True)
+    cleaned = bleach.clean(without_styles, tags=SAFE_HTML_TAGS, attributes=allowed_attribute, protocols=["http", "https", "mailto", "data"], strip=True)
     cleaned = re.sub(r'<a\s+([^>]*href="[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
     scoped_css = scope_preview_css("\n".join(styles))
     return f"<style>{scoped_css}</style>{cleaned}" if scoped_css else cleaned
@@ -933,15 +933,27 @@ def apply_team(tid: UUID, user: CsrfUser, db: Db):
 
 @app.post("/api/v1/teams/{tid}/close-recruitment")
 def close_team_recruitment(tid: UUID, user: CsrfUser, db: Db):
+    return set_team_recruitment(tid, False, user, db)
+
+
+@app.post("/api/v1/teams/{tid}/open-recruitment")
+def open_team_recruitment(tid: UUID, user: CsrfUser, db: Db):
+    return set_team_recruitment(tid, True, user, db)
+
+
+def set_team_recruitment(tid: UUID, open_recruitment: bool, user: User, db: Session):
     team = db.scalar(select(Team).where(Team.id == tid).with_for_update())
     if not team or team.status != "ACTIVE": raise ApiError(404, "TEAM_NOT_FOUND", "小组不存在")
     if user.role != "STUDENT" or team.leader_id != user.id:
-        raise ApiError(403, "TEAM_LEADER_REQUIRED", "仅组长可截止招募")
-    require_writable_class(db, user, team.class_id)
-    if team.open_recruitment:
-        team.open_recruitment = False
+        raise ApiError(403, "TEAM_LEADER_REQUIRED", "仅组长可修改招募状态")
+    course = require_writable_class(db, user, team.class_id)
+    if open_recruitment: require_team_window(course, user)
+    if not open_recruitment:
+        db.execute(TeamRequest.__table__.update().where(TeamRequest.team_id == tid, TeamRequest.status == "PENDING").values(status="CANCELLED", resolved_at=now()))
+    if team.open_recruitment != open_recruitment:
+        team.open_recruitment = open_recruitment
         team.version += 1
-        audit(db, user, "TEAM_RECRUITMENT_CLOSED", "team", str(tid))
+        audit(db, user, "TEAM_RECRUITMENT_OPENED" if open_recruitment else "TEAM_RECRUITMENT_CLOSED", "team", str(tid))
     db.commit()
     return team_json(db, team, user)
 
@@ -960,6 +972,7 @@ def request_decision(rid: UUID, decision: Literal["APPROVED", "REJECTED"], user:
     if not x or x.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "仅组长可处理申请")
     course = require_writable_class(db, user, req.class_id); require_team_window(course, user)
     if decision == "APPROVED":
+        if x.status != "ACTIVE" or not x.open_recruitment: raise ApiError(409, "TEAM_NOT_OPEN", "该小组已截止招募，不能加入")
         if membership(db, req.class_id, req.applicant_id): raise ApiError(409, "ALREADY_IN_TEAM", "申请人已加入其他小组")
         db.add(TeamMember(team_id=x.id, class_id=req.class_id, user_id=req.applicant_id)); db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == req.class_id, TeamRequest.applicant_id == req.applicant_id, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); req.status = "APPROVED"; notify(db, req.applicant_id, "TEAM_JOINED", f"已加入小组「{x.name}」")
     else: req.status, req.resolved_at = "REJECTED", now(); notify(db, req.applicant_id, "TEAM_REJECTED", f"加入「{x.name}」的申请未通过")
@@ -2351,9 +2364,10 @@ def delete_class(cid: UUID, user: CsrfUser, db: Db):
 
 @app.post("/api/v1/teams/{tid}/invitations", status_code=201)
 def invite_member(tid: UUID, data: InviteIn, user: CsrfUser, db: Db):
-    team = db.get(Team, tid)
+    team = db.scalar(select(Team).where(Team.id == tid).with_for_update())
     if not team or team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "仅组长可邀请成员")
     course = require_writable_class(db, user, team.class_id); require_team_window(course, user)
+    if team.status != "ACTIVE" or not team.open_recruitment: raise ApiError(409, "TEAM_NOT_OPEN", "该小组已截止招募，不能邀请成员")
     target = db.get(User, data.student_id)
     if not target or not db.scalar(select(ClassMember).where(ClassMember.class_id == team.class_id, ClassMember.user_id == target.id, ClassMember.status == "ACTIVE")): raise ApiError(404, "MEMBER_NOT_FOUND", "学生不在当前教学班")
     if membership(db, team.class_id, target.id): raise ApiError(409, "ALREADY_IN_TEAM", "该学生已经加入小组")
@@ -2369,6 +2383,7 @@ def respond_invitation(rid: UUID, decision: Literal["APPROVED", "REJECTED"], use
     course = require_writable_class(db, user, req.class_id); require_team_window(course, user)
     if req.expires_at and req.expires_at < now(): req.status = "EXPIRED"; db.commit(); raise ApiError(409, "INVITATION_EXPIRED", "邀请已过期")
     if decision == "APPROVED":
+        if not team or team.status != "ACTIVE" or not team.open_recruitment: raise ApiError(409, "TEAM_NOT_OPEN", "该小组已截止招募，不能加入")
         if membership(db, req.class_id, user.id): raise ApiError(409, "ALREADY_IN_TEAM", "你已经加入小组")
         db.add(TeamMember(team_id=team.id, class_id=req.class_id, user_id=user.id)); db.execute(TeamRequest.__table__.update().where(TeamRequest.class_id == req.class_id, TeamRequest.applicant_id == user.id, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); req.status = "APPROVED"
     else: req.status = "REJECTED"
@@ -2491,6 +2506,16 @@ def preview_file(fid: UUID, user: CurrentUser, db: Db):
     except NoSuchKey:
         raise ApiError(404, "FILE_MISSING", "文件存储不可用")
     return StreamingResponse(stream, media_type=file.detected_mime, headers={"Content-Disposition": "inline"})
+
+
+@app.get("/api/v1/files/{fid}/preview-url")
+def preview_file_url(fid: UUID, user: CurrentUser, db: Db):
+    file = require_file_access(db, user, fid)
+    if Path(file.storage_path).suffix.lower() != ".md":
+        raise ApiError(422, "FILE_PREVIEW_TYPE_INVALID", "仅 Markdown 文件支持前端直接预览")
+    expires = max(60, min(settings.oss_preview_url_ttl_seconds, 900))
+    params = {"response-content-disposition": content_disposition(file.original_name, "inline")}
+    return {"url": storage.sign_get_url(file.storage_path, expires, params), "expires_in": expires}
 
 
 @app.get("/api/v1/files/{fid}/render")

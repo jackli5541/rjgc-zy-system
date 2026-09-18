@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     oss_access_key_id: str = ""
     oss_access_key_secret: str = ""
     oss_key_prefix: str = ""
+    oss_preview_url_ttl_seconds: int = 300
     session_hours: int = 24
     secure_cookies: bool = False
     trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"
