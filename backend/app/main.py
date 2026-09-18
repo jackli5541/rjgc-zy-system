@@ -684,6 +684,7 @@ def parse_roster(content: bytes, filename: str):
     if filename.lower().endswith(".xlsx"):
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         for sheet in workbook.worksheets:
+            sheet.reset_dimensions()
             row_iter = sheet.iter_rows(values_only=True)
             first_row = next(row_iter, None)
             headers = [str(x or "").strip() for x in first_row or ()]

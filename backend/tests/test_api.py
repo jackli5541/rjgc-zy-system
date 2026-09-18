@@ -13,7 +13,7 @@ from openpyxl import Workbook
 from sqlalchemy import select
 
 from app.database import SessionLocal
-from app.main import app
+from app.main import app, parse_roster
 from app.grading import final_score
 from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, Team
 from app.worker import process_auto_review, process_due_campaign
@@ -452,6 +452,25 @@ def test_multisheet_roster_and_member_crud():
     result = teacher.post(f"/api/v1/classes/{class_id}/members/import/{preview.json()['batch_id']}/confirm", headers=headers)
     assert result.json() == {"created": 1, "joined": 1, "skipped": 0}
     assert teacher.get(f"/api/v1/classes/{class_id}/members").json()["total"] == 2
+
+
+def test_parse_roster_with_incorrect_worksheet_dimension():
+    workbook = Workbook()
+    roster = workbook.active
+    roster.append(["学号", "姓名"])
+    roster.append(["20269993", "范围异常学生"])
+    content = BytesIO()
+    workbook.save(content)
+
+    malformed = BytesIO()
+    with ZipFile(BytesIO(content.getvalue())) as source, ZipFile(malformed, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                data = data.replace(b'<dimension ref="A1:B2"/>', b'<dimension ref="A1"/>')
+            target.writestr(item, data)
+
+    assert parse_roster(malformed.getvalue(), "范围异常名单.xlsx") == [("20269993", "范围异常学生")]
 
 
 def test_classes_are_ordered_by_semester_name_and_creation_time():
