@@ -1,6 +1,8 @@
 import hashlib
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError

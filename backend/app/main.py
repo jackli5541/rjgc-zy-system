@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio, csv, hashlib, html, io, json, mimetypes, os, re, secrets
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 from decimal import Decimal
 from pathlib import Path
 from ipaddress import ip_address, ip_network

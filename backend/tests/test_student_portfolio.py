@@ -1,4 +1,6 @@
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 from io import BytesIO
 from urllib.parse import unquote
 from uuid import UUID

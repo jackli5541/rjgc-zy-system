@@ -1,7 +1,9 @@
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 from decimal import Decimal
 from uuid import UUID
 from zipfile import ZipFile

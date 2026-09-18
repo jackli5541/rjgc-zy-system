@@ -1,5 +1,7 @@
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 from uuid import UUID
 
 from sqlalchemy import and_, delete, select
