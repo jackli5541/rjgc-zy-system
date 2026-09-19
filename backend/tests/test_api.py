@@ -1072,10 +1072,10 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
     forbidden = student.put(f"/api/v1/submission-versions/{version_id}/feedback/draft", headers=student_headers, json={"revision": 0, "grade": "A", "comment": "", "annotations": []})
     assert forbidden.status_code == 403
 
-    published = teacher.post(f"/api/v1/submission-versions/{version_id}/feedback/publish", headers=teacher_headers, json={"revision": draft.json()["revision"], "grade": "A", "comment": "<p>已发布总评</p>", "annotations": [annotation, pure_mark, legacy_mark]})
+    published = teacher.post(f"/api/v1/submission-versions/{version_id}/feedback/publish", headers=teacher_headers, json={"revision": draft.json()["revision"], "grade": "C", "comment": "<p>已发布总评</p>", "annotations": [annotation, pure_mark, legacy_mark]})
     assert published.status_code == 200 and published.json()["status"] == "PUBLISHED"
     student_feedback = student.get(f"/api/v1/submission-versions/{version_id}/feedback").json()
-    assert student_feedback["grade"] == "A" and len(student_feedback["annotations"]) == 3
+    assert student_feedback["grade"] == "C" and len(student_feedback["annotations"]) == 3
     assert student_feedback["annotations"][0]["mark_type"] == "COMMENT" and student_feedback["annotations"][0]["color"] == "BLUE"
     assert student_feedback["annotations"][1]["mark_type"] == "UNDERLINE" and student_feedback["annotations"][1]["comment"] == ""
     assert student_feedback["annotations"][2]["mark_type"] == "HIGHLIGHT" and student_feedback["annotations"][2]["color"] == "YELLOW"
@@ -1094,7 +1094,19 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
     assert updated.status_code == 201
     refreshed = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"][0]
     assert refreshed["submission_version_no"] == 2 and refreshed["submission_version_id"] != version_id
-    assert refreshed["teacher_grade"] is None and refreshed["files"][0]["id"] == replacement["id"]
+    assert refreshed["teacher_grade"]["grade"] == "C" and refreshed["final_grade"] == "C"
+    assert refreshed["grade_carried_forward"] is True and refreshed["grading_status"] == "PENDING_REASSESSMENT"
+    assert refreshed["files"][0]["id"] == replacement["id"]
+    assignment_list = teacher.get(f"/api/v1/assignments?class_id={class_id}").json()["items"]
+    listed_assignment = next(item for item in assignment_list if item["id"] == assignment["id"])
+    assert listed_assignment["pending_teacher_review_count"] == 1
+    notifications = teacher.get("/api/v1/notifications").json()["items"]
+    assert all(item["kind"] != "SUBMISSION_RESUBMITTED" for item in notifications)
+    regraded = teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{board_item['user_id']}/grade", headers=teacher_headers, json={"grade": "A", "comment": "重新批改后可以评 A"})
+    assert regraded.status_code == 201 and regraded.json()["result"]["final_grade"] == "A"
+    assignment_list = teacher.get(f"/api/v1/assignments?class_id={class_id}").json()["items"]
+    listed_assignment = next(item for item in assignment_list if item["id"] == assignment["id"])
+    assert listed_assignment["pending_teacher_review_count"] == 0
     assert student.get(f"/api/v1/submission-versions/{version_id}/feedback").json()["status"] == "PUBLISHED"
 
 

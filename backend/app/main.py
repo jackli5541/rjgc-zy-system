@@ -1020,6 +1020,7 @@ def assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
         )
     items = db.scalars(q.order_by(Assignment.created_at.desc())).all()
     submissions_by_assignment = {}
+    pending_teacher_reviews = {}
     if user.role == "STUDENT" and items:
         assignment_ids = [item.id for item in items]
         ownership = or_(Submission.owner_user_id == user.id, Submission.owner_team_id == team.id)
@@ -1029,12 +1030,30 @@ def assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
                 select(Submission).where(Submission.assignment_id.in_(assignment_ids), ownership)
             ).all()
         }
+    elif user.role == "TEACHER" and items:
+        assignment_ids = [item.id for item in items]
+        pending_teacher_reviews = dict(db.execute(
+            select(Submission.assignment_id, func.count(SubmissionVersion.id))
+            .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+            .where(
+                Submission.assignment_id.in_(assignment_ids),
+                Submission.status == "SUBMITTED",
+                ~select(SubmissionAssessment.id).where(
+                    SubmissionAssessment.submission_version_id == SubmissionVersion.id,
+                    SubmissionAssessment.kind == "TEACHER",
+                    SubmissionAssessment.status == "PUBLISHED",
+                ).exists(),
+            )
+            .group_by(Submission.assignment_id)
+        ).all())
     result = []
     for item in items:
         payload = assignment_json(item)
         if user.role == "STUDENT":
             submission = submissions_by_assignment.get(item.id)
             payload["submission_status"] = submission.status if submission else "NOT_SUBMITTED"
+        else:
+            payload["pending_teacher_review_count"] = pending_teacher_reviews.get(item.id, 0)
         result.append(payload)
     return {"items": result, "total": len(result)}
 
@@ -1603,7 +1622,7 @@ def submission(aid: UUID, user: CurrentUser, db: Db):
     s, _ = own_submission(db, a, user)
     latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s else None
     files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == latest.id)).all() if latest else []
-    result = submission_grade_result(db, latest) if latest else {"final_grade": None, "grading_status": "PENDING_SUBMISSION"}
+    result = displayed_submission_grade_result(db, latest) if latest else {"final_grade": None, "grading_status": "PENDING_SUBMISSION"}
     return {"status": s.status if s else "EMPTY", "submitted_at": latest.submitted_at if latest else None, "is_late": latest.is_late if latest else False, "final_grade": result.get("final_grade"), "grading_status": result.get("grading_status"), "files": [file_json(file) for file in files]}
 
 
@@ -1750,6 +1769,27 @@ def assert_submission_update_allowed(db: Session, submission: Submission, curren
 def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
     assessments = list(db.scalars(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id)).all())
     return build_submission_grade_result(assessments, lambda item: assessment_json(db, item))
+
+
+def displayed_submission_grade_result(db: Session, version: SubmissionVersion, current_result: dict | None = None) -> dict:
+    result = current_result or submission_grade_result(db, version)
+    if result.get("final_grade") or version.version_no <= 1:
+        return {**result, "grade_carried_forward": False, "grade_from_version_no": version.version_no if result.get("final_grade") else None}
+    previous_versions = db.scalars(
+        select(SubmissionVersion)
+        .where(SubmissionVersion.submission_id == version.submission_id, SubmissionVersion.version_no < version.version_no)
+        .order_by(SubmissionVersion.version_no.desc())
+    ).all()
+    for previous in previous_versions:
+        previous_result = submission_grade_result(db, previous)
+        if previous_result.get("final_grade"):
+            return {
+                **previous_result,
+                "grading_status": "PENDING_REASSESSMENT",
+                "grade_carried_forward": True,
+                "grade_from_version_no": previous.version_no,
+            }
+    return {**result, "grade_carried_forward": False, "grade_from_version_no": None}
 
 
 def missing_submission_grade_result(assignment: Assignment) -> dict:
@@ -2351,7 +2391,7 @@ def grades(user: CurrentUser, db: Db, class_id: UUID = Query()):
                 _, version = submitted
                 has_current_assessment = bool(db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == version.id).limit(1)))
                 if assignment.id in legacy_assignment_ids and not has_current_assessment: continue
-                result = submission_grade_result(db, version)
+                result = displayed_submission_grade_result(db, version)
                 files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
                 items.append({"id": str(version.id), "submission_version_id": str(version.id), "submission_version_no": version.version_no, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "submitter_type": assignment.submitter_type, "status": result["grading_status"], "files": [file_json(file) for file in files], **result})
             else:
@@ -2499,8 +2539,12 @@ def grade_revisions(gid: UUID, user: CurrentUser, db: Db):
 
 @app.get("/api/v1/notifications")
 def notifications(user: CurrentUser, db: Db):
-    items = db.scalars(select(Notification).where(Notification.user_id == user.id).order_by(Notification.created_at.desc()).limit(100)).all()
-    return {"items": [{"id": str(x.id), "title": x.title, "kind": x.kind, "object_type": x.object_type, "object_id": x.object_id, "link": f"/teams?team={x.object_id}" if x.object_type == "team" and x.object_id else None, "read": bool(x.read_at), "created_at": x.created_at} for x in items], "unread": sum(not x.read_at for x in items)}
+    items = db.scalars(select(Notification).where(Notification.user_id == user.id, Notification.kind != "SUBMISSION_RESUBMITTED").order_by(Notification.created_at.desc()).limit(100)).all()
+    def link(item: Notification) -> str | None:
+        if item.object_type == "team" and item.object_id: return f"/teams?team={item.object_id}"
+        if item.object_type == "assignment" and item.object_id: return f"/assignments/{item.object_id}?tab=submission"
+        return None
+    return {"items": [{"id": str(x.id), "title": x.title, "kind": x.kind, "object_type": x.object_type, "object_id": x.object_id, "link": link(x), "read": bool(x.read_at), "created_at": x.created_at} for x in items], "unread": sum(not x.read_at for x in items)}
 
 
 @app.post("/api/v1/notifications/read", status_code=204)
@@ -2577,7 +2621,7 @@ def export_rows(kind: str, class_id: UUID, user: User, db: Session, assignment_i
                     rows.append([assignment.title, person.login_name, person.display_name, team_row[1].name if team_row else "未分组", "未提交", "", "", result["final_grade"] or "", "系统判定" if result["grade_source"] == "SYSTEM" else "", "已评分" if result["final_grade"] else "未评分"])
                     continue
                 _, version = submitted
-                result = submission_grade_result(db, version)
+                result = displayed_submission_grade_result(db, version)
                 rows.append([
                     assignment.title, person.login_name, person.display_name, team_row[1].name if team_row else "未分组", "已提交",
                     result["peer_grade"] or "", result["teacher_grade"]["grade"] if result["teacher_grade"] else "", result["final_grade"] or "",
@@ -2835,6 +2879,8 @@ def submission_board(aid: UUID, user: CurrentUser, db: Db):
         latest = versions_by_submission.get(submission.id) if submission else None
         files = files_by_version.get(latest.id, []) if latest and submission.status == "SUBMITTED" else []
         grade_result = build_submission_grade_result(assessments_by_version.get(latest.id, []), serialize_assessment) if latest and submission.status == "SUBMITTED" else missing_submission_grade_result(assignment)
+        if latest and submission.status == "SUBMITTED" and not grade_result.get("final_grade") and latest.version_no > 1:
+            grade_result = displayed_submission_grade_result(db, latest, grade_result)
         items.append({"id": str(submission.id) if submission else str(owner_id), "submission_version_id": str(latest.id) if latest and submission.status == "SUBMITTED" else None, "submission_version_no": latest.version_no if latest and submission.status == "SUBMITTED" else None, "grade_cap": latest.grade_cap if latest and submission.status == "SUBMITTED" else None, "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
     return {"items": items, "total": len(items)}
 
@@ -2996,7 +3042,7 @@ def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
             for assignment in assignments:
                 submission = submissions.get(assignment.id)
                 version = versions.get(submission.id) if submission else None
-                result = submission_grade_result(db, version) if version else missing_submission_grade_result(assignment)
+                result = displayed_submission_grade_result(db, version) if version else missing_submission_grade_result(assignment)
                 source = result["grade_source"]
                 grade_rows.append([
                     assignment.title, "已提交" if version else "未提交", result["peer_grade"],

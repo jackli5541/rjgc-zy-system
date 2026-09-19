@@ -34,7 +34,7 @@ def test_student_portfolio_and_archives():
         assert response.status_code == 201, response.text
         files.append(response.json())
     assert student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "portfolio-current"}, json={}).status_code == 201
-    teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{member['id']}/grade", headers=headers, json={"grade": "B", "comment": "<p><strong>完整</strong><br>继续保持</p>"})
+    teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{member['id']}/grade", headers=headers, json={"grade": "C", "comment": "<p><strong>完整</strong><br>继续保持</p>"})
     with SessionLocal() as db:
         db.get(Assignment, UUID(other["id"])).due_at = datetime.now(UTC) - timedelta(days=1)
         version = db.scalar(select(SubmissionVersion).join(Submission).where(Submission.assignment_id == UUID(assignment['id'])))
@@ -44,7 +44,7 @@ def test_student_portfolio_and_archives():
     data = teacher.get(base).json()
     assert data["summary"] == {"total": 2, "submitted": 1, "late": 0, "missing": 1}
     submitted = next(item for item in data["assignments"] if item["status"] == "SUBMITTED")
-    assert submitted["final_grade"] == "B" and submitted["peer_grade"] == "A"
+    assert submitted["final_grade"] == "C" and submitted["peer_grade"] == "A"
     assert len(submitted["received_reviews"]) == 1
     assert next(item for item in data["assignments"] if item["status"] != "SUBMITTED")["grade_source"] == "SYSTEM"
     assert student.get(base).status_code == 403
@@ -66,8 +66,8 @@ def test_student_portfolio_and_archives():
         assert assignment_headers == ["作业", "截止时间", "提交状态", "提交时间", "提交版本", "迟交", "附件", "互评成绩", "教师评分", "最终成绩", "成绩来源", "评分状态", "教师评语"]
         assignment_row = next(row for row in workbook["作业记录"].iter_rows(min_row=2) if row[0].value == "个人报告")
         assert assignment_row[7].value == "A"
-        assert assignment_row[8].value == "B"
-        assert assignment_row[9].value == "B"
+        assert assignment_row[8].value == "C"
+        assert assignment_row[9].value == "C"
         assert assignment_row[12].value == "完整\n继续保持"
         assert workbook["收到的互评"]["D2"].value == "结构清晰"
         assert all("<" not in str(cell.value or "") for sheet in workbook for row in sheet for cell in row)
@@ -85,8 +85,9 @@ def test_student_portfolio_and_archives():
     assert student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "portfolio-v2"}, json={}).status_code == 201
     updated = teacher.get(base).json()
     current = next(item for item in updated["assignments"] if item["status"] == "SUBMITTED")
-    assert current["version_no"] == 2 and current["final_grade"] is None
-    assert current["received_reviews"] == []
+    assert current["version_no"] == 2 and current["final_grade"] == "C"
+    assert current["grade_carried_forward"] is True and current["grading_status"] == "PENDING_REASSESSMENT"
+    assert current["received_reviews"][0]["grade"] == "A"
     with ZipFile(BytesIO(teacher.get(base + ".zip").content)) as archive:
         assert len(archive.namelist()) == 2
         assert any(name.endswith("/updated.pdf") for name in archive.namelist())

@@ -24,14 +24,14 @@ def plain_text(value):
 
 
 def portfolio(db, cid, uid):
-    from app.main import clean_html, file_json, latest_personal_submission, member_detail, missing_submission_grade_result, submission_grade_result
+    from app.main import clean_html, displayed_submission_grade_result, file_json, latest_personal_submission, member_detail, missing_submission_grade_result
     person = member_detail(db, cid, uid)[2]
     assignments = db.scalars(select(Assignment).where(Assignment.class_id == cid, Assignment.submitter_type == "INDIVIDUAL", Assignment.status.in_(["PUBLISHED", "CLOSED"])).order_by(Assignment.due_at, Assignment.id)).all()
     items = []
     for assignment in assignments:
         submitted = latest_personal_submission(db, assignment.id, uid)
         version = submitted[1] if submitted else None
-        result = submission_grade_result(db, version) if version else missing_submission_grade_result(assignment)
+        result = displayed_submission_grade_result(db, version) if version else missing_submission_grade_result(assignment)
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all() if version else []
         reviews = list(result["peer_feedbacks"])
         for review in reviews:
