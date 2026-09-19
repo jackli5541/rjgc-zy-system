@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { CheckCircleFilled, CloudSyncOutlined, EyeOutlined, FileTextOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { api } from '../api'
@@ -7,7 +8,7 @@ import { loadMarkdownPreview, renderMarkdown } from '../markdownPreview'
 import RichTextEditor from './RichTextEditor.vue'
 import RichTextViewer from './RichTextViewer.vue'
 
-const props = defineProps({ assignmentId: String, writable: Boolean, criteriaFiles: { type: Array, default: () => [] } })
+const props = defineProps({ assignmentId: String, writable: Boolean })
 const emit = defineEmits(['ready', 'preview-criteria'])
 const loading = ref(false)
 const documentLoading = ref(false)
@@ -237,7 +238,14 @@ function externalChange(event) {
   else loadDocument(activeId.value, true)
 }
 onMounted(() => { load(); window.addEventListener('beforeunload', beforeUnload); window.addEventListener('workspace-changed', externalChange) })
-onBeforeUnmount(() => { loadSequence += 1; clearTimeout(saveTimer); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('workspace-changed', externalChange) })
+onBeforeRouteLeave(async () => { await save() })
+onBeforeUnmount(() => {
+  loadSequence += 1
+  clearTimeout(saveTimer)
+  if (state.value === 'dirty') void save()
+  window.removeEventListener('beforeunload', beforeUnload)
+  window.removeEventListener('workspace-changed', externalChange)
+})
 defineExpose({ save, reload: () => load(activeId.value) })
 </script>
 
@@ -246,10 +254,6 @@ defineExpose({ save, reload: () => load(activeId.value) })
     <aside class="document-sidebar">
       <div class="document-sidebar-heading"><div><strong>文档</strong><span>{{workspace?.documents?.length||0}} 份 Markdown</span></div></div>
       <nav class="document-list" aria-label="作业文档列表"><button v-for="item in workspace?.documents||[]" :key="item.id" type="button" class="document-item" :class="{active:item.id===activeId}" @click="selectDocument(item.id)"><span class="document-icon"><FileTextOutlined/></span><span class="document-name">{{item.name}}</span></button></nav>
-      <section v-if="criteriaFiles.length" class="criteria-list">
-        <div class="criteria-list-heading"><span>判定标准</span><small>只读</small></div>
-        <button v-for="file in criteriaFiles" :key="file.id" type="button" class="criteria-item" :class="{active:criteriaPreview?.file.id===file.id}" @click="selectCriteria(file)"><span class="document-icon"><EyeOutlined/></span><span class="document-name">{{file.name}}</span></button>
-      </section>
     </aside>
     <main class="document-surface">
       <header class="document-status"><div class="document-title"><strong>{{criteriaPreview?.file.name||active?.name}}</strong><span v-if="criteriaPreview">判定标准 · 只读</span><span v-else-if="active?.updated_by">最近由 {{active.updated_by}} 编辑</span></div><div v-if="!criteriaPreview" class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'即将保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span><a-tooltip title="重新载入"><a-button type="text" shape="circle" @click="load(activeId)"><ReloadOutlined/></a-button></a-tooltip></div><span v-else class="readonly-indicator"><EyeOutlined/> 只读查看</span></header>

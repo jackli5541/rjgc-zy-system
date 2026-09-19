@@ -175,6 +175,11 @@ const assignmentSubmitted = computed(() => selectedAssignment.value?.submission?
 const studentCriteriaMaterials = computed(() => assignmentAttachments.value.filter(file => file.material_type === 'CRITERIA'))
 const assignmentBeforeDue = computed(() => Boolean(selectedAssignment.value && new Date(selectedAssignment.value.due_at) > new Date()))
 const assignmentIsUpdate = computed(() => assignmentSubmitted.value && assignmentBeforeDue.value)
+const submissionFinalGrade = computed(() => selectedAssignment.value?.submission?.final_grade || null)
+const submissionUpdateAllowed = computed(() => {
+  if (!assignmentSubmitted.value) return true
+  return ['C', 'D', 'E'].includes(submissionFinalGrade.value)
+})
 const canManageTeamSubmission = computed(() => {
   if (selectedAssignment.value?.submitter_type !== 'TEAM') return true
   return session.context?.team_membership?.role === 'LEADER' && currentTeam.value?.is_leader === true
@@ -194,6 +199,8 @@ const canSubmitAssignment = computed(() => {
   if (!assignment) return false
   if (assignment.status !== 'PUBLISHED') return false
   if (!canManageTeamSubmission.value) return false
+  if (!submissionUpdateAllowed.value) return !assignmentSubmitted.value
+  if (assignmentSubmitted.value && submissionUpdateAllowed.value) return true
   return new Date(assignment.due_at) > new Date() || (!assignmentSubmitted.value && assignment.allow_late)
 })
 const canEditAssignment = computed(() => {
@@ -780,7 +787,10 @@ async function submitAssignment() {
   if (!await onlineWorkspace.value?.save()) return message.warning('请先解决文档保存问题')
   const updating = assignmentIsUpdate.value
   const count = onlineWorkspaceData.value?.documents?.length || 0
-  Modal.confirm({ title: updating ? '确认更新提交？' : '确认正式提交？', content: `将提交在线工作区中的 ${count} 份 Markdown 文档${updating?'并生成新的提交版本':''}。`, okText: updating ? '确认更新' : '确认提交', cancelText: '继续检查', onOk: async () => action(() => api(`/assignments/${selectedAssignment.value.id}/submission`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: JSON.stringify({}) }), updating ? '提交已更新' : '提交成功') })
+  const warning = updating
+    ? '提交更新后，在互评完成或教师评分前不能再次修改。'
+    : `将提交在线工作区中的 ${count} 份 Markdown 文档。提交后，在互评完成或教师评分前不能修改或重新提交。`
+  Modal.confirm({ title: updating ? '确认更新提交？' : '确认正式提交？', content: warning, okText: updating ? '确认更新' : '确认提交', cancelText: '继续检查', onOk: async () => action(() => api(`/assignments/${selectedAssignment.value.id}/submission`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: JSON.stringify({}) }), updating ? '提交已更新' : '提交成功') })
 }
 function openSubmissionDetail(record) {
   const targets = (selectedAssignment.value?.board || []).filter(item => item.status === 'SUBMITTED' && item.files?.length)
@@ -1149,7 +1159,7 @@ provide(shellContextKey, {
                  <div><span class="student-workspace-label">作业要求</span><div class="rich-text detail-description" v-html="selectedAssignment.description"></div></div>
                  <div class="student-workspace-state" :class="{submitted:assignmentSubmitted,closed:!canEditAssignment&&!assignmentSubmitted}"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/><div><strong>{{assignmentSubmitted?'已提交':new Date(selectedAssignment.due_at)<=new Date()&&!selectedAssignment.allow_late?'已截止':'在线编写中'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · 可继续修改`:`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div>
                </header>
-               <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" :criteria-files="assignmentSubmitted?studentCriteriaMaterials:[]" @ready="onlineWorkspaceData=$event" @preview-criteria="openFilePreview"/>
+               <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" @ready="onlineWorkspaceData=$event"/>
                <footer class="student-submit-bar">
                  <span v-if="selectedAssignment.submitter_type==='TEAM'&&!canManageTeamSubmission">小组成员均可协作编辑，由组长正式提交</span>
                  <span v-else>{{onlineWorkspaceData?.documents?.length||0}} 份 Markdown 文档将作为一个版本提交</span>
@@ -1228,6 +1238,7 @@ provide(shellContextKey, {
       :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
       :allow-download="role==='TEACHER'"
       :expanded="filePreview.mode==='PEER'?peerReviewExpanded:assignmentDrawerExpanded"
+      :grade-cap="selectedSubmission?.grade_cap||''"
       @close="closeFilePreview"
       @update:expanded="updateFileReviewExpanded"
       @feedback-published="handleFeedbackPublished"

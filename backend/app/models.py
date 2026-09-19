@@ -225,6 +225,7 @@ class SubmissionVersion(Base):
     member_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     is_late: Mapped[bool] = mapped_column(Boolean, default=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(80))
+    grade_cap: Mapped[str | None] = mapped_column(String(1))
     __table_args__ = (UniqueConstraint("submission_id", "version_no", name="uq_submission_version"),)
 
 

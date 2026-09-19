@@ -1603,7 +1603,8 @@ def submission(aid: UUID, user: CurrentUser, db: Db):
     s, _ = own_submission(db, a, user)
     latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s else None
     files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == latest.id)).all() if latest else []
-    return {"status": s.status if s else "EMPTY", "submitted_at": latest.submitted_at if latest else None, "is_late": latest.is_late if latest else False, "files": [file_json(file) for file in files]}
+    result = submission_grade_result(db, latest) if latest else {"final_grade": None, "grading_status": "PENDING_SUBMISSION"}
+    return {"status": s.status if s else "EMPTY", "submitted_at": latest.submitted_at if latest else None, "is_late": latest.is_late if latest else False, "final_grade": result.get("final_grade"), "grading_status": result.get("grading_status"), "files": [file_json(file) for file in files]}
 
 
 @app.post("/api/v1/assignments/{aid}/submission", status_code=201)
@@ -1623,7 +1624,11 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
         db.scalar(select(Team.id).where(Team.id == team.id).with_for_update())
         s = db.scalar(select(Submission).where(Submission.assignment_id == aid, Submission.owner_team_id == team.id).with_for_update())
         if team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "小组作业仅组长可正式提交")
-    if a.due_at < now() and not a.allow_late: raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止且不允许迟交")
+    current = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s and s.current_version_no else None
+    assert_submission_update_allowed(db, s, current) if s else None
+    can_update_low_grade = bool(current and submission_grade_result(db, current).get("final_grade") in {"C", "D", "E"})
+    if a.due_at < now() and not a.allow_late and not can_update_low_grade:
+        raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止且不允许迟交")
     file_scope = FileObject.owner_id == user.id if not team else FileObject.team_id == team.id
     workspace = db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_user_id == user.id)) if not team else db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_team_id == team.id))
     if workspace:
@@ -1643,7 +1648,6 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
     files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).order_by(FileObject.created_at)).all()  # noqa: E712
     if not files: raise ApiError(422, "SUBMISSION_FILES_REQUIRED", "请先上传作业附件")
     if not s: s = Submission(assignment_id=aid, owner_user_id=user.id if not team else None, owner_team_id=team.id if team else None); db.add(s); db.flush()
-    current = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s.current_version_no else None
     if idempotency_key and current and current.idempotency_key == idempotency_key:
         return {"id": str(s.id), "submitted_at": current.submitted_at, "is_late": current.is_late}
     snapshot = {}
@@ -1652,7 +1656,8 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
         snapshot = {"members": [{"id": str(person.id), "student_no": person.login_name, "name": person.display_name, "role": member.role} for member, person in rows]}
     submitted_at = now()
     s.current_version_no = (current.version_no + 1) if current else 1
-    v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key)
+    teacher_graded_before_resubmit = bool(current and db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == current.id, SubmissionAssessment.kind == "TEACHER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
+    v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key, grade_cap="B" if teacher_graded_before_resubmit else None)
     db.add(v); db.flush()
     old_versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.id != v.id)).all()
     for old in old_versions:
@@ -1722,6 +1727,20 @@ def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
         "final_grade": final_grade, "grade_source": "TEACHER" if teacher_assessment else "PEER" if peer_grade else None,
         "grading_status": "GRADED" if final_grade else "PENDING_ASSESSMENT",
     }
+
+
+GRADE_RANK = {"A": 5, "B": 4, "C": 3, "D": 2, "E": 1}
+
+
+def assert_submission_update_allowed(db: Session, submission: Submission, current: SubmissionVersion | None) -> None:
+    if not current:
+        return
+    result = submission_grade_result(db, current)
+    final_grade = result.get("final_grade")
+    if final_grade is None:
+        raise ApiError(409, "SUBMISSION_UPDATE_LOCKED", "提交后需要等待互评完成或教师评分后，才能重新提交")
+    if GRADE_RANK.get(final_grade, 0) > GRADE_RANK["C"]:
+        raise ApiError(409, "SUBMISSION_UPDATE_LOCKED", "最终成绩为 A 或 B，不能更新提交")
 
 
 def missing_submission_grade_result(assignment: Assignment) -> dict:
@@ -1829,6 +1848,8 @@ def save_peer_submission_assessment(aid: UUID, data: PeerSubmissionAssessmentIn,
     submitted = latest_personal_submission(db, aid, data.reviewee_id)
     if not submitted: raise ApiError(409, "REVIEWEE_NOT_SUBMITTED", "该组员尚未提交作业")
     _, version = submitted
+    if version.grade_cap == "B" and data.grade == "A":
+        raise ApiError(409, "GRADE_CAP_EXCEEDED", "重新提交版本的最高成绩为 B")
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
     updating = item is not None
     if item:
@@ -1849,6 +1870,8 @@ def save_teacher_submission_assessment(aid: UUID, student_id: UUID, data: Submis
     submitted = latest_personal_submission(db, aid, student_id)
     if not submitted: raise ApiError(409, "SUBMISSION_REQUIRED", "该学生尚未提交作业")
     _, version = submitted
+    if version.grade_cap == "B" and data.grade == "A":
+        raise ApiError(409, "GRADE_CAP_EXCEEDED", "重新提交版本的最高成绩为 B")
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     updating = item is not None
     if item:
@@ -2723,7 +2746,7 @@ def submission_board(aid: UUID, user: CurrentUser, db: Db):
         latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id, SubmissionVersion.version_no == submission.current_version_no)) if submission else None
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == latest.id)).all() if latest and submission.status == "SUBMITTED" else []
         grade_result = submission_grade_result(db, latest) if latest and submission.status == "SUBMITTED" else missing_submission_grade_result(assignment)
-        items.append({"id": str(submission.id) if submission else str(owner_id), "submission_version_id": str(latest.id) if latest and submission.status == "SUBMITTED" else None, "submission_version_no": latest.version_no if latest and submission.status == "SUBMITTED" else None, "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
+        items.append({"id": str(submission.id) if submission else str(owner_id), "submission_version_id": str(latest.id) if latest and submission.status == "SUBMITTED" else None, "submission_version_no": latest.version_no if latest and submission.status == "SUBMITTED" else None, "grade_cap": latest.grade_cap if latest and submission.status == "SUBMITTED" else None, "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
     return {"items": items, "total": len(items)}
 
 

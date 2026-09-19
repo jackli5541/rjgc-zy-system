@@ -26,7 +26,8 @@ const props = defineProps({
   peerGrade: { type: String, default: '' },
   peerFeedbacks: { type: Array, default: () => [] },
   allowDownload: Boolean,
-  expanded: Boolean
+  expanded: Boolean,
+  gradeCap: { type: String, default: '' }
 })
 const emit = defineEmits(['close', 'feedback-published', 'clear-feedback', 'target-change', 'external-target', 'update:expanded'])
 const index = ref(0)
@@ -482,7 +483,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         </section>
         <div v-if="!editable&&feedback.comment" class="published-overall"><strong>{{mode==='PEER'?'互评总评':'教师总评'}}</strong><div v-html="feedback.comment"></div></div>
         <div v-if="editable" class="feedback-actions">
-          <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in ['A','B','C','D','E']" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
+          <div class="feedback-action-grade"><span>作业等级</span><div v-if="mode==='TEACHER'" class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in (gradeCap === 'B' ? ['B','C','D','E'] : ['A','B','C','D','E'])" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div><a-select v-else v-model:value="feedback.grade" placeholder="请选择等级" aria-label="作业等级" :options="['A','B','C','D','E'].map(value=>({value,label:value}))"/></div>
           <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'&&feedback.status" danger @click="emit('clear-feedback')">清除反馈</a-button><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button></div>
         </div>
       </aside>
