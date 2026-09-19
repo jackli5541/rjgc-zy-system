@@ -17,6 +17,7 @@ import ClassDetailPage from './shell/ClassDetailPage.vue'
 import ClassesPage from './shell/ClassesPage.vue'
 import GradesPage from './shell/GradesPage.vue'
 import OverviewPage from './shell/OverviewPage.vue'
+import ReviewDetailPage from './shell/ReviewDetailPage.vue'
 import ReviewsPage from './shell/ReviewsPage.vue'
 import RoleMenuPage from './shell/RoleMenuPage.vue'
 import SystemPage from './shell/SystemPage.vue'
@@ -117,14 +118,14 @@ const descriptionEditor = useEditor({
 
 const role = computed(() => session.user?.role)
 const classId = computed(() => session.classId)
-const view = computed(() => route.name === 'assignment-detail' ? 'assignment-detail' : route.name === 'grade-detail' ? 'grade-detail' : route.name === 'class-detail' ? 'class-detail' : route.params.view || 'overview')
+const view = computed(() => route.name === 'assignment-detail' ? 'assignment-detail' : route.name === 'review-detail' ? 'review-detail' : route.name === 'grade-detail' ? 'grade-detail' : route.name === 'class-detail' ? 'class-detail' : route.params.view || 'overview')
 const detailId = computed(() => route.params.id)
 const pageKey = computed(() => `${role.value || 'guest'}:${classId.value || 'none'}:${view.value}:${detailId.value || ''}`)
 const surfaceKey = computed(() => role.value === 'TEACHER' && view.value === 'assignment-detail'
   ? `${role.value}:${classId.value || 'none'}:assignments:`
   : pageKey.value)
 const initialLoading = computed(() => loading.value && !loadedViewKeys.has(pageKey.value))
-const navView = computed(() => view.value === 'assignment-detail' ? 'assignments' : view.value === 'grade-detail' ? 'grades' : view.value === 'class-detail' ? 'classes' : view.value)
+const navView = computed(() => view.value === 'assignment-detail' ? 'assignments' : view.value === 'review-detail' ? 'reviews' : view.value === 'grade-detail' ? 'grades' : view.value === 'class-detail' ? 'classes' : view.value)
 const activeClasses = computed(() => session.classes.filter(item => item.status === 'ACTIVE'))
 const classOptions = computed(() => activeClasses.value.map(item => ({ value: item.id, label: `${item.semester} · ${item.name}` })))
 const auditSemesterOptions = computed(() => [...new Set(session.classes.map(item => item.semester))].sort().map(value => ({ value, label: value })))
@@ -411,6 +412,15 @@ async function loadView({ silent = false, background = false } = {}) {
       const campaignData = await api(`/peer-review-assignments?class_id=${classId.value}`)
       if (!isCurrent()) return
       campaigns.value = campaignData.items
+    }
+    if (view.value === 'review-detail') {
+      if (role.value === 'TEACHER') { await router.replace('/assignments'); return }
+      const campaignData = await api(`/peer-review-assignments?class_id=${classId.value}`)
+      if (!isCurrent()) return
+      campaigns.value = campaignData.items
+      const assignment = campaigns.value.find(item => item.assignment_id === detailId.value)
+      if (!assignment) { message.error('当前没有可互评的组员提交'); await router.replace('/reviews') }
+      else await loadCampaignDetail(assignment, isCurrent)
     }
     if (view.value === 'grades') {
       const gradeData = role.value === 'TEACHER' ? await api(`/grades/assignments?class_id=${classId.value}`) : await api(`/grades?class_id=${classId.value}`)
@@ -954,13 +964,8 @@ async function loadCampaignDetail(item, isStillCurrent = () => true, preferredUs
   const first = task.candidates.find(candidate => candidate.user_id === preferredUserId) || task.candidates[0]
   Object.assign(reviewForm, { reviewee_id: first?.user_id || '', grade: first?.review?.grade, comment: first?.review?.comment || '' })
 }
-async function openCampaign(item, userId) {
-  try {
-    await loadCampaignDetail(item, () => true, userId)
-    const candidate = reviewTask.value?.candidates?.find(entry => entry.user_id === userId)
-    if (!candidate) return message.warning('该组员当前没有可评价的提交')
-    openPeerReviewDrawer(candidate)
-  } catch (error) { message.error(error.message) }
+async function openCampaign(item) {
+  await router.push(`/reviews/${item.assignment_id}`)
 }
 function selectReviewCandidate(userId) {
   const candidate = reviewTask.value?.candidates?.find(item => item.user_id === userId)
@@ -1264,6 +1269,7 @@ provide(shellContextKey, {
       </template>
 
       <ReviewsPage v-else-if="view==='reviews'" />
+      <ReviewDetailPage v-else-if="view==='review-detail'&&selectedCampaign" />
 
       <CapstonePage v-else-if="view==='capstone'" />
       <GradesPage v-else-if="view==='grades'" />

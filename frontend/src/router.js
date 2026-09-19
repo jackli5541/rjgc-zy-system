@@ -9,7 +9,7 @@ const router = createRouter({
     { path: '/login', name: 'login', component: LoginView },
     { path: '/assignments/:id', name: 'assignment-detail', component: ShellView },
     { path: '/classes/:id', name: 'class-detail', component: ShellView },
-    { path: '/reviews/:id', redirect: '/reviews' },
+    { path: '/reviews/:id', name: 'review-detail', component: ShellView },
     { path: '/grades/:id', name: 'grade-detail', component: ShellView },
     { path: '/:view(overview|classes|teams|assignments|reviews|capstone|grades|materials|system|menu-permissions)?', name: 'app', component: ShellView }
   ]
@@ -26,9 +26,11 @@ router.beforeEach(async to => {
     ? 'assignments'
     : to.name === 'class-detail'
       ? 'classes'
-      : to.name === 'grade-detail'
-        ? 'grades'
-        : to.params.view || 'overview'
+      : to.name === 'review-detail'
+        ? 'reviews'
+        : to.name === 'grade-detail'
+          ? 'grades'
+          : to.params.view || 'overview'
   if (menuKey !== 'menu-permissions' && !session.isMenuEnabled(menuKey)) return session.landingPath
   return true
 })
