@@ -1683,6 +1683,13 @@ def latest_personal_submission(db: Session, assignment_id: UUID, user_id: UUID):
     ).first()
 
 
+def require_peer_review_submission(db: Session, assignment_id: UUID, user_id: UUID):
+    submitted = latest_personal_submission(db, assignment_id, user_id)
+    if not submitted:
+        raise ApiError(409, "REVIEWER_SUBMISSION_REQUIRED", "请先提交该作业，再参与互评")
+    return submitted
+
+
 def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
     evaluator = db.get(User, item.evaluator_id)
     return {
@@ -1735,16 +1742,27 @@ def peer_review_assignments(user: CurrentUser, db: Db, class_id: UUID = Query())
     items = []
     assignments = db.scalars(select(Assignment).where(Assignment.class_id == class_id, Assignment.submitter_type == "INDIVIDUAL", Assignment.status.in_(["PUBLISHED", "CLOSED"])).order_by(Assignment.created_at.desc())).all()
     for assignment in assignments:
+        if not latest_personal_submission(db, assignment.id, user.id):
+            continue
         versions = db.execute(
-            select(SubmissionVersion.id, Submission.owner_user_id)
+            select(SubmissionVersion.id, Submission.owner_user_id, User.display_name, User.login_name)
             .join(Submission, Submission.id == SubmissionVersion.submission_id)
+            .join(User, User.id == Submission.owner_user_id)
             .where(Submission.assignment_id == assignment.id, Submission.owner_user_id.in_(teammate_ids), Submission.status == "SUBMITTED", SubmissionVersion.version_no == Submission.current_version_no)
+            .order_by(User.login_name)
         ).all()
         if not versions: continue
         version_ids = [row.id for row in versions]
-        reviewed = db.scalar(select(func.count()).select_from(SubmissionAssessment).where(SubmissionAssessment.submission_version_id.in_(version_ids), SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER")) or 0
+        reviewed_version_ids = set(db.scalars(select(SubmissionAssessment.submission_version_id).where(SubmissionAssessment.submission_version_id.in_(version_ids), SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER")).all())
+        candidates = [
+            {
+                "user_id": str(row.owner_user_id), "name": row.display_name, "student_no": row.login_name,
+                "reviewed": row.id in reviewed_version_ids,
+            }
+            for row in versions
+        ]
         payload = assignment_json(assignment)
-        payload.update({"assignment_id": str(assignment.id), "assignment_title": assignment.title, "available_count": len(versions), "reviewed_count": reviewed, "pending_count": len(versions) - reviewed})
+        payload.update({"assignment_id": str(assignment.id), "assignment_title": assignment.title, "available_count": len(versions), "reviewed_count": len(reviewed_version_ids), "pending_count": len(versions) - len(reviewed_version_ids), "candidates": candidates})
         items.append(payload)
     return {"items": items, "total": len(items)}
 
@@ -1755,10 +1773,20 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
     assignment = db.get(Assignment, aid)
     if not assignment or assignment.submitter_type != "INDIVIDUAL" or assignment.status not in {"PUBLISHED", "CLOSED"}: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_class(db, user, assignment.class_id)
+    require_peer_review_submission(db, aid, user.id)
     _, team = require_team(db, assignment.class_id, user)
     attachments = db.scalars(
         select(FileObject)
-        .where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT", FileObject.active == True)  # noqa: E712
+        .where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT", FileObject.active == True, or_(FileObject.material_type.is_(None), FileObject.material_type != "CRITERIA"))  # noqa: E712
+        .order_by(FileObject.created_at)
+    ).all()
+    criteria_files = db.scalars(
+        select(FileObject)
+        .where(
+            FileObject.assignment_id == aid,
+            FileObject.active == True,  # noqa: E712
+            or_(FileObject.purpose == "REVIEW_CRITERIA", and_(FileObject.purpose == "ATTACHMENT", FileObject.material_type == "CRITERIA")),
+        )
         .order_by(FileObject.created_at)
     ).all()
     rows = db.execute(
@@ -1781,6 +1809,7 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
     return {
         "assignment": assignment_json(assignment),
         "attachments": [file_json(file) for file in attachments],
+        "criteria_files": [file_json(file) for file in criteria_files],
         "team": {"id": str(team.id), "name": team.name},
         "candidates": candidates,
     }
@@ -1792,6 +1821,7 @@ def save_peer_submission_assessment(aid: UUID, data: PeerSubmissionAssessmentIn,
     assignment = db.get(Assignment, aid)
     if not assignment or assignment.submitter_type != "INDIVIDUAL" or assignment.status not in {"PUBLISHED", "CLOSED"}: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, assignment.class_id)
+    require_peer_review_submission(db, aid, user.id)
     if data.reviewee_id == user.id: raise ApiError(422, "SELF_REVIEW_FORBIDDEN", "不能评价自己的作业")
     reviewer_team = membership(db, assignment.class_id, user.id)
     reviewee_team = membership(db, assignment.class_id, data.reviewee_id)
@@ -1935,6 +1965,7 @@ def peer_feedback_context(db: Session, version_id: UUID, user: User):
     if assignment.submitter_type != "INDIVIDUAL" or assignment.status not in {"PUBLISHED", "CLOSED"}:
         raise ApiError(404, "SUBMISSION_VERSION_NOT_FOUND", "提交版本不存在")
     require_class(db, user, assignment.class_id)
+    require_peer_review_submission(db, assignment.id, user.id)
     if submission_item.owner_user_id == user.id: raise ApiError(422, "SELF_REVIEW_FORBIDDEN", "不能评价自己的作业")
     reviewer_team = membership(db, assignment.class_id, user.id)
     reviewee_team = membership(db, assignment.class_id, submission_item.owner_user_id)
@@ -2045,8 +2076,8 @@ def require_file_access(db: Session, user: User, fid: UUID) -> FileObject:
     if user.role == "STUDENT":
         own_membership = membership(db, a.class_id, user.id)
         mine = own_membership[1] if own_membership else None
-        if f.purpose in {"ATTACHMENT", "REVIEW_CRITERIA"}: allowed = True
-        if f.purpose == "ATTACHMENT" and f.material_type == "CRITERIA":
+        if f.purpose == "ATTACHMENT": allowed = True
+        if f.purpose == "REVIEW_CRITERIA" or (f.purpose == "ATTACHMENT" and f.material_type == "CRITERIA"):
             submission, _ = own_submission(db, a, user)
             allowed = bool(submission and submission.status == "SUBMITTED")
         elif f.team_id: allowed = bool(mine and f.team_id == mine.id)
@@ -2057,7 +2088,8 @@ def require_file_access(db: Session, user: User, fid: UUID) -> FileObject:
             else:
                 owner = membership(db, a.class_id, f.owner_id)
                 linked = db.execute(select(SubmissionVersion, Submission).join(Submission, Submission.id == SubmissionVersion.submission_id).join(VersionFile, VersionFile.version_id == SubmissionVersion.id).where(VersionFile.file_id == f.id, Submission.status == "SUBMITTED", Submission.current_version_no == SubmissionVersion.version_no)).first()
-                allowed = bool(owner and mine and owner[1].id == mine.id and linked)
+                reviewer_submitted = latest_personal_submission(db, a.id, user.id)
+                allowed = bool(owner and mine and owner[1].id == mine.id and linked and reviewer_submitted)
     if not allowed: raise ApiError(403, "FILE_FORBIDDEN", "无权访问该文件")
     return f
 

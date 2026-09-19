@@ -16,7 +16,6 @@ import ClassDetailPage from './shell/ClassDetailPage.vue'
 import ClassesPage from './shell/ClassesPage.vue'
 import GradesPage from './shell/GradesPage.vue'
 import OverviewPage from './shell/OverviewPage.vue'
-import ReviewDetailPage from './shell/ReviewDetailPage.vue'
 import ReviewsPage from './shell/ReviewsPage.vue'
 import SystemPage from './shell/SystemPage.vue'
 import TeamsPage from './shell/TeamsPage.vue'
@@ -75,6 +74,7 @@ const boardTeamFilter = ref('ALL')
 const assignmentDetailTab = ref('details')
 const DRAWER_EXPANDED_STORAGE_KEY = 'assignment-drawers-expanded'
 const assignmentDrawerExpanded = ref(localStorage.getItem(DRAWER_EXPANDED_STORAGE_KEY) === 'true')
+const peerReviewExpanded = ref(true)
 const assignmentDrawerAnimating = ref(false)
 let assignmentDrawerAnimationTimer
 const toggleAssignmentDrawerExpanded = () => {
@@ -95,7 +95,7 @@ const topicDecisionForm = reactive({ id: '', reason: '' })
 const passwordForm = reactive({ current_password: '', new_password: '' })
 const inviteTarget = ref('')
 const importState = reactive({ file: null, preview: null, result: null, step: 0, loading: false })
-const filePreview = reactive({ open: false, files: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false, readonly: false, assignmentTitle: '' })
+const filePreview = reactive({ open: false, files: [], criteriaFiles: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false, readonly: false, assignmentTitle: '' })
 const currentTime = ref(Date.now())
 let gateTimer
 let clockTimer
@@ -113,14 +113,14 @@ const descriptionEditor = useEditor({
 
 const role = computed(() => session.user?.role)
 const classId = computed(() => session.classId)
-const view = computed(() => route.name === 'assignment-detail' ? 'assignment-detail' : route.name === 'review-detail' ? 'review-detail' : route.name === 'grade-detail' ? 'grade-detail' : route.name === 'class-detail' ? 'class-detail' : route.params.view || 'overview')
+const view = computed(() => route.name === 'assignment-detail' ? 'assignment-detail' : route.name === 'grade-detail' ? 'grade-detail' : route.name === 'class-detail' ? 'class-detail' : route.params.view || 'overview')
 const detailId = computed(() => route.params.id)
 const pageKey = computed(() => `${role.value || 'guest'}:${classId.value || 'none'}:${view.value}:${detailId.value || ''}`)
 const surfaceKey = computed(() => role.value === 'TEACHER' && view.value === 'assignment-detail'
   ? `${role.value}:${classId.value || 'none'}:assignments:`
   : pageKey.value)
 const initialLoading = computed(() => loading.value && !loadedViewKeys.has(pageKey.value))
-const navView = computed(() => view.value === 'assignment-detail' ? 'assignments' : view.value === 'review-detail' ? 'reviews' : view.value === 'grade-detail' ? 'grades' : view.value === 'class-detail' ? 'classes' : view.value)
+const navView = computed(() => view.value === 'assignment-detail' ? 'assignments' : view.value === 'grade-detail' ? 'grades' : view.value === 'class-detail' ? 'classes' : view.value)
 const activeClasses = computed(() => session.classes.filter(item => item.status === 'ACTIVE'))
 const classOptions = computed(() => activeClasses.value.map(item => ({ value: item.id, label: `${item.semester} · ${item.name}` })))
 const auditSemesterOptions = computed(() => [...new Set(session.classes.map(item => item.semester))].sort().map(value => ({ value, label: value })))
@@ -379,15 +379,6 @@ async function loadView({ silent = false, background = false } = {}) {
       const campaignData = await api(`/peer-review-assignments?class_id=${classId.value}`)
       if (!isCurrent()) return
       campaigns.value = campaignData.items
-    }
-    if (view.value === 'review-detail') {
-      if (role.value === 'TEACHER') { await router.replace('/assignments'); return }
-      const campaignData = await api(`/peer-review-assignments?class_id=${classId.value}`)
-      if (!isCurrent()) return
-      campaigns.value = campaignData.items
-      const assignment = campaigns.value.find(item => item.assignment_id === detailId.value)
-      if (!assignment) { message.error('当前没有可互评的组员提交'); await router.replace('/reviews') }
-      else await loadCampaignDetail(assignment, isCurrent)
     }
     if (view.value === 'grades') {
       const gradeData = role.value === 'TEACHER' ? await api(`/grades/assignments?class_id=${classId.value}`) : await api(`/grades?class_id=${classId.value}`)
@@ -822,10 +813,15 @@ function openStudentAssignment(item) {
 }
 function openPeerReviewDrawer(candidate, file = candidate?.files?.[0]) {
   if (!candidate?.files?.length || !file) return message.warning('该组员没有可预览的提交文件')
+  peerReviewExpanded.value = true
   const submission = { ...candidate, owner: candidate.name }
-  openAssessmentDrawer(submission, { mode: 'PEER', file })
+  openAssessmentDrawer(submission, { mode: 'PEER', file, criteriaFiles: reviewTask.value?.criteria_files || [] })
 }
-function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false } = {}) {
+function updateFileReviewExpanded(value) {
+  if (filePreview.mode === 'PEER') peerReviewExpanded.value = value
+  else assignmentDrawerExpanded.value = value
+}
+function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false, criteriaFiles = [] } = {}) {
   selectedSubmission.value = record
   filePreview.mode = mode
   filePreview.targets = targets
@@ -835,6 +831,7 @@ function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, ini
   filePreview.readonly = false
   filePreview.assignmentTitle = ''
   filePreview.files = [...(record.files || [])]
+  filePreview.criteriaFiles = [...criteriaFiles]
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file?.id))
   filePreview.open = true
 }
@@ -856,7 +853,13 @@ function handleExternalReviewTarget(record) {
 async function handleFeedbackPublished(result) {
   if (selectedSubmission.value && result) Object.assign(selectedSubmission.value, result)
   if (role.value === 'TEACHER' && selectedAssignment.value) await refreshSubmissionBoard()
-  if (filePreview.mode === 'PEER' && view.value === 'review-detail' && selectedCampaign.value) await loadCampaignDetail(selectedCampaign.value, () => true, selectedSubmission.value?.user_id)
+  if (filePreview.mode === 'PEER' && selectedCampaign.value) {
+    const selectedUserId = selectedSubmission.value?.user_id
+    await loadCampaignDetail(selectedCampaign.value, () => true, selectedUserId)
+    const campaignData = await api(`/peer-review-assignments?class_id=${classId.value}`)
+    campaigns.value = campaignData.items
+    selectedCampaign.value = campaigns.value.find(item => item.assignment_id === selectedCampaign.value?.assignment_id) || selectedCampaign.value
+  }
 }
 async function clearTeacherGrade() {
   try {
@@ -892,8 +895,13 @@ async function loadCampaignDetail(item, isStillCurrent = () => true, preferredUs
   const first = task.candidates.find(candidate => candidate.user_id === preferredUserId) || task.candidates[0]
   Object.assign(reviewForm, { reviewee_id: first?.user_id || '', grade: first?.review?.grade, comment: first?.review?.comment || '' })
 }
-async function openCampaign(item) {
-  await router.push(`/reviews/${item.assignment_id}`)
+async function openCampaign(item, userId) {
+  try {
+    await loadCampaignDetail(item, () => true, userId)
+    const candidate = reviewTask.value?.candidates?.find(entry => entry.user_id === userId)
+    if (!candidate) return message.warning('该组员当前没有可评价的提交')
+    openPeerReviewDrawer(candidate)
+  } catch (error) { message.error(error.message) }
 }
 function selectReviewCandidate(userId) {
   const candidate = reviewTask.value?.candidates?.find(item => item.user_id === userId)
@@ -1005,7 +1013,6 @@ function currentViewUses(scopes) {
     assignments: ['assignments', 'submissions'],
     'assignment-detail': ['assignments', 'submissions', 'reviews', 'grades', 'teams'],
     reviews: ['reviews', 'submissions'],
-    'review-detail': ['reviews', 'submissions'],
     grades: ['grades'],
     system: ['audit']
   }
@@ -1195,7 +1202,6 @@ provide(shellContextKey, {
       </template>
 
       <ReviewsPage v-else-if="view==='reviews'" />
-      <ReviewDetailPage v-else-if="view==='review-detail'&&selectedCampaign" />
 
       <GradesPage v-else-if="view==='grades'" />
       <SystemPage v-else-if="view==='system'&&role==='TEACHER'" />
@@ -1207,6 +1213,7 @@ provide(shellContextKey, {
       ref="fileReviewDrawer"
       :open="filePreview.open"
       :files="filePreview.files"
+      :criteria-files="filePreview.criteriaFiles"
       :initial-index="filePreview.index"
       :submission-version-id="selectedSubmission?.submission_version_id||''"
       :owner="selectedSubmission?.owner||''"
@@ -1220,9 +1227,9 @@ provide(shellContextKey, {
       :peer-grade="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
       :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
       :allow-download="role==='TEACHER'"
-      :expanded="assignmentDrawerExpanded"
+      :expanded="filePreview.mode==='PEER'?peerReviewExpanded:assignmentDrawerExpanded"
       @close="closeFilePreview"
-      @update:expanded="assignmentDrawerExpanded=$event"
+      @update:expanded="updateFileReviewExpanded"
       @feedback-published="handleFeedbackPublished"
       @clear-feedback="clearTeacherGrade"
       @target-change="changeReviewTarget"

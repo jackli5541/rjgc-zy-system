@@ -1,16 +1,18 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined } from '@ant-design/icons-vue'
+import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, ColumnWidthOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { api, randomUUID } from '../api'
 import { loadMarkdownPreview } from '../markdownPreview'
 import PdfDocumentViewer from './PdfDocumentViewer.vue'
+import ReviewCriteriaPane from './ReviewCriteriaPane.vue'
 import RichTextEditor from './RichTextEditor.vue'
 import RichTextViewer from './RichTextViewer.vue'
 
 const props = defineProps({
   open: Boolean,
   files: { type: Array, default: () => [] },
+  criteriaFiles: { type: Array, default: () => [] },
   initialIndex: { type: Number, default: 0 },
   submissionVersionId: { type: String, default: '' },
   owner: { type: String, default: '' },
@@ -28,6 +30,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['close', 'feedback-published', 'clear-feedback', 'target-change', 'external-target', 'update:expanded'])
 const index = ref(0)
+const contentZoom = ref(1)
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
@@ -370,10 +373,11 @@ watch(() => props.open, value => {
   if (!value) { stopSpeechInput(); dismissTransient(); commentComposer.open = false; return }
   teacherAnnotationsExpanded.value = false
   peerAnnotationsExpanded.value = false
+  contentZoom.value = 1
   index.value = Math.min(props.initialIndex, Math.max(0, props.files.length - 1))
   loadFeedback(); loadFile()
 })
-watch(index, () => { stopSpeechInput(); selectedAnnotationId.value = ''; commentComposer.open = false; dismissTransient(); loadFile() })
+watch(index, () => { stopSpeechInput(); selectedAnnotationId.value = ''; commentComposer.open = false; dismissTransient(); contentZoom.value = 1; loadFile() })
 watch(() => props.files, () => { if (props.open) loadFile() }, { deep: true })
 watch(() => props.submissionVersionId, () => {
   if (!props.open) return
@@ -389,8 +393,10 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
   <a-drawer :open="open" :width="expanded?'100vw':'min(100vw, 1440px)'" :z-index="1200" placement="right" :root-class-name="expanded?'review-workspace-drawer expanded':'review-workspace-drawer'" @close="emit('close')">
     <template #title><div class="review-drawer-title"><span class="review-drawer-filename" :title="activeFile?.name||'文件预览'">{{activeFile?.name||'文件预览'}}</span><strong v-if="assignmentTitle" class="review-drawer-assignment" :title="assignmentTitle">{{assignmentTitle}}</strong><span/></div></template>
     <a-tooltip :open="drawerAnimating?false:undefined" :title="expanded?'收回':'展开至全屏'" placement="right"><button type="button" class="review-drawer-expand-button" :aria-label="expanded?'收回作业批改':'将作业批改展开至全屏'" @click="toggleExpanded"><RightOutlined v-if="expanded"/><ExpandOutlined v-else/></button></a-tooltip>
-    <div class="review-workspace-toolbar">
+    <div v-if="mode!=='PEER'||!criteriaFiles.length" class="review-workspace-toolbar">
       <a-space>
+        <strong v-if="mode==='PEER'&&criteriaFiles.length" class="review-pane-label">学生作品</strong>
+        <span v-if="mode==='PEER'&&criteriaFiles.length" class="review-toolbar-divider"></span>
         <template v-if="hasTargetNavigation">
           <a-tooltip title="上一位学生（↑）"><span><a-button shape="circle" :disabled="targetIndex<=0||saving" @click="requestTarget(-1)"><ArrowUpOutlined/></a-button></span></a-tooltip>
           <strong class="review-target-progress">{{owner}} · {{targetIndex+1}} / {{targets.length}}</strong>
@@ -401,6 +407,13 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <span>{{files.length ? `${index+1} / ${files.length}` : '0 / 0'}}</span>
         <a-tooltip title="下一个文件（→）"><span><a-button shape="circle" :disabled="index>=files.length-1" @click="index+=1"><RightOutlined/></a-button></span></a-tooltip>
         <a-select v-if="files.length>1" v-model:value="index" style="min-width:220px" :options="files.map((item,fileIndex)=>({value:fileIndex,label:fileOptionLabel(item)}))"/>
+        <template v-if="renderType!=='PDF'">
+          <span class="review-toolbar-divider"></span>
+          <a-tooltip title="缩小作品"><a-button shape="circle" :disabled="contentZoom<=.6" @click="contentZoom=Math.max(.6,contentZoom-.1)"><ZoomOutOutlined/></a-button></a-tooltip>
+          <span>{{Math.round(contentZoom*100)}}%</span>
+          <a-tooltip title="放大作品"><a-button shape="circle" :disabled="contentZoom>=2" @click="contentZoom=Math.min(2,contentZoom+.1)"><ZoomInOutlined/></a-button></a-tooltip>
+          <a-tooltip title="恢复作品大小"><a-button shape="circle" @click="contentZoom=1"><ColumnWidthOutlined/></a-button></a-tooltip>
+        </template>
       </a-space>
       <div v-if="mode==='TEACHER'&&(visiblePeerFeedbacks.length||feedback.grade)" class="review-score-summary">
         <div v-if="visiblePeerFeedbacks.length" class="review-score-group peer-scores"><strong>学生互评</strong><a-tag v-for="peer in visiblePeerFeedbacks" :key="peer.id" color="purple">{{peer.evaluator_name}}打分 {{peer.grade}}</a-tag></div>
@@ -409,14 +422,31 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
       </div>
       <a-button v-if="activeFile&&allowDownload" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button>
     </div>
-    <div ref="drawerRoot" class="file-review-workspace" :class="{'with-feedback':hasFeedbackPanel}">
-      <main ref="documentStage" class="review-document-stage">
-        <a-spin v-if="loading" size="large" tip="正在加载文件"/>
-        <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile&&allowDownload" type="primary" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button></template></a-result>
-        <PdfDocumentViewer v-else-if="renderType==='PDF'&&binaryUrl" ref="documentViewer" :url="binaryUrl" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation" @layout="scheduleComposerPosition" @error="error=$event"/>
-        <div v-else-if="renderType==='RICH_TEXT'&&richHtml" class="rich-document-scroll"><RichTextViewer ref="documentViewer" :html="richHtml" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation"/></div>
-        <img v-else-if="renderType==='IMAGE'&&binaryUrl" class="review-image" :src="binaryUrl" :alt="activeFile?.name" @error="error='图片加载失败'"/>
-      </main>
+    <div ref="drawerRoot" class="file-review-workspace" :class="{'with-feedback':hasFeedbackPanel,'peer-comparison':mode==='PEER'&&criteriaFiles.length}">
+      <ReviewCriteriaPane v-if="mode==='PEER'&&criteriaFiles.length" :files="criteriaFiles"/>
+      <section class="submission-preview-pane" :class="{standalone:mode!=='PEER'||!criteriaFiles.length}">
+        <header v-if="mode==='PEER'&&criteriaFiles.length" class="submission-preview-toolbar">
+          <strong>学生作品</strong>
+          <a-tooltip title="上一个作品文件"><span><a-button shape="circle" :disabled="index<=0" @click="index-=1"><LeftOutlined/></a-button></span></a-tooltip>
+          <span>{{files.length ? `${index+1} / ${files.length}` : '0 / 0'}}</span>
+          <a-tooltip title="下一个作品文件"><span><a-button shape="circle" :disabled="index>=files.length-1" @click="index+=1"><RightOutlined/></a-button></span></a-tooltip>
+          <a-select v-if="files.length>1" v-model:value="index" :options="files.map((item,fileIndex)=>({value:fileIndex,label:fileOptionLabel(item)}))"/>
+          <template v-if="renderType!=='PDF'">
+            <i></i>
+            <a-tooltip title="缩小作品"><a-button shape="circle" :disabled="contentZoom<=.6" @click="contentZoom=Math.max(.6,contentZoom-.1)"><ZoomOutOutlined/></a-button></a-tooltip>
+            <span>{{Math.round(contentZoom*100)}}%</span>
+            <a-tooltip title="放大作品"><a-button shape="circle" :disabled="contentZoom>=2" @click="contentZoom=Math.min(2,contentZoom+.1)"><ZoomInOutlined/></a-button></a-tooltip>
+            <a-tooltip title="恢复作品大小"><a-button shape="circle" @click="contentZoom=1"><ColumnWidthOutlined/></a-button></a-tooltip>
+          </template>
+        </header>
+        <main ref="documentStage" class="review-document-stage">
+          <a-spin v-if="loading" size="large" tip="正在加载文件"/>
+          <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile&&allowDownload" type="primary" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button></template></a-result>
+          <PdfDocumentViewer v-else-if="renderType==='PDF'&&binaryUrl" ref="documentViewer" :url="binaryUrl" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation" @layout="scheduleComposerPosition" @error="error=$event"/>
+          <div v-else-if="renderType==='RICH_TEXT'&&richHtml" class="rich-document-scroll"><div class="review-scaled-content" :style="{zoom:`${contentZoom*100}%`}"><RichTextViewer ref="documentViewer" :html="richHtml" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation"/></div></div>
+          <div v-else-if="renderType==='IMAGE'&&binaryUrl" class="review-image-scroll"><img class="review-image" :style="{width:`${contentZoom*100}%`,maxWidth:'none'}" :src="binaryUrl" :alt="activeFile?.name" @error="error='图片加载失败'"/></div>
+        </main>
+      </section>
       <aside v-if="hasFeedbackPanel" class="feedback-sidebar">
         <a-alert v-if="externalWarning" type="warning" show-icon message="提交或评价数据已更新" description="当前未保存内容已保留。完成本次编辑后将自动同步最新数据。"/>
         <div class="feedback-heading"><div><strong>{{owner||'教师反馈'}}</strong><span v-if="feedback.status">{{feedback.status==='PUBLISHED'?'已发布':'草稿'}}<template v-if="feedback.has_draft"> · 有待发布修改</template></span></div><a-tag v-if="feedback.grade" :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
@@ -452,7 +482,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         </section>
         <div v-if="!editable&&feedback.comment" class="published-overall"><strong>{{mode==='PEER'?'互评总评':'教师总评'}}</strong><div v-html="feedback.comment"></div></div>
         <div v-if="editable" class="feedback-actions">
-          <div class="feedback-action-grade"><span>作业等级</span><div v-if="mode==='TEACHER'" class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in ['A','B','C','D','E']" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div><a-select v-else v-model:value="feedback.grade" placeholder="请选择等级" aria-label="作业等级" :options="['A','B','C','D','E'].map(value=>({value,label:value}))"/></div>
+          <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in ['A','B','C','D','E']" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
           <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'&&feedback.status" danger @click="emit('clear-feedback')">清除反馈</a-button><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button></div>
         </div>
       </aside>
@@ -499,4 +529,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
 .peer-feedback-section{display:grid;gap:10px;padding-top:15px;border-top:1px solid #e4e9ee}.peer-feedback-heading,.peer-reviewer{display:flex;align-items:center;justify-content:space-between;gap:10px}.peer-feedback-heading>div{display:flex;align-items:baseline;gap:8px}.peer-feedback-heading span{color:#7b8998;font-size:12px}.peer-feedback-card{padding:11px;border:1px solid #e3d5f2;border-left:3px solid #8b5cf6;border-radius:6px;background:#fcfaff}.peer-reviewer>span{display:flex;align-items:center;min-width:0;gap:7px;color:#33475b}.peer-color-key{display:inline-block;width:10px;height:10px;flex:0 0 auto;border-radius:50%;background:#8b5cf6}.peer-overall{margin-top:8px;color:#596a7c;font-size:13px;line-height:1.55}.peer-overall p{margin:0 0 5px}.peer-annotation-list{display:grid;gap:5px;margin-top:8px}.peer-annotation-list button{display:flex;min-width:0;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:1px solid #eadff5;border-radius:4px;color:#58466d;background:#fff;text-align:left;cursor:pointer}.peer-annotation-list button.active{border-color:#8b5cf6;background:#f4effb}.peer-annotation-list button span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.peer-annotation-list button small{flex:0 0 auto;color:#8a789e}.peer-comment-author{display:flex;align-items:center;gap:7px;margin-bottom:8px;color:#6d4c8b;font-size:12px;font-weight:600}
 .collapsible-section-heading{width:100%;padding:4px 2px;border:0;border-radius:4px;background:transparent;color:#31465a;font:inherit;text-align:left;cursor:pointer}.collapsible-section-heading:hover{background:#f3f6f9}.collapsible-section-heading:focus-visible{outline:2px solid #91caff;outline-offset:2px}.collapsible-section-heading>span:first-child,.collapsible-section-heading>div{display:flex;align-items:center;gap:8px}.collapsible-section-heading .anticon{flex:0 0 auto;color:#8492a1;font-size:11px;transition:transform .18s}.collapsible-section-heading .anticon.expanded{transform:rotate(90deg)}.collapsible-section-heading .ant-tag{margin:0}
 .feedback-grade-options{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;min-width:0}.feedback-grade-options>button{height:32px;min-width:0;padding:0;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:#45586c;font:inherit;cursor:pointer}.feedback-grade-options>button:hover{border-color:#1677ff;color:#1677ff}.feedback-grade-options>button.selected{border-color:#1677ff;background:#1677ff;color:#fff}.feedback-grade-options>button:focus-visible{outline:2px solid #91caff;outline-offset:2px}
+.file-review-workspace.peer-comparison.with-feedback{grid-template-columns:minmax(320px,.8fr) minmax(380px,1.2fr) 320px}.submission-preview-pane{display:flex;min-width:0;min-height:0;flex-direction:column}.submission-preview-pane.standalone{display:contents}.submission-preview-toolbar{display:flex;min-height:52px;align-items:center;gap:7px;padding:7px 10px;border-bottom:1px solid #d9e1e8;background:#fff}.submission-preview-toolbar strong{margin-right:auto;color:#31465a;font-size:13px}.submission-preview-toolbar>span{min-width:36px;color:#526579;text-align:center}.submission-preview-toolbar>.ant-select{width:180px}.submission-preview-toolbar>i{width:1px;height:26px;background:#d9e1e8}.review-pane-label{color:#31465a;font-size:13px}.review-scaled-content{min-width:0;transform-origin:top left}.review-image-scroll{width:100%;height:100%;overflow:auto;padding:18px}.review-image-scroll .review-image{height:auto;margin:auto}.peer-comparison .feedback-sidebar{padding-inline:14px}.peer-comparison .feedback-actions{margin-inline:-14px;padding-inline:14px}
+@media(max-width:1180px){.file-review-workspace.peer-comparison.with-feedback{grid-template-columns:minmax(340px,1fr) minmax(300px,1fr);grid-template-rows:minmax(420px,60vh) auto}.peer-comparison>.feedback-sidebar{grid-column:1/-1;max-height:460px;border-top:1px solid #d7dfe7;border-left:0}}
+@media(max-width:760px){.file-review-workspace.peer-comparison.with-feedback{grid-template-columns:1fr;grid-template-rows:minmax(420px,55vh) minmax(420px,55vh) auto}.peer-comparison>.feedback-sidebar{grid-column:auto}.submission-preview-toolbar{flex-wrap:wrap}.submission-preview-toolbar>.ant-select{width:100%}.review-image-scroll{padding:12px}}
 </style>
