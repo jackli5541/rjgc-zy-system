@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session, aliased, load_only
 
 from app.database import SessionLocal, get_db
 from app.grading import final_score, finalize_campaign
-from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionVersion, SubmissionWorkspace, TeachingClass, TeachingMaterial, TeachingMaterialFolder, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, RoleMenuPermission, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionVersion, SubmissionWorkspace, TeachingClass, TeachingMaterial, TeachingMaterialFolder, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 from app import storage
@@ -63,6 +63,34 @@ SAFE_HTML_ATTRIBUTES = {
 PREVIEWABLE_FILE_SUFFIXES = {".md"}
 DOWNLOAD_ONLY_FILE_SUFFIXES = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
 STUDENT_UPLOAD_FILE_SUFFIXES = PREVIEWABLE_FILE_SUFFIXES | {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MENU_CATALOG = [
+    {"key": "overview", "labels": {"TEACHER": "总览", "STUDENT": "总览"}, "roles": ["TEACHER", "STUDENT"]},
+    {"key": "classes", "labels": {"TEACHER": "教学班"}, "roles": ["TEACHER"]},
+    {"key": "teams", "labels": {"TEACHER": "小组与选题", "STUDENT": "我的小组"}, "roles": ["TEACHER", "STUDENT"]},
+    {"key": "assignments", "labels": {"TEACHER": "作业管理", "STUDENT": "我的作业"}, "roles": ["TEACHER", "STUDENT"]},
+    {"key": "reviews", "labels": {"STUDENT": "作品互评"}, "roles": ["STUDENT"]},
+    {"key": "capstone", "labels": {"TEACHER": "大作业管理", "STUDENT": "大作业"}, "roles": ["TEACHER", "STUDENT"]},
+    {"key": "materials", "labels": {"TEACHER": "教学资料", "STUDENT": "教学资料"}, "roles": ["TEACHER", "STUDENT"]},
+    {"key": "grades", "labels": {"TEACHER": "成绩与导出", "STUDENT": "成绩与反馈"}, "roles": ["TEACHER", "STUDENT"]},
+    {"key": "system", "labels": {"TEACHER": "系统与审计"}, "roles": ["TEACHER"]},
+]
+
+
+def menu_permissions_by_role(db: Session) -> dict[str, list[str]]:
+    stored = {(item.role, item.menu_key): item.enabled for item in db.scalars(select(RoleMenuPermission)).all()}
+    return {
+        role: [item["key"] for item in MENU_CATALOG if role in item["roles"] and stored.get((role, item["key"]), True)]
+        for role in ("TEACHER", "STUDENT")
+    }
+
+
+def menu_permissions_payload(db: Session, user: User) -> dict:
+    roles = menu_permissions_by_role(db)
+    payload = {"catalog": MENU_CATALOG, "enabled": roles[user.role], "can_manage": user.role == "TEACHER"}
+    if user.role == "TEACHER": payload["roles"] = roles
+    return payload
+
+
 def clean_html(value: str) -> str:
     cleaned = bleach.clean(value, tags=SAFE_HTML_TAGS, attributes=SAFE_HTML_ATTRIBUTES, protocols=["http", "https", "mailto"], strip=True)
     return re.sub(r'<a\s+([^>]*href="(?:https?://|mailto:)[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
@@ -403,6 +431,9 @@ class MemberUpdateIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 class MaterialTypeIn(BaseModel):
     material_type: Literal["TASK", "ATTACHMENT", "CRITERIA"]
+class MenuPermissionsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    roles: dict[Literal["TEACHER", "STUDENT"], list[str]]
 
 
 @app.get("/health/live")
@@ -461,6 +492,44 @@ def password(data: PasswordIn, user: CsrfUser, db: Db):
     db.execute(delete(LoginSession).where(LoginSession.user_id == user.id))
     db.commit()
     return Response(status_code=204)
+
+
+@app.get("/api/v1/menu-permissions")
+def menu_permissions(user: CurrentUser, db: Db):
+    return menu_permissions_payload(db, user)
+
+
+@app.put("/api/v1/menu-permissions")
+def update_menu_permissions(data: MenuPermissionsIn, user: CsrfUser, db: Db):
+    teacher(user)
+    expected_roles = {"TEACHER", "STUDENT"}
+    if set(data.roles) != expected_roles:
+        raise ApiError(422, "MENU_ROLES_REQUIRED", "必须同时配置教师和学生角色")
+    applicable = {role: {item["key"] for item in MENU_CATALOG if role in item["roles"]} for role in expected_roles}
+    normalized: dict[str, list[str]] = {}
+    for role in expected_roles:
+        keys = data.roles[role]
+        if len(keys) != len(set(keys)) or not set(keys).issubset(applicable[role]):
+            raise ApiError(422, "MENU_KEY_INVALID", "菜单配置包含无效模块")
+        if not keys:
+            raise ApiError(422, "MENU_EMPTY", "每个角色至少保留一个可访问模块")
+        normalized[role] = [item["key"] for item in MENU_CATALOG if item["key"] in keys and role in item["roles"]]
+
+    previous = menu_permissions_by_role(db)
+    existing = {(item.role, item.menu_key): item for item in db.scalars(select(RoleMenuPermission)).all()}
+    for role in expected_roles:
+        enabled_keys = set(normalized[role])
+        for menu_key in applicable[role]:
+            item = existing.get((role, menu_key))
+            if item:
+                item.enabled = menu_key in enabled_keys
+                item.updated_by = user.id
+            else:
+                db.add(RoleMenuPermission(role=role, menu_key=menu_key, enabled=menu_key in enabled_keys, updated_by=user.id))
+    audit(db, user, "ROLE_MENU_PERMISSIONS_UPDATED", "role_menu_permissions", "global", {"before": previous, "after": normalized})
+    publish_event(db, scopes=["menu_permissions"], roles=["TEACHER", "STUDENT"], resource_type="role_menu_permissions", resource_id="global", source_client_id=request_client_id.get())
+    db.commit()
+    return menu_permissions_payload(db, user)
 
 
 @app.get("/api/v1/classes")

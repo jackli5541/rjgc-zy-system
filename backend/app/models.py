@@ -38,6 +38,15 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class RoleMenuPermission(Base):
+    __tablename__ = "role_menu_permissions"
+    role: Mapped[str] = mapped_column(String(16), primary_key=True)
+    menu_key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class LoginSession(Base):
     __tablename__ = "login_sessions"
     id: Mapped[UUID] = uuid_pk()

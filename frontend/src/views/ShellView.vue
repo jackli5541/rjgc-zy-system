@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { ApartmentOutlined, ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { ApartmentOutlined, ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, ControlOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { api, apiClientId, randomUUID } from '../api'
@@ -18,6 +18,7 @@ import ClassesPage from './shell/ClassesPage.vue'
 import GradesPage from './shell/GradesPage.vue'
 import OverviewPage from './shell/OverviewPage.vue'
 import ReviewsPage from './shell/ReviewsPage.vue'
+import RoleMenuPage from './shell/RoleMenuPage.vue'
 import SystemPage from './shell/SystemPage.vue'
 import TeachingMaterialsPage from './shell/TeachingMaterialsPage.vue'
 import TeamsPage from './shell/TeamsPage.vue'
@@ -243,12 +244,13 @@ const assignmentChartPoints = computed(() => {
 })
 const assignmentChartLine = computed(() => assignmentChartPoints.value.map(point => `${point.x},${point.y}`).join(' '))
 const menu = computed(() => {
-  if (role.value === 'TEACHER') return [
+  const visible = items => items.filter(item => session.isMenuEnabled(item[0]))
+  if (role.value === 'TEACHER') return [...visible([
     ['overview', DashboardOutlined, '总览'], ['classes', BookOutlined, '教学班'], ['teams', TeamOutlined, '小组与选题'],
     ['assignments', FileTextOutlined, '作业管理'], ['capstone', ApartmentOutlined, '大作业管理'], ['materials', FolderOpenOutlined, '教学资料'], ['grades', TrophyOutlined, '成绩与导出'], ['system', SettingOutlined, '系统与审计']
-  ]
+  ]), ['menu-permissions', ControlOutlined, '角色菜单']]
   if (session.teamGate) return [['teams', TeamOutlined, '加入小组']]
-  return [['overview', DashboardOutlined, '总览'], ['teams', TeamOutlined, '我的小组'], ['assignments', FileTextOutlined, '我的作业'], ['reviews', FormOutlined, '作品互评'], ['capstone', ApartmentOutlined, '大作业'], ['grades', TrophyOutlined, '成绩与反馈'], ['materials', FolderOpenOutlined, '教学资料']]
+  return visible([['overview', DashboardOutlined, '总览'], ['teams', TeamOutlined, '我的小组'], ['assignments', FileTextOutlined, '我的作业'], ['reviews', FormOutlined, '作品互评'], ['capstone', ApartmentOutlined, '大作业'], ['grades', TrophyOutlined, '成绩与反馈'], ['materials', FolderOpenOutlined, '教学资料']])
 })
 
 function iso(value) { return value ? new Date(value).toISOString() : null }
@@ -280,8 +282,8 @@ function campaignStateClass(item) {
 }
 const statusLabels = { ACTIVE: '进行中', ARCHIVED: '已归档', PENDING: '待处理', PENDING_REVIEW: '待处理', PENDING_COEFFICIENT: '待填系数', PENDING_ASSESSMENT: '待评分', PENDING_REASSESSMENT: '待重新评分', PENDING_SUBMISSION: '待提交', NO_SUBMISSION: '未提交', GRADED: '已评分', CHANGED: '有未发布修改', APPROVED: '已通过', REJECTED: '已拒绝', CANCELLED: '已取消', DRAFT: '待发布', PUBLISHED: '已发布', SUBMITTED: '已提交', RETRACTED: '已撤回', VALID: '有效', INVALID: '已作废', CLOSED: '已结束', NOT_SUBMITTED: '未提交', LEFT: '已退出', DISBANDED: '已解散', NOT_STARTED: '未开始' }
 const roleLabels = { LEADER: '组长', MEMBER: '组员', TEACHER: '教师', STUDENT: '学生', SYSTEM: '系统' }
-const objectLabels = { user: '用户', class: '教学班', class_join_request: '入班申请', team: '小组', team_request: '组队申请', topic: '选题', assignment: '作业', submission: '作业提交', submission_assessment: '提交评价', review_campaign: '互评活动', peer_review: '作品评价', grade: '成绩' }
-const actionLabels = { PASSWORD_CHANGED: '修改密码', PASSWORD_RESET: '重置密码', CLASS_CREATED: '创建教学班', CLASS_UPDATED: '更新教学班', CLASS_DELETED: '删除教学班', CLASS_JOIN_REQUESTED: '申请加入教学班', CLASS_JOINED_BY_INVITE: '通过邀请码入班', CLASS_JOIN_APPROVED: '同意入班申请', CLASS_JOIN_REJECTED: '拒绝入班申请', ROSTER_IMPORTED: '导入学生名单', CLASS_MEMBER_ADDED: '添加班级成员', CLASS_MEMBER_UPDATED: '更新成员信息', CLASS_MEMBER_REMOVED: '移出班级成员', TEAM_CREATED: '创建小组', TEAMS_AUTO_GROUPED: '自动分组', TEAM_REQUEST_DECIDED: '处理组队申请', TEAM_REQUEST_CANCELLED: '取消组队申请', TEAM_INVITATION_RESPONDED: '回应小组邀请', TEAM_LEADER_TRANSFERRED: '移交组长', TEAM_LEFT: '退出小组', TEAM_DISBANDED: '解散小组', TEAM_MEMBER_REMOVED: '移出小组成员', TOPIC_SUBMITTED: '提交选题', TOPIC_DECIDED: '审核选题', ASSIGNMENT_CREATED: '创建作业', ASSIGNMENT_UPDATED: '更新作业', ASSIGNMENT_PUBLISHED: '发布作业', ASSIGNMENT_RETRACTED: '撤回作业', ASSIGNMENT_CLOSED: '提前截止作业', ASSIGNMENT_DELETED: '删除作业', SUBMISSION_CREATED: '提交作业', SUBMISSION_RETRACTED: '撤回作业', SUBMISSIONS_EXPORTED: '导出作业', REVIEW_CAMPAIGN_CREATED: '创建互评活动', REVIEW_CAMPAIGN_AUTO_CREATED: '自动创建互评活动', REVIEW_CAMPAIGN_CLOSED: '提前截止互评', PEER_REVIEW_SUBMITTED: '提交作品评价', PEER_REVIEW_UPDATED: '更新作品评价', PEER_REVIEW_INVALIDATED: '作废作品评价', PEER_ASSESSMENT_SUBMITTED: '提交学生互评', PEER_ASSESSMENT_UPDATED: '更新学生互评', TEACHER_ASSESSMENT_SUBMITTED: '提交教师评分', TEACHER_ASSESSMENT_UPDATED: '更新教师评分', TEACHER_ASSESSMENT_CLEARED: '清除教师评分', TEACHER_FEEDBACK_DRAFT_SAVED: '保存教师反馈草稿', TEACHER_FEEDBACK_PUBLISHED: '发布教师反馈', PEER_GRADES_GENERATED: '生成互评成绩', GRADE_COEFFICIENT_UPDATED: '更新小组系数', GRADES_PUBLISHED: '发布成绩' }
+const objectLabels = { user: '用户', class: '教学班', class_join_request: '入班申请', team: '小组', team_request: '组队申请', topic: '选题', assignment: '作业', submission: '作业提交', submission_assessment: '提交评价', review_campaign: '互评活动', peer_review: '作品评价', grade: '成绩', role_menu_permissions: '角色菜单权限' }
+const actionLabels = { PASSWORD_CHANGED: '修改密码', PASSWORD_RESET: '重置密码', ROLE_MENU_PERMISSIONS_UPDATED: '更新角色菜单权限', CLASS_CREATED: '创建教学班', CLASS_UPDATED: '更新教学班', CLASS_DELETED: '删除教学班', CLASS_JOIN_REQUESTED: '申请加入教学班', CLASS_JOINED_BY_INVITE: '通过邀请码入班', CLASS_JOIN_APPROVED: '同意入班申请', CLASS_JOIN_REJECTED: '拒绝入班申请', ROSTER_IMPORTED: '导入学生名单', CLASS_MEMBER_ADDED: '添加班级成员', CLASS_MEMBER_UPDATED: '更新成员信息', CLASS_MEMBER_REMOVED: '移出班级成员', TEAM_CREATED: '创建小组', TEAMS_AUTO_GROUPED: '自动分组', TEAM_REQUEST_DECIDED: '处理组队申请', TEAM_REQUEST_CANCELLED: '取消组队申请', TEAM_INVITATION_RESPONDED: '回应小组邀请', TEAM_LEADER_TRANSFERRED: '移交组长', TEAM_LEFT: '退出小组', TEAM_DISBANDED: '解散小组', TEAM_MEMBER_REMOVED: '移出小组成员', TOPIC_SUBMITTED: '提交选题', TOPIC_DECIDED: '审核选题', ASSIGNMENT_CREATED: '创建作业', ASSIGNMENT_UPDATED: '更新作业', ASSIGNMENT_PUBLISHED: '发布作业', ASSIGNMENT_RETRACTED: '撤回作业', ASSIGNMENT_CLOSED: '提前截止作业', ASSIGNMENT_DELETED: '删除作业', SUBMISSION_CREATED: '提交作业', SUBMISSION_RETRACTED: '撤回作业', SUBMISSIONS_EXPORTED: '导出作业', REVIEW_CAMPAIGN_CREATED: '创建互评活动', REVIEW_CAMPAIGN_AUTO_CREATED: '自动创建互评活动', REVIEW_CAMPAIGN_CLOSED: '提前截止互评', PEER_REVIEW_SUBMITTED: '提交作品评价', PEER_REVIEW_UPDATED: '更新作品评价', PEER_REVIEW_INVALIDATED: '作废作品评价', PEER_ASSESSMENT_SUBMITTED: '提交学生互评', PEER_ASSESSMENT_UPDATED: '更新学生互评', TEACHER_ASSESSMENT_SUBMITTED: '提交教师评分', TEACHER_ASSESSMENT_UPDATED: '更新教师评分', TEACHER_ASSESSMENT_CLEARED: '清除教师评分', TEACHER_FEEDBACK_DRAFT_SAVED: '保存教师反馈草稿', TEACHER_FEEDBACK_PUBLISHED: '发布教师反馈', PEER_GRADES_GENERATED: '生成互评成绩', GRADE_COEFFICIENT_UPDATED: '更新小组系数', GRADES_PUBLISHED: '发布成绩' }
 function auditSearchParams() {
   const params = new URLSearchParams()
   const query = auditSearch.value.trim()
@@ -446,7 +448,7 @@ async function loadView({ silent = false, background = false } = {}) {
 
 async function changeClass(id) {
   await session.refreshClasses(id)
-  const target = session.teamGate ? '/teams' : '/overview'
+  const target = session.landingPath
   if (route.path === target) await loadView()
   else await router.replace(target)
   await loadNotifications()
@@ -520,7 +522,7 @@ async function saveMember() {
 function resetMemberPassword(item) { Modal.confirm({ title: `重置 ${item.name} 的密码？`, content: '密码将重置为当前学号。', okText: '确认重置', onOk: () => action(() => api(`/classes/${classId.value}/members/${item.id}/reset-password`, { method: 'POST' }), '密码已重置') }) }
 function removeClassMember(item) { Modal.confirm({ title: `将 ${item.name} 移出教学班？`, content: item.team ? `该成员也会退出小组「${item.team}」。` : '历史提交和成绩将继续保留。', okText: '确认移出', okType: 'danger', onOk: () => action(async () => { await api(`/classes/${classId.value}/members/${item.id}`, { method: 'DELETE' }); memberDetail.value = null }, '成员已移出') }) }
 async function createTeam() {
-  await action(async () => { await api('/teams', { method: 'POST', body: JSON.stringify({ class_id: classId.value, ...teamForm }) }); modals.team = false; await session.refreshContext(); await router.replace('/overview') }, '小组已创建')
+  await action(async () => { await api('/teams', { method: 'POST', body: JSON.stringify({ class_id: classId.value, ...teamForm }) }); modals.team = false; await session.refreshContext(); await router.replace(session.landingPath) }, '小组已创建')
 }
 async function applyTeam(item) { await action(() => api(`/teams/${item.id}/applications`, { method: 'POST' }), '申请已提交') }
 async function cancelRequest(item) { await action(() => api(`/team-requests/${item.id}`, { method: 'DELETE' }), '申请已取消') }
@@ -1057,7 +1059,7 @@ async function pollGate() {
   if (!session.teamGate) return
   const before = session.teamGate
   await session.refreshContext()
-  if (before && !session.teamGate) { message.success('已加入小组'); clearInterval(gateTimer); await router.replace('/overview') }
+  if (before && !session.teamGate) { message.success('已加入小组'); clearInterval(gateTimer); await router.replace(session.landingPath) }
 }
 
 function currentViewUses(scopes) {
@@ -1088,8 +1090,10 @@ async function flushRealtimeRefresh() {
   realtimeDirty = false
   await Promise.all([
     currentViewUses(scopes) ? loadView({ silent: true, background: true }) : Promise.resolve(),
-    scopes.includes('notifications') || scopes.includes('current_view') ? loadNotifications() : Promise.resolve()
+    scopes.includes('notifications') || scopes.includes('current_view') ? loadNotifications() : Promise.resolve(),
+    scopes.includes('menu_permissions') ? session.refreshMenuPermissions() : Promise.resolve()
   ])
+  if (scopes.includes('menu_permissions') && view.value !== 'menu-permissions' && !session.teamGate && !session.isMenuEnabled(navView.value)) await router.replace(session.landingPath)
 }
 
 function scheduleRealtimeRefresh(scopes = ['current_view', 'notifications']) {
@@ -1265,6 +1269,7 @@ provide(shellContextKey, {
       <GradesPage v-else-if="view==='grades'" />
       <TeachingMaterialsPage v-else-if="view==='materials'" />
       <SystemPage v-else-if="view==='system'&&role==='TEACHER'" />
+      <RoleMenuPage v-else-if="view==='menu-permissions'&&role==='TEACHER'" />
       </div>
       </Transition>
     </div></a-layout-content>

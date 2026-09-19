@@ -15,7 +15,7 @@ async function submit() {
   loading.value = true
   try {
     await session.login(form)
-    await router.replace(session.teamGate ? '/teams' : '/overview')
+    await router.replace(session.landingPath)
   } catch (error) { message.error(error.message) }
   finally { loading.value = false }
 }

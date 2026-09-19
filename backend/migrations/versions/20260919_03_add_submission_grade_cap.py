@@ -9,8 +9,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("submission_versions", sa.Column("grade_cap", sa.String(length=1), nullable=True))
+    bind = op.get_bind()
+    if "grade_cap" not in {column["name"] for column in sa.inspect(bind).get_columns("submission_versions")}:
+        op.add_column("submission_versions", sa.Column("grade_cap", sa.String(length=1), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("submission_versions", "grade_cap")
+    bind = op.get_bind()
+    if "grade_cap" in {column["name"] for column in sa.inspect(bind).get_columns("submission_versions")}:
+        op.drop_column("submission_versions", "grade_cap")

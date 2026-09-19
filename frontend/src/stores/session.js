@@ -4,17 +4,27 @@ import { api, setCsrfToken } from '../api'
 const teacherClassKey = userId => `coursework:last-teacher-class:${userId}`
 
 export const useSessionStore = defineStore('session', {
-  state: () => ({ user: null, context: null, classes: [], ready: false }),
+  state: () => ({ user: null, context: null, classes: [], menuPermissions: null, ready: false }),
   getters: {
     isTeacher: state => state.user?.role === 'TEACHER',
     classId: state => state.context?.current_class?.id || null,
-    teamGate: state => Boolean(state.context?.team_gate_required)
+    teamGate: state => Boolean(state.context?.team_gate_required),
+    isMenuEnabled: state => key => state.menuPermissions === null || state.menuPermissions.includes(key),
+    landingPath: state => {
+      if (state.context?.team_gate_required) return '/teams'
+      const order = state.user?.role === 'TEACHER'
+        ? ['overview', 'classes', 'teams', 'assignments', 'capstone', 'materials', 'grades', 'system']
+        : ['overview', 'teams', 'assignments', 'reviews', 'capstone', 'grades', 'materials']
+      const first = order.find(key => state.menuPermissions === null || state.menuPermissions.includes(key))
+      return first ? `/${first}` : state.user?.role === 'TEACHER' ? '/menu-permissions' : '/login'
+    }
   },
   actions: {
     clear() {
       this.user = null
       this.context = null
       this.classes = []
+      this.menuPermissions = null
       this.ready = true
       setCsrfToken('')
     },
@@ -23,7 +33,7 @@ export const useSessionStore = defineStore('session', {
         const data = await api('/auth/session')
         this.user = data.user
         setCsrfToken(data.csrf_token)
-        await this.refreshClasses()
+        await Promise.all([this.refreshClasses(), this.refreshMenuPermissions()])
       } catch { this.clear() }
       finally { this.ready = true }
     },
@@ -31,7 +41,12 @@ export const useSessionStore = defineStore('session', {
       const data = await api('/auth/login', { method: 'POST', body: JSON.stringify(payload) })
       this.user = data.user
       setCsrfToken(data.csrf_token)
-      await this.refreshClasses()
+      await Promise.all([this.refreshClasses(), this.refreshMenuPermissions()])
+    },
+    async refreshMenuPermissions() {
+      const data = await api('/menu-permissions')
+      this.menuPermissions = data.enabled
+      return data
     },
     async refreshClasses(preferredId) {
       const data = await api('/classes')

@@ -26,6 +26,58 @@ def login(account: str, password: str, role: str):
     return client, {"X-CSRF-Token": response.json()["csrf_token"]}
 
 
+def test_role_menu_permissions_are_persisted_and_teacher_managed():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    defaults = teacher.get("/api/v1/menu-permissions")
+    assert defaults.status_code == 200, defaults.text
+    assert defaults.json()["can_manage"] is True
+    assert "system" in defaults.json()["roles"]["TEACHER"]
+    assert "reviews" in defaults.json()["roles"]["STUDENT"]
+
+    course = teacher.post(
+        "/api/v1/classes",
+        headers=teacher_headers,
+        json={"semester": "菜单权限测试", "name": "菜单权限测试班"},
+    ).json()
+    member = teacher.post(
+        f"/api/v1/classes/{course['id']}/members",
+        headers=teacher_headers,
+        json={"student_no": "20990120", "name": "菜单权限学生"},
+    ).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+    assert student.get("/api/v1/menu-permissions").json()["can_manage"] is False
+
+    configured = teacher.put(
+        "/api/v1/menu-permissions",
+        headers=teacher_headers,
+        json={
+            "roles": {
+                "TEACHER": ["classes", "teams", "assignments", "capstone", "materials", "grades", "system"],
+                "STUDENT": ["overview", "teams", "assignments", "capstone", "grades", "materials"],
+            }
+        },
+    )
+    assert configured.status_code == 200, configured.text
+    assert "overview" not in configured.json()["roles"]["TEACHER"]
+    assert "reviews" not in configured.json()["roles"]["STUDENT"]
+    assert "reviews" not in student.get("/api/v1/menu-permissions").json()["enabled"]
+
+    forbidden = student.put(
+        "/api/v1/menu-permissions",
+        headers=student_headers,
+        json={"roles": configured.json()["roles"]},
+    )
+    assert forbidden.status_code == 403
+    empty_role = teacher.put(
+        "/api/v1/menu-permissions",
+        headers=teacher_headers,
+        json={"roles": {"TEACHER": [], "STUDENT": ["overview"]}},
+    )
+    assert empty_role.status_code == 422
+    with SessionLocal() as db:
+        assert db.scalar(select(AuditLog).where(AuditLog.action == "ROLE_MENU_PERMISSIONS_UPDATED"))
+
+
 def test_teaching_materials_teacher_management_and_student_read_only():
     teacher, teacher_headers = login("teacher", "123456", "teacher")
     course = teacher.post(
