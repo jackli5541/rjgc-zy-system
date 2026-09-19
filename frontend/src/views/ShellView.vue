@@ -136,7 +136,15 @@ const filteredMembers = computed(() => {
   })
 })
 const boardTeamOptions = computed(() => {
-  return [{ value: 'ALL', label: '全部小组' }, { value: 'NONE', label: '未分组' }, ...teams.value.map(item => ({ value: item.id, label: item.name }))]
+  const options = new Map()
+  for (const item of selectedAssignment.value?.board || []) {
+    if (item.team_id && item.team_name) options.set(item.team_id, item.team_name)
+  }
+  return [
+    { value: 'ALL', label: '全部小组' },
+    { value: 'NONE', label: '未分组' },
+    ...[...options].map(([value, label]) => ({ value, label }))
+  ]
 })
 const filteredBoard = computed(() => (selectedAssignment.value?.board || []).filter(item => {
   const q = boardQuery.value.trim().toLocaleLowerCase()
@@ -704,10 +712,10 @@ async function loadAssignmentDetail(item, isStillCurrent = () => true, { preserv
     item.submission = submission
   }
   else {
-    const [files, boardData, teamData] = await Promise.all([api(`/assignments/${item.id}/files`), api(`/assignments/${item.id}/submissions`), api(`/teams?class_id=${item.class_id}`)])
+    const [files, boardData] = await Promise.all([api(`/assignments/${item.id}/files`), api(`/assignments/${item.id}/submissions`)])
     if (!isStillCurrent()) return
     assignmentAttachments.value = files.attachments; reviewCriteriaFiles.value = files.review_criteria || []; draftFiles.value = files.drafts
-    item.board = boardData.items; teams.value = teamData.items
+    item.board = boardData.items
     if (preserveUi && filePreview.open && selectedSubmission.value) {
       const refreshed = boardData.items.find(record => record.user_id && record.user_id === selectedSubmission.value.user_id)
       if (refreshed) requestAnimationFrame(() => fileReviewDrawer.value?.handleExternalSubmission?.(refreshed))

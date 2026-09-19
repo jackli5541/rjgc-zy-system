@@ -1695,24 +1695,27 @@ def require_peer_review_submission(db: Session, assignment_id: UUID, user_id: UU
     return submitted
 
 
-def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
-    evaluator = db.get(User, item.evaluator_id)
+def assessment_payload(item: SubmissionAssessment, evaluator_name: str, annotations: list[dict]) -> dict:
     return {
         "id": str(item.id), "kind": item.kind, "grade": item.grade, "comment": item.comment, "comment_html": item.comment,
         "status": item.status, "version": item.version, "published_at": item.published_at,
-        "evaluator_id": str(item.evaluator_id), "evaluator_name": evaluator.display_name,
+        "evaluator_id": str(item.evaluator_id), "evaluator_name": evaluator_name,
         "subject_user_id": str(item.subject_user_id), "submission_version_id": str(item.submission_version_id),
-        "annotations": assessment_annotations(db, item.id),
+        "annotations": annotations,
         "created_at": item.created_at, "updated_at": item.updated_at,
     }
+
+
+def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
+    evaluator = db.get(User, item.evaluator_id)
+    return assessment_payload(item, evaluator.display_name, assessment_annotations(db, item.id))
 
 
 GRADE_POINTS = {"A": 5, "B": 4, "C": 3, "D": 2, "E": 1}
 POINT_GRADES = {value: key for key, value in GRADE_POINTS.items()}
 
 
-def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
-    assessments = db.scalars(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id)).all()
+def build_submission_grade_result(assessments: list[SubmissionAssessment], serialize_assessment) -> dict:
     teacher_assessment = next((item for item in assessments if item.kind == "TEACHER" and item.status == "PUBLISHED"), None)
     peer_assessments = [item for item in assessments if item.kind == "PEER" and item.status == "PUBLISHED"]
     peer_grade = None
@@ -1721,9 +1724,9 @@ def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
         peer_grade = POINT_GRADES[int(average + 0.5)]
     final_grade = teacher_assessment.grade if teacher_assessment else peer_grade
     return {
-        "teacher_grade": assessment_json(db, teacher_assessment) if teacher_assessment else None,
+        "teacher_grade": serialize_assessment(teacher_assessment) if teacher_assessment else None,
         "peer_grade": peer_grade, "peer_review_count": len(peer_assessments),
-        "peer_feedbacks": [assessment_json(db, item) for item in peer_assessments],
+        "peer_feedbacks": [serialize_assessment(item) for item in peer_assessments],
         "final_grade": final_grade, "grade_source": "TEACHER" if teacher_assessment else "PEER" if peer_grade else None,
         "grading_status": "GRADED" if final_grade else "PENDING_ASSESSMENT",
     }
@@ -1741,6 +1744,11 @@ def assert_submission_update_allowed(db: Session, submission: Submission, curren
         raise ApiError(409, "SUBMISSION_UPDATE_LOCKED", "提交后需要等待互评完成或教师评分后，才能重新提交")
     if GRADE_RANK.get(final_grade, 0) > GRADE_RANK["C"]:
         raise ApiError(409, "SUBMISSION_UPDATE_LOCKED", "最终成绩为 A 或 B，不能更新提交")
+
+
+def submission_grade_result(db: Session, version: SubmissionVersion) -> dict:
+    assessments = list(db.scalars(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id)).all())
+    return build_submission_grade_result(assessments, lambda item: assessment_json(db, item))
 
 
 def missing_submission_grade_result(assignment: Assignment) -> dict:
@@ -2731,21 +2739,80 @@ def topic_decision(topic_id: UUID, decision: Literal["APPROVED", "REJECTED"], da
 def submission_board(aid: UUID, user: CurrentUser, db: Db):
     teacher(user); assignment = db.get(Assignment, aid)
     if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-    rows = db.scalars(select(Submission).where(Submission.assignment_id == aid)).all()
+    rows = list(db.scalars(select(Submission).where(Submission.assignment_id == aid)).all())
     by_owner = {str(row.owner_user_id or row.owner_team_id): row for row in rows}
+    submissions_by_id = {row.id: row for row in rows}
     if assignment.submitter_type == "INDIVIDUAL":
-        owners = []
-        for member, person in db.execute(select(ClassMember, User).join(User).where(ClassMember.class_id == assignment.class_id, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT").order_by(User.login_name)).all():
-            team_row = membership(db, assignment.class_id, person.id)
-            owners.append((member.user_id, person.display_name, person.login_name, team_row[1].id if team_row else None, team_row[1].name if team_row else None))
+        owner_rows = db.execute(
+            select(ClassMember, User, Team)
+            .join(User, User.id == ClassMember.user_id)
+            .outerjoin(TeamMember, and_(
+                TeamMember.class_id == ClassMember.class_id,
+                TeamMember.user_id == ClassMember.user_id,
+                TeamMember.status == "ACTIVE",
+            ))
+            .outerjoin(Team, and_(Team.id == TeamMember.team_id, Team.status == "ACTIVE"))
+            .where(ClassMember.class_id == assignment.class_id, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT")
+            .order_by(User.login_name)
+        ).all()
+        owners = [
+            (member.user_id, person.display_name, person.login_name, team.id if team else None, team.name if team else None)
+            for member, person, team in owner_rows
+        ]
     else:
         owners = [(team.id, team.name, None, team.id, team.name) for team in db.scalars(select(Team).where(Team.class_id == assignment.class_id, Team.status == "ACTIVE").order_by(Team.name)).all()]
+
+    versions = list(db.scalars(
+        select(SubmissionVersion)
+        .join(Submission, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+        .where(Submission.assignment_id == aid)
+    ).all()) if rows else []
+    versions_by_submission = {version.submission_id: version for version in versions}
+    submitted_versions = [
+        version for version in versions
+        if submissions_by_id[version.submission_id].status == "SUBMITTED"
+    ]
+    submitted_version_ids = [version.id for version in submitted_versions]
+
+    files_by_version: dict[UUID, list[FileObject]] = {}
+    if submitted_version_ids:
+        for version_id, file in db.execute(
+            select(VersionFile.version_id, FileObject)
+            .join(FileObject, FileObject.id == VersionFile.file_id)
+            .where(VersionFile.version_id.in_(submitted_version_ids))
+        ):
+            files_by_version.setdefault(version_id, []).append(file)
+
+    assessments_by_version: dict[UUID, list[SubmissionAssessment]] = {}
+    assessments = list(db.scalars(
+        select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id.in_(submitted_version_ids))
+    ).all()) if submitted_version_ids else []
+    for assessment in assessments:
+        assessments_by_version.setdefault(assessment.submission_version_id, []).append(assessment)
+
+    evaluator_names = dict(db.execute(
+        select(User.id, User.display_name).where(User.id.in_({item.evaluator_id for item in assessments}))
+    ).all()) if assessments else {}
+    annotations_by_assessment: dict[UUID, list[dict]] = {}
+    if assessments:
+        assessment_ids = [item.id for item in assessments]
+        annotations = db.scalars(
+            select(SubmissionAnnotation)
+            .where(SubmissionAnnotation.assessment_id.in_(assessment_ids))
+            .order_by(SubmissionAnnotation.position, SubmissionAnnotation.created_at)
+        ).all()
+        for annotation in annotations:
+            annotations_by_assessment.setdefault(annotation.assessment_id, []).append(annotation_json(annotation))
+
+    def serialize_assessment(item: SubmissionAssessment) -> dict:
+        return assessment_payload(item, evaluator_names[item.evaluator_id], annotations_by_assessment.get(item.id, []))
+
     items = []
     for owner_id, owner_name, student_no, team_id, team_name in owners:
         submission = by_owner.get(str(owner_id))
-        latest = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == submission.id, SubmissionVersion.version_no == submission.current_version_no)) if submission else None
-        files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == latest.id)).all() if latest and submission.status == "SUBMITTED" else []
-        grade_result = submission_grade_result(db, latest) if latest and submission.status == "SUBMITTED" else missing_submission_grade_result(assignment)
+        latest = versions_by_submission.get(submission.id) if submission else None
+        files = files_by_version.get(latest.id, []) if latest and submission.status == "SUBMITTED" else []
+        grade_result = build_submission_grade_result(assessments_by_version.get(latest.id, []), serialize_assessment) if latest and submission.status == "SUBMITTED" else missing_submission_grade_result(assignment)
         items.append({"id": str(submission.id) if submission else str(owner_id), "submission_version_id": str(latest.id) if latest and submission.status == "SUBMITTED" else None, "submission_version_no": latest.version_no if latest and submission.status == "SUBMITTED" else None, "grade_cap": latest.grade_cap if latest and submission.status == "SUBMITTED" else None, "user_id": str(owner_id) if assignment.submitter_type == "INDIVIDUAL" else None, "owner": owner_name, "student_no": student_no, "team_id": str(team_id) if team_id else None, "team_name": team_name, "status": submission.status if submission else "NOT_SUBMITTED", "submitted_at": latest.submitted_at if latest and submission.status == "SUBMITTED" else None, "is_late": latest.is_late if latest and submission.status == "SUBMITTED" else False, "member_snapshot": latest.member_snapshot if latest else {}, "files": [file_json(file) for file in files], **grade_result})
     return {"items": items, "total": len(items)}
 

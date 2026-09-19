@@ -10,9 +10,9 @@ from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
-from sqlalchemy import select
+from sqlalchemy import event, select
 
-from app.database import SessionLocal
+from app.database import SessionLocal, engine
 from app.main import app, parse_roster
 from app.grading import final_score
 from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionVersion, Team, TeamRequest
@@ -24,6 +24,36 @@ def login(account: str, password: str, role: str):
     response = client.post("/api/v1/auth/login", json={"account": account, "password": password, "role": role})
     assert response.status_code == 200, response.text
     return client, {"X-CSRF-Token": response.json()["csrf_token"]}
+
+
+def test_submission_board_query_count_does_not_scale_with_class_size():
+    teacher, headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=headers, json={"semester": "查询性能", "name": "提交看板批量查询"}).json()
+    for index in range(12):
+        response = teacher.post(
+            f"/api/v1/classes/{course['id']}/members",
+            headers=headers,
+            json={"student_no": f"208800{index:02d}", "name": f"性能测试学生{index}"},
+        )
+        assert response.status_code == 201, response.text
+    assignment = teacher.post("/api/v1/assignments", headers=headers, json={
+        "class_id": course["id"], "title": "批量查询作业", "description": "验证提交看板不会逐人查询",
+        "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True,
+    }).json()
+
+    statements = []
+    def count_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_statement)
+    try:
+        response = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions")
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 12
+    assert len(statements) <= 10, f"提交看板执行了 {len(statements)} 条 SQL"
 
 
 def test_published_assignment_can_change_class():
@@ -898,6 +928,7 @@ def test_peer_review_requires_reviewer_submission_and_submitted_work_is_immediat
     submitted = next(item for item in board if item["student_no"] == "20349990")
     reviewer_submission = next(item for item in board if item["student_no"] == "20349991")
     assert submitted["teacher_grade"] is None
+    assert submitted["peer_feedbacks"][0]["annotations"][0]["comment"] == "<p>这里需要补充</p>"
     reviewer_graded = teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{reviewer_submission['user_id']}/grade", headers=teacher_headers, json={"grade": "A", "comment": "互评学生作业完成"})
     assert reviewer_graded.status_code == 201 and reviewer_graded.json()["grade"] == "A"
     graded = teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{submitted['user_id']}/grade", headers=teacher_headers, json={"grade": "B", "comment": "需求覆盖完整"})
