@@ -26,6 +26,46 @@ def login(account: str, password: str, role: str):
     return client, {"X-CSRF-Token": response.json()["csrf_token"]}
 
 
+def test_student_workspace_initializes_idempotently():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post(
+        "/api/v1/classes",
+        headers=teacher_headers,
+        json={"semester": "在线工作区测试", "name": "在线工作区测试班"},
+    ).json()
+    member = teacher.post(
+        f"/api/v1/classes/{course['id']}/members",
+        headers=teacher_headers,
+        json={"student_no": "20990003", "name": "在线工作区学生"},
+    ).json()
+    assignment = teacher.post(
+        "/api/v1/assignments",
+        headers=teacher_headers,
+        json={
+            "class_id": course["id"],
+            "title": "在线工作区作业",
+            "description": "验证工作区初始化",
+            "submitter_type": "INDIVIDUAL",
+            "due_at": "2099-01-01T00:00:00+08:00",
+            "publish": True,
+        },
+    ).json()
+    uploaded = teacher.post(
+        f"/api/v1/assignments/{assignment['id']}/files",
+        headers=teacher_headers,
+        files={"file": ("template.md", b"# Template", "text/markdown")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+
+    first = student.post(f"/api/v1/assignments/{assignment['id']}/workspace", headers=student_headers, json={})
+    assert first.status_code == 200, first.text
+    assert len(first.json()["documents"]) == 1
+    second = student.post(f"/api/v1/assignments/{assignment['id']}/workspace", headers=student_headers, json={})
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == first.json()["id"]
+
+
 def test_published_assignment_can_change_class():
     teacher, headers = login("teacher", "123456", "teacher")
     first = teacher.post("/api/v1/classes", headers=headers, json={"semester": "班级调整", "name": "原教学班"}).json()
