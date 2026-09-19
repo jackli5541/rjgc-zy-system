@@ -18,6 +18,9 @@ const content = ref('')
 const htmlDocument = ref('')
 const htmlViewport = ref(null)
 const htmlScale = ref(1)
+const HTML_CANVAS_WIDTH = 1920
+const HTML_CANVAS_HEIGHT = 1080
+const HTML_PREVIEW_GUTTER = 32
 const contentLoading = ref(false)
 const context = ref(null)
 const uploadInput = ref(null)
@@ -137,8 +140,10 @@ function deleteNode(node) {
 function typeLabel(type) { return type === 'MARKDOWN' ? 'Markdown' : type === 'HTML' ? 'HTML' : 'MP4 视频' }
 let htmlResizeObserver
 function resizeHtmlStage() {
-  const width = htmlViewport.value?.clientWidth || 1920
-  htmlScale.value = Math.min(1, Math.max(0.35, width / 1920))
+  if (!htmlViewport.value) return
+  const availableWidth = Math.max(1, htmlViewport.value.clientWidth - HTML_PREVIEW_GUTTER)
+  const availableHeight = Math.max(1, htmlViewport.value.clientHeight - HTML_PREVIEW_GUTTER)
+  htmlScale.value = Math.min(1, availableWidth / HTML_CANVAS_WIDTH, availableHeight / HTML_CANVAS_HEIGHT)
 }
 function observeHtmlStage() {
   htmlResizeObserver?.disconnect()
@@ -147,8 +152,9 @@ function observeHtmlStage() {
   htmlResizeObserver.observe(htmlViewport.value)
   resizeHtmlStage()
 }
-watch(() => selected.value?.media_type, async type => {
-  if (type === 'HTML') { await nextTick(); observeHtmlStage() }
+watch([() => selected.value?.media_type, contentLoading], async ([type, loading]) => {
+  htmlResizeObserver?.disconnect()
+  if (type === 'HTML' && !loading) { await nextTick(); observeHtmlStage() }
 })
 onMounted(loadTree)
 onBeforeUnmount(() => htmlResizeObserver?.disconnect())
@@ -182,7 +188,7 @@ onBeforeUnmount(() => htmlResizeObserver?.disconnect())
           <div class="teaching-material-preview-heading"><div><div class="eyebrow">{{typeLabel(selected.media_type)}}</div><h2>{{selected.name}}</h2></div><a-tag>{{Math.max(1, Math.ceil(selected.size / 1024))}} KB</a-tag></div>
           <a-spin v-if="contentLoading" class="teaching-material-content-loading" />
           <div v-else-if="selected.media_type==='VIDEO'" class="teaching-material-video"><video :src="selected.content_url" controls preload="metadata" /></div>
-          <div v-else-if="selected.media_type==='HTML'" ref="htmlViewport" class="teaching-material-html"><div class="teaching-material-html-stage" :style="{width:`${1920 * htmlScale}px`,height:`${1080 * htmlScale}px`}"><iframe :srcdoc="htmlDocument" title="HTML 教学资料" sandbox="allow-scripts" allow="fullscreen" allowfullscreen referrerpolicy="no-referrer" :style="{transform:`scale(${htmlScale})`}" /></div></div>
+          <div v-else-if="selected.media_type==='HTML'" ref="htmlViewport" class="teaching-material-html"><div class="teaching-material-html-stage" :style="{width:`${HTML_CANVAS_WIDTH * htmlScale}px`,height:`${HTML_CANVAS_HEIGHT * htmlScale}px`}"><iframe :srcdoc="htmlDocument" title="HTML 教学资料" sandbox="allow-scripts" allow="fullscreen" allowfullscreen referrerpolicy="no-referrer" :style="{width:`${HTML_CANVAS_WIDTH}px`,height:`${HTML_CANVAS_HEIGHT}px`,transform:`scale(${htmlScale})`}" /></div></div>
           <div v-else class="teaching-material-rich"><RichTextViewer :html="content" /></div>
         </template>
       </main>

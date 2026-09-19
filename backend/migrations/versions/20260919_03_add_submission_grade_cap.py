@@ -1,17 +1,14 @@
-"""Recheck source Markdown tables flattened by the legacy editor."""
-
+"""Add the submission version grade cap column."""
 from alembic import op
 import sqlalchemy as sa
 
-
-revision = "20260919_02"
-down_revision = "20260919_01"
+revision = "20260919_03"
+down_revision = "20260919_02"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("UPDATE submission_documents SET source_images_checked_at = NULL WHERE source_file_id IS NOT NULL")
     op.add_column("submission_versions", sa.Column("grade_cap", sa.String(length=1), nullable=True))
 
 

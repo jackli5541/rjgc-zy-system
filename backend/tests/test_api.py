@@ -10,12 +10,12 @@ from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
-from sqlalchemy import select
+from sqlalchemy import event, select
 
-from app.database import SessionLocal
+from app.database import SessionLocal, engine
 from app.main import app, parse_roster
 from app.grading import final_score
-from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionVersion, Team, TeamRequest, User
+from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionVersion, Team, TeamMember, TeamRequest, User
 from app.worker import process_auto_review, process_due_campaign
 
 
@@ -131,6 +131,37 @@ def test_student_workspace_initializes_idempotently():
     assert second.json()["id"] == first.json()["id"]
 
 
+def test_submission_board_query_count_does_not_scale_with_class_size():
+    teacher, headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=headers, json={"semester": "查询性能", "name": "提交看板批量查询"}).json()
+    for index in range(12):
+        response = teacher.post(
+            f"/api/v1/classes/{course['id']}/members",
+            headers=headers,
+            json={"student_no": f"208800{index:02d}", "name": f"性能测试学生{index}"},
+        )
+        assert response.status_code == 201, response.text
+    assignment = teacher.post("/api/v1/assignments", headers=headers, json={
+        "class_id": course["id"], "title": "批量查询作业", "description": "验证提交看板不会逐人查询",
+        "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True,
+    }).json()
+
+    statements = []
+
+    def count_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_statement)
+    try:
+        response = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions")
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 12
+    assert len(statements) <= 10, f"提交看板执行了 {len(statements)} 条 SQL"
+
+
 def test_published_assignment_can_change_class():
     teacher, headers = login("teacher", "123456", "teacher")
     first = teacher.post("/api/v1/classes", headers=headers, json={"semester": "班级调整", "name": "原教学班"}).json()
@@ -242,6 +273,34 @@ def test_team_leader_can_close_recruitment():
     teacher.patch(f"/api/v1/classes/{course['id']}", headers=headers, json={"status": "ARCHIVED", "version": deadline.json()["version"]})
     assert leader.post(url, headers=leader_headers).status_code == 409
     assert leader.post(open_url, headers=leader_headers).status_code == 409
+
+
+def test_teacher_can_force_disband_team():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    teacher_id = teacher.get("/api/v1/auth/session").json()["user"]["id"]
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "解散测试", "name": "强制解散教学班"}).json()
+    leader_record = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20996660", "name": "解散组长"}).json()
+    member_record = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20996661", "name": "解散组员"}).json()
+    leader, leader_headers = login(leader_record["student_no"], leader_record["student_no"], "student")
+    member, member_headers = login(member_record["student_no"], member_record["student_no"], "student")
+    team = leader.post("/api/v1/teams", headers=leader_headers, json={"class_id": course["id"], "name": "待解散小组"}).json()
+    application = member.post(f"/api/v1/teams/{team['id']}/applications", headers=member_headers).json()
+    assert leader.post(f"/api/v1/team-requests/{application['id']}/decision?decision=APPROVED", headers=leader_headers).status_code == 200
+
+    assert member.delete(f"/api/v1/teams/{team['id']}", headers=member_headers).status_code == 403
+    deadline = teacher.patch(f"/api/v1/classes/{course['id']}", headers=teacher_headers, json={"team_deadline": "2020-01-01T00:00:00+08:00", "version": course["version"]})
+    assert deadline.status_code == 200, deadline.text
+    disbanded = teacher.delete(f"/api/v1/teams/{team['id']}", headers=teacher_headers)
+    assert disbanded.status_code == 204, disbanded.text
+    assert teacher.get(f"/api/v1/teams?class_id={course['id']}").json()["items"] == []
+
+    with SessionLocal() as db:
+        stored_team = db.get(Team, UUID(team["id"]))
+        memberships = db.scalars(select(TeamMember).where(TeamMember.team_id == stored_team.id)).all()
+        audit_log = db.scalar(select(AuditLog).where(AuditLog.action == "TEAM_DISBANDED", AuditLog.object_id == team["id"]))
+        assert stored_team.status == "DISBANDED"
+        assert {item.status for item in memberships} == {"LEFT"}
+        assert audit_log is not None and audit_log.actor_id == UUID(teacher_id)
 
 
 def test_password_changes_revoke_existing_sessions():
@@ -940,7 +999,7 @@ def test_assignment_deadline_automatically_creates_frozen_review():
         assert len(generated) == 2 and all(item.peer_score is None and item.status == "PENDING" for item in generated)
 
 
-def test_submitted_work_is_immediately_available_for_team_review_and_teacher_grading():
+def test_peer_review_requires_reviewer_submission_and_submitted_work_is_immediately_gradable():
     teacher, teacher_headers = login("teacher", "123456", "teacher")
     course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2034 春季", "name": "即时互评测试班"}).json()
     class_id = course["id"]
@@ -962,13 +1021,30 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
     assert attachment.status_code == 201, attachment.text
     criteria = teacher.post(f"/api/v1/assignments/{assignment['id']}/files?material_type=CRITERIA", headers=teacher_headers, files={"file": ("review-criteria.md", b"# Review criteria", "text/markdown")})
     assert criteria.status_code == 201, criteria.text
+    criterion = teacher.post(f"/api/v1/assignments/{assignment['id']}/files?purpose=REVIEW_CRITERIA", headers=teacher_headers, files={"file": ("peer-criteria.md", b"# peer criteria", "text/markdown")})
+    assert criterion.status_code == 201, criterion.text
     first_student, first_headers = students[0]
     file = first_student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=first_headers, files={"file": ("first.pdf", b"first", "application/pdf")}).json()
     assert first_student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**first_headers, "Idempotency-Key": "direct-first"}, json={"file_ids": [file["id"]]}).status_code == 201
 
     reviewer, reviewer_headers = students[1]
+    assert reviewer.get(f"/api/v1/peer-review-assignments?class_id={class_id}").json()["items"] == []
+    blocked_detail = reviewer.get(f"/api/v1/assignments/{assignment['id']}/peer-review")
+    assert blocked_detail.status_code == 409 and blocked_detail.json()["code"] == "REVIEWER_SUBMISSION_REQUIRED"
+    first_student_id = first_student.get("/api/v1/auth/session").json()["user"]["id"]
+    blocked_simple_review = reviewer.post(f"/api/v1/assignments/{assignment['id']}/peer-reviews", headers=reviewer_headers, json={"reviewee_id": first_student_id, "grade": "A", "comment": "不能提前评价"})
+    assert blocked_simple_review.status_code == 409 and blocked_simple_review.json()["code"] == "REVIEWER_SUBMISSION_REQUIRED"
+    version_id = next(item["submission_version_id"] for item in teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"] if item["student_no"] == "20349990")
+    blocked_feedback = reviewer.get(f"/api/v1/submission-versions/{version_id}/peer-feedback")
+    assert blocked_feedback.status_code == 409 and blocked_feedback.json()["code"] == "REVIEWER_SUBMISSION_REQUIRED"
+    assert reviewer.get(f"/api/v1/files/{file['id']}").status_code == 403
+    assert reviewer.get(f"/api/v1/files/{criterion.json()['id']}").status_code == 403
+
+    reviewer_file = reviewer.post(f"/api/v1/assignments/{assignment['id']}/files", headers=reviewer_headers, files={"file": ("reviewer.pdf", b"reviewer", "application/pdf")}).json()
+    assert reviewer.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**reviewer_headers, "Idempotency-Key": "direct-reviewer"}, json={"file_ids": [reviewer_file["id"]]}).status_code == 201
     available = reviewer.get(f"/api/v1/peer-review-assignments?class_id={class_id}").json()["items"]
     assert available[0]["assignment_id"] == assignment["id"] and available[0]["pending_count"] == 1
+    assert available[0]["candidates"] == [{"user_id": first_student_id, "name": "即时互评学生0", "student_no": "20349990", "reviewed": False}]
     detail = reviewer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()
     assert [item["name"] for item in detail["attachments"]] == ["grading-guide.pdf"]
     assert detail["review_criteria"] == [] and detail["review_criteria_locked"] is True
@@ -983,6 +1059,9 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
         reviewer_user = db.scalar(select(User).where(User.login_name == "20349991"))
         reviewer_submission = db.scalar(select(Submission).where(Submission.assignment_id == UUID(assignment["id"]), Submission.owner_user_id == reviewer_user.id))
         reviewer_submission.status = "DRAFT"
+    assert [item["name"] for item in detail["criteria_files"]] == ["peer-criteria.md"]
+    assert reviewer.get(f"/api/v1/files/{detail['attachments'][0]['id']}").status_code == 200
+    assert reviewer.get(f"/api/v1/files/{detail['criteria_files'][0]['id']}").status_code == 200
     assert [item["student_no"] for item in detail["candidates"]] == ["20349990"]
     version_id = detail["candidates"][0]["submission_version_id"]
     empty_feedback = reviewer.get(f"/api/v1/submission-versions/{version_id}/peer-feedback").json()
@@ -990,6 +1069,8 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
     annotation = {"file_id": file["id"], "kind": "PDF_TEXT_OR_REGION", "mark_type": "HIGHLIGHT", "color": "YELLOW", "anchor": {"page": 1, "rects": [{"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1}], "quote": ""}, "comment": "<p>这里需要补充</p>"}
     reviewed = reviewer.post(f"/api/v1/submission-versions/{version_id}/peer-feedback/publish", headers=reviewer_headers, json={"revision": 0, "grade": "A", "comment": "<p>完成度高</p>", "annotations": [annotation]})
     assert reviewed.status_code == 200 and reviewed.json()["grade"] == "A" and len(reviewed.json()["annotations"]) == 1
+    refreshed_available = reviewer.get(f"/api/v1/peer-review-assignments?class_id={class_id}").json()["items"]
+    assert refreshed_available[0]["pending_count"] == 0 and refreshed_available[0]["candidates"][0]["reviewed"] is True
     stale = reviewer.post(f"/api/v1/submission-versions/{version_id}/peer-feedback/publish", headers=reviewer_headers, json={"revision": 0, "grade": "B", "comment": "", "annotations": []})
     assert stale.status_code == 409 and stale.json()["code"] == "FEEDBACK_VERSION_CONFLICT"
     observer_detail = observer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()
@@ -1015,7 +1096,11 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
 
     board = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"]
     submitted = next(item for item in board if item["student_no"] == "20349990")
+    reviewer_submission = next(item for item in board if item["student_no"] == "20349991")
     assert submitted["teacher_grade"] is None
+    assert submitted["peer_feedbacks"][0]["annotations"][0]["comment"] == "<p>这里需要补充</p>"
+    reviewer_graded = teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{reviewer_submission['user_id']}/grade", headers=teacher_headers, json={"grade": "A", "comment": "互评学生作业完成"})
+    assert reviewer_graded.status_code == 201 and reviewer_graded.json()["grade"] == "A"
     graded = teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{submitted['user_id']}/grade", headers=teacher_headers, json={"grade": "B", "comment": "需求覆盖完整"})
     assert graded.status_code == 201 and graded.json()["grade"] == "B"
     assert teacher.get(f"/api/v1/classes/{class_id}/dashboard").json()["summary"]["latest_submission"] is None
@@ -1031,7 +1116,7 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
     assert student_grade["peer_feedbacks"][0]["evaluator_name"] == "即时互评学生1"
     assert student_grade["peer_feedbacks"][0]["annotations"][0]["comment"] == "<p>这里需要补充</p>"
     exportable = teacher.get(f"/api/v1/grades/assignments?class_id={class_id}").json()["items"]
-    assert exportable[0]["id"] == assignment["id"] and exportable[0]["graded"] == 1 and exportable[0]["total"] == 2
+    assert exportable[0]["id"] == assignment["id"] and exportable[0]["graded"] == 2 and exportable[0]["total"] == 2
     current_grades = teacher.get(f"/api/v1/exports/grades.csv?class_id={class_id}&assignment_id={assignment['id']}")
     assert current_grades.status_code == 200 and "学生互评等级" in current_grades.text and "成绩来源" in current_grades.text
     assert teacher.post(f"/api/v1/assignments/{assignment['id']}/close", headers=teacher_headers).status_code == 200
@@ -1052,7 +1137,7 @@ def test_submitted_work_is_immediately_available_for_team_review_and_teacher_gra
     assert refreshed_detail["assignment"]["title"] == "更新后的即时评价作业"
     assert [item["id"] for item in refreshed_detail["attachments"]] == [replacement.json()["id"]]
     assert refreshed_detail["candidates"][0]["submission_version_id"] == version_id
-    assert "即时互评学生0" in current_grades.text and "即时互评学生1" in current_grades.text and "未提交" in current_grades.text
+    assert "即时互评学生0" in current_grades.text and "即时互评学生1" in current_grades.text and "已提交" in current_grades.text
     current_reviews = teacher.get(f"/api/v1/exports/reviews.csv?class_id={class_id}")
     assert current_reviews.status_code == 200 and "评价结果" in current_reviews.text and "即时互评学生1" in current_reviews.text and ",A," in current_reviews.text
     assert teacher.get(f"/api/v1/exports/reviews.xlsx?class_id={class_id}").status_code == 200
@@ -1129,10 +1214,10 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
     forbidden = student.put(f"/api/v1/submission-versions/{version_id}/feedback/draft", headers=student_headers, json={"revision": 0, "grade": "A", "comment": "", "annotations": []})
     assert forbidden.status_code == 403
 
-    published = teacher.post(f"/api/v1/submission-versions/{version_id}/feedback/publish", headers=teacher_headers, json={"revision": draft.json()["revision"], "grade": "A", "comment": "<p>已发布总评</p>", "annotations": [annotation, pure_mark, legacy_mark]})
+    published = teacher.post(f"/api/v1/submission-versions/{version_id}/feedback/publish", headers=teacher_headers, json={"revision": draft.json()["revision"], "grade": "C", "comment": "<p>已发布总评</p>", "annotations": [annotation, pure_mark, legacy_mark]})
     assert published.status_code == 200 and published.json()["status"] == "PUBLISHED"
     student_feedback = student.get(f"/api/v1/submission-versions/{version_id}/feedback").json()
-    assert student_feedback["grade"] == "A" and len(student_feedback["annotations"]) == 3
+    assert student_feedback["grade"] == "C" and len(student_feedback["annotations"]) == 3
     assert student_feedback["annotations"][0]["mark_type"] == "COMMENT" and student_feedback["annotations"][0]["color"] == "BLUE"
     assert student_feedback["annotations"][1]["mark_type"] == "UNDERLINE" and student_feedback["annotations"][1]["comment"] == ""
     assert student_feedback["annotations"][2]["mark_type"] == "HIGHLIGHT" and student_feedback["annotations"][2]["color"] == "YELLOW"
@@ -1151,7 +1236,19 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
     assert updated.status_code == 201
     refreshed = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"][0]
     assert refreshed["submission_version_no"] == 2 and refreshed["submission_version_id"] != version_id
-    assert refreshed["teacher_grade"] is None and refreshed["files"][0]["id"] == replacement["id"]
+    assert refreshed["teacher_grade"]["grade"] == "C" and refreshed["final_grade"] == "C"
+    assert refreshed["grade_carried_forward"] is True and refreshed["grading_status"] == "PENDING_REASSESSMENT"
+    assert refreshed["files"][0]["id"] == replacement["id"]
+    assignment_list = teacher.get(f"/api/v1/assignments?class_id={class_id}").json()["items"]
+    listed_assignment = next(item for item in assignment_list if item["id"] == assignment["id"])
+    assert listed_assignment["pending_teacher_review_count"] == 1
+    notifications = teacher.get("/api/v1/notifications").json()["items"]
+    assert all(item["kind"] != "SUBMISSION_RESUBMITTED" for item in notifications)
+    regraded = teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{board_item['user_id']}/grade", headers=teacher_headers, json={"grade": "A", "comment": "重新批改后可以评 A"})
+    assert regraded.status_code == 201 and regraded.json()["result"]["final_grade"] == "A"
+    assignment_list = teacher.get(f"/api/v1/assignments?class_id={class_id}").json()["items"]
+    listed_assignment = next(item for item in assignment_list if item["id"] == assignment["id"])
+    assert listed_assignment["pending_teacher_review_count"] == 0
     assert student.get(f"/api/v1/submission-versions/{version_id}/feedback").json()["status"] == "PUBLISHED"
 
 

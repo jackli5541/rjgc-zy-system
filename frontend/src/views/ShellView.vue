@@ -17,7 +17,6 @@ import ClassDetailPage from './shell/ClassDetailPage.vue'
 import ClassesPage from './shell/ClassesPage.vue'
 import GradesPage from './shell/GradesPage.vue'
 import OverviewPage from './shell/OverviewPage.vue'
-import ReviewDetailPage from './shell/ReviewDetailPage.vue'
 import ReviewsPage from './shell/ReviewsPage.vue'
 import SystemPage from './shell/SystemPage.vue'
 import TeachingMaterialsPage from './shell/TeachingMaterialsPage.vue'
@@ -49,6 +48,7 @@ const auditSearch = ref('')
 const auditSemester = ref('ALL')
 const auditClassId = ref('ALL')
 const auditActorRole = ref('ALL')
+const auditSearched = ref(false)
 const auditPage = ref(1)
 const auditPageSize = 10
 const auditTotal = ref(0)
@@ -77,6 +77,7 @@ const boardTeamFilter = ref('ALL')
 const assignmentDetailTab = ref('details')
 const DRAWER_EXPANDED_STORAGE_KEY = 'assignment-drawers-expanded'
 const assignmentDrawerExpanded = ref(localStorage.getItem(DRAWER_EXPANDED_STORAGE_KEY) === 'true')
+const peerReviewExpanded = ref(true)
 const assignmentDrawerAnimating = ref(false)
 let assignmentDrawerAnimationTimer
 const toggleAssignmentDrawerExpanded = () => {
@@ -97,7 +98,7 @@ const topicDecisionForm = reactive({ id: '', reason: '' })
 const passwordForm = reactive({ current_password: '', new_password: '' })
 const inviteTarget = ref('')
 const importState = reactive({ file: null, preview: null, result: null, step: 0, loading: false })
-const filePreview = reactive({ open: false, files: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false, readonly: false, assignmentTitle: '' })
+const filePreview = reactive({ open: false, files: [], criteriaFiles: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false, readonly: false, assignmentTitle: '' })
 const currentTime = ref(Date.now())
 let gateTimer
 let clockTimer
@@ -115,14 +116,14 @@ const descriptionEditor = useEditor({
 
 const role = computed(() => session.user?.role)
 const classId = computed(() => session.classId)
-const view = computed(() => route.name === 'assignment-detail' ? 'assignment-detail' : route.name === 'review-detail' ? 'review-detail' : route.name === 'grade-detail' ? 'grade-detail' : route.name === 'class-detail' ? 'class-detail' : route.params.view || 'overview')
+const view = computed(() => route.name === 'assignment-detail' ? 'assignment-detail' : route.name === 'grade-detail' ? 'grade-detail' : route.name === 'class-detail' ? 'class-detail' : route.params.view || 'overview')
 const detailId = computed(() => route.params.id)
 const pageKey = computed(() => `${role.value || 'guest'}:${classId.value || 'none'}:${view.value}:${detailId.value || ''}`)
 const surfaceKey = computed(() => role.value === 'TEACHER' && view.value === 'assignment-detail'
   ? `${role.value}:${classId.value || 'none'}:assignments:`
   : pageKey.value)
 const initialLoading = computed(() => loading.value && !loadedViewKeys.has(pageKey.value))
-const navView = computed(() => view.value === 'assignment-detail' ? 'assignments' : view.value === 'review-detail' ? 'reviews' : view.value === 'grade-detail' ? 'grades' : view.value === 'class-detail' ? 'classes' : view.value)
+const navView = computed(() => view.value === 'assignment-detail' ? 'assignments' : view.value === 'grade-detail' ? 'grades' : view.value === 'class-detail' ? 'classes' : view.value)
 const activeClasses = computed(() => session.classes.filter(item => item.status === 'ACTIVE'))
 const classOptions = computed(() => activeClasses.value.map(item => ({ value: item.id, label: `${item.semester} · ${item.name}` })))
 const auditSemesterOptions = computed(() => [...new Set(session.classes.map(item => item.semester))].sort().map(value => ({ value, label: value })))
@@ -138,7 +139,15 @@ const filteredMembers = computed(() => {
   })
 })
 const boardTeamOptions = computed(() => {
-  return [{ value: 'ALL', label: '全部小组' }, { value: 'NONE', label: '未分组' }, ...teams.value.map(item => ({ value: item.id, label: item.name }))]
+  const options = new Map()
+  for (const item of selectedAssignment.value?.board || []) {
+    if (item.team_id && item.team_name) options.set(item.team_id, item.team_name)
+  }
+  return [
+    { value: 'ALL', label: '全部小组' },
+    { value: 'NONE', label: '未分组' },
+    ...[...options].map(([value, label]) => ({ value, label }))
+  ]
 })
 const filteredBoard = computed(() => (selectedAssignment.value?.board || []).filter(item => {
   const q = boardQuery.value.trim().toLocaleLowerCase()
@@ -184,6 +193,11 @@ const gradingCriteriaFiles = computed(() => {
 })
 const assignmentBeforeDue = computed(() => Boolean(selectedAssignment.value && new Date(selectedAssignment.value.due_at) > new Date()))
 const assignmentIsUpdate = computed(() => assignmentSubmitted.value && assignmentBeforeDue.value)
+const submissionFinalGrade = computed(() => selectedAssignment.value?.submission?.final_grade || null)
+const submissionUpdateAllowed = computed(() => {
+  if (!assignmentSubmitted.value) return true
+  return ['C', 'D', 'E'].includes(submissionFinalGrade.value)
+})
 const canManageTeamSubmission = computed(() => {
   if (selectedAssignment.value?.submitter_type !== 'TEAM') return true
   return session.context?.team_membership?.role === 'LEADER' && currentTeam.value?.is_leader === true
@@ -203,6 +217,8 @@ const canSubmitAssignment = computed(() => {
   if (!assignment) return false
   if (assignment.status !== 'PUBLISHED') return false
   if (!canManageTeamSubmission.value) return false
+  if (!submissionUpdateAllowed.value) return !assignmentSubmitted.value
+  if (assignmentSubmitted.value && submissionUpdateAllowed.value) return true
   return new Date(assignment.due_at) > new Date() || (!assignmentSubmitted.value && assignment.allow_late)
 })
 const canEditAssignment = computed(() => {
@@ -262,7 +278,7 @@ function campaignStateClass(item) {
   if (['COMPLETED', 'SKIPPED'].includes(item.allocation_status)) return 'task-completed'
   return new Date(item.due_at) <= new Date() ? 'task-overdue' : ''
 }
-const statusLabels = { ACTIVE: '进行中', ARCHIVED: '已归档', PENDING: '待处理', PENDING_REVIEW: '待处理', PENDING_COEFFICIENT: '待填系数', PENDING_ASSESSMENT: '待评分', PENDING_SUBMISSION: '待提交', NO_SUBMISSION: '未提交', GRADED: '已评分', CHANGED: '有未发布修改', APPROVED: '已通过', REJECTED: '已拒绝', CANCELLED: '已取消', DRAFT: '待发布', PUBLISHED: '已发布', SUBMITTED: '已提交', RETRACTED: '已撤回', VALID: '有效', INVALID: '已作废', CLOSED: '已结束', NOT_SUBMITTED: '未提交', LEFT: '已退出', DISBANDED: '已解散', NOT_STARTED: '未开始' }
+const statusLabels = { ACTIVE: '进行中', ARCHIVED: '已归档', PENDING: '待处理', PENDING_REVIEW: '待处理', PENDING_COEFFICIENT: '待填系数', PENDING_ASSESSMENT: '待评分', PENDING_REASSESSMENT: '待重新评分', PENDING_SUBMISSION: '待提交', NO_SUBMISSION: '未提交', GRADED: '已评分', CHANGED: '有未发布修改', APPROVED: '已通过', REJECTED: '已拒绝', CANCELLED: '已取消', DRAFT: '待发布', PUBLISHED: '已发布', SUBMITTED: '已提交', RETRACTED: '已撤回', VALID: '有效', INVALID: '已作废', CLOSED: '已结束', NOT_SUBMITTED: '未提交', LEFT: '已退出', DISBANDED: '已解散', NOT_STARTED: '未开始' }
 const roleLabels = { LEADER: '组长', MEMBER: '组员', TEACHER: '教师', STUDENT: '学生', SYSTEM: '系统' }
 const objectLabels = { user: '用户', class: '教学班', class_join_request: '入班申请', team: '小组', team_request: '组队申请', topic: '选题', assignment: '作业', submission: '作业提交', submission_assessment: '提交评价', review_campaign: '互评活动', peer_review: '作品评价', grade: '成绩' }
 const actionLabels = { PASSWORD_CHANGED: '修改密码', PASSWORD_RESET: '重置密码', CLASS_CREATED: '创建教学班', CLASS_UPDATED: '更新教学班', CLASS_DELETED: '删除教学班', CLASS_JOIN_REQUESTED: '申请加入教学班', CLASS_JOINED_BY_INVITE: '通过邀请码入班', CLASS_JOIN_APPROVED: '同意入班申请', CLASS_JOIN_REJECTED: '拒绝入班申请', ROSTER_IMPORTED: '导入学生名单', CLASS_MEMBER_ADDED: '添加班级成员', CLASS_MEMBER_UPDATED: '更新成员信息', CLASS_MEMBER_REMOVED: '移出班级成员', TEAM_CREATED: '创建小组', TEAMS_AUTO_GROUPED: '自动分组', TEAM_REQUEST_DECIDED: '处理组队申请', TEAM_REQUEST_CANCELLED: '取消组队申请', TEAM_INVITATION_RESPONDED: '回应小组邀请', TEAM_LEADER_TRANSFERRED: '移交组长', TEAM_LEFT: '退出小组', TEAM_DISBANDED: '解散小组', TEAM_MEMBER_REMOVED: '移出小组成员', TOPIC_SUBMITTED: '提交选题', TOPIC_DECIDED: '审核选题', ASSIGNMENT_CREATED: '创建作业', ASSIGNMENT_UPDATED: '更新作业', ASSIGNMENT_PUBLISHED: '发布作业', ASSIGNMENT_RETRACTED: '撤回作业', ASSIGNMENT_CLOSED: '提前截止作业', ASSIGNMENT_DELETED: '删除作业', SUBMISSION_CREATED: '提交作业', SUBMISSION_RETRACTED: '撤回作业', SUBMISSIONS_EXPORTED: '导出作业', REVIEW_CAMPAIGN_CREATED: '创建互评活动', REVIEW_CAMPAIGN_AUTO_CREATED: '自动创建互评活动', REVIEW_CAMPAIGN_CLOSED: '提前截止互评', PEER_REVIEW_SUBMITTED: '提交作品评价', PEER_REVIEW_UPDATED: '更新作品评价', PEER_REVIEW_INVALIDATED: '作废作品评价', PEER_ASSESSMENT_SUBMITTED: '提交学生互评', PEER_ASSESSMENT_UPDATED: '更新学生互评', TEACHER_ASSESSMENT_SUBMITTED: '提交教师评分', TEACHER_ASSESSMENT_UPDATED: '更新教师评分', TEACHER_ASSESSMENT_CLEARED: '清除教师评分', TEACHER_FEEDBACK_DRAFT_SAVED: '保存教师反馈草稿', TEACHER_FEEDBACK_PUBLISHED: '发布教师反馈', PEER_GRADES_GENERATED: '生成互评成绩', GRADE_COEFFICIENT_UPDATED: '更新小组系数', GRADES_PUBLISHED: '发布成绩' }
@@ -279,7 +295,11 @@ function auditSearchParams() {
   if (auditActorRole.value !== 'ALL') params.set('actor_role', auditActorRole.value)
   return params
 }
-async function searchAudits() { auditPage.value = 1; await loadView() }
+async function searchAudits() {
+  auditSearched.value = true
+  auditPage.value = 1
+  await loadView()
+}
 async function changeAuditSemester() {
   if (!auditClassOptions.value.some(item => item.value === auditClassId.value)) auditClassId.value = 'ALL'
   await searchAudits()
@@ -290,6 +310,7 @@ function roleLabel(value) { return roleLabels[value] || value || '-' }
 function objectLabel(value) { return objectLabels[value] || (value ? '其他业务对象' : '-') }
 function actionLabel(value) { return value === 'TEAM_RECRUITMENT_CLOSED' ? '截止小组招募' : value === 'TEAM_RECRUITMENT_OPENED' ? '继续小组招募' : actionLabels[value] || (value ? '其他系统操作' : '-') }
 function gradeSourceLabel(value) { return value === 'TEACHER' ? '教师评分' : value === 'PEER' ? '学生互评' : value === 'SYSTEM' ? '系统判定' : '-' }
+function gradingStatusColor(status) { return status === 'PENDING_REASSESSMENT' ? 'blue' : status === 'PENDING_ASSESSMENT' ? 'orange' : 'default' }
 async function action(fn, success) {
   const originPath = route.fullPath
   const preserveTeacherDrawer = role.value === 'TEACHER' && view.value === 'assignment-detail'
@@ -389,15 +410,6 @@ async function loadView({ silent = false, background = false } = {}) {
       if (!isCurrent()) return
       campaigns.value = campaignData.items
     }
-    if (view.value === 'review-detail') {
-      if (role.value === 'TEACHER') { await router.replace('/assignments'); return }
-      const campaignData = await api(`/peer-review-assignments?class_id=${classId.value}`)
-      if (!isCurrent()) return
-      campaigns.value = campaignData.items
-      const assignment = campaigns.value.find(item => item.assignment_id === detailId.value)
-      if (!assignment) { message.error('当前没有可互评的组员提交'); await router.replace('/reviews') }
-      else await loadCampaignDetail(assignment, isCurrent)
-    }
     if (view.value === 'grades') {
       const gradeData = role.value === 'TEACHER' ? await api(`/grades/assignments?class_id=${classId.value}`) : await api(`/grades?class_id=${classId.value}`)
       if (!isCurrent()) return
@@ -410,6 +422,11 @@ async function loadView({ silent = false, background = false } = {}) {
       return
     }
     if (view.value === 'system' && role.value === 'TEACHER') {
+      if (!auditSearched.value) {
+        audits.value = []
+        auditTotal.value = 0
+        return
+      }
       const params = auditSearchParams()
       params.set('page', auditPage.value)
       params.set('page_size', auditPageSize)
@@ -566,7 +583,25 @@ async function openTeamRecruitment(item) {
   }, '已继续招募')
 }
 async function transferLeader(uid) { await action(async () => { await api(`/teams/${selectedTeam.value.id}/transfer`, { method: 'POST', body: JSON.stringify({ new_leader_id: uid }) }); selectedTeam.value = null }, '组长已移交') }
-function disbandTeam() { Modal.confirm({ title: '确认解散小组？', content: '组员将重新进入组队流程。', okText: '确认解散', okType: 'danger', onOk: () => action(async () => { await api(`/teams/${selectedTeam.value.id}`, { method: 'DELETE' }); selectedTeam.value = null; await session.refreshContext(); await router.replace('/teams') }, '小组已解散') }) }
+function disbandTeam(item = selectedTeam.value) {
+  if (!item) return
+  const teamId = item.id
+  const forcedByTeacher = role.value === 'TEACHER'
+  Modal.confirm({
+    title: forcedByTeacher ? `强制解散「${item.name}」？` : '确认解散小组？',
+    content: forcedByTeacher ? '所有组员将变为未进入小组状态，已有作业与成绩记录仍会保留。' : '组员将重新进入组队流程。',
+    okText: forcedByTeacher ? '强制解散' : '确认解散',
+    okType: 'danger',
+    onOk: () => action(async () => {
+      await api(`/teams/${teamId}`, { method: 'DELETE' })
+      if (selectedTeam.value?.id === teamId) closeTeamDrawer()
+      if (!forcedByTeacher) {
+        await session.refreshContext()
+        await router.replace('/teams')
+      }
+    }, '小组已解散')
+  })
+}
 function defaultClassSelection() {
   if (activeClasses.value.some(item => item.id === classId.value)) return [classId.value]
   return activeClasses.value[0] ? [activeClasses.value[0].id] : []
@@ -715,10 +750,10 @@ async function loadAssignmentDetail(item, isStillCurrent = () => true, { preserv
     item.submission = submission
   }
   else {
-    const [files, boardData, teamData] = await Promise.all([api(`/assignments/${item.id}/files`), api(`/assignments/${item.id}/submissions`), api(`/teams?class_id=${item.class_id}`)])
+    const [files, boardData] = await Promise.all([api(`/assignments/${item.id}/files`), api(`/assignments/${item.id}/submissions`)])
     if (!isStillCurrent()) return
     assignmentAttachments.value = files.attachments; reviewCriteriaFiles.value = files.review_criteria || []; draftFiles.value = files.drafts
-    item.board = boardData.items; teams.value = teamData.items
+    item.board = boardData.items
     if (preserveUi && filePreview.open && selectedSubmission.value) {
       const refreshed = boardData.items.find(record => record.user_id && record.user_id === selectedSubmission.value.user_id)
       if (refreshed) requestAnimationFrame(() => fileReviewDrawer.value?.handleExternalSubmission?.(refreshed))
@@ -798,7 +833,10 @@ async function submitAssignment() {
   if (!await onlineWorkspace.value?.save()) return message.warning('请先解决文档保存问题')
   const updating = assignmentIsUpdate.value
   const count = onlineWorkspaceData.value?.documents?.length || 0
-  Modal.confirm({ title: updating ? '确认更新提交？' : '确认正式提交？', content: `将提交在线工作区中的 ${count} 份 Markdown 文档${updating?'并生成新的提交版本':''}。`, okText: updating ? '确认更新' : '确认提交', cancelText: '继续检查', onOk: async () => action(() => api(`/assignments/${selectedAssignment.value.id}/submission`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: JSON.stringify({}) }), updating ? '提交已更新' : '提交成功') })
+  const warning = updating
+    ? '提交更新后，在互评完成或教师评分前不能再次修改。'
+    : `将提交在线工作区中的 ${count} 份 Markdown 文档。提交后，在互评完成或教师评分前不能修改或重新提交。`
+  Modal.confirm({ title: updating ? '确认更新提交？' : '确认正式提交？', content: warning, okText: updating ? '确认更新' : '确认提交', cancelText: '继续检查', onOk: async () => action(() => api(`/assignments/${selectedAssignment.value.id}/submission`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: JSON.stringify({}) }), updating ? '提交已更新' : '提交成功') })
 }
 function openSubmissionDetail(record) {
   const targets = (selectedAssignment.value?.board || []).filter(item => item.status === 'SUBMITTED' && item.files?.length)
@@ -806,7 +844,7 @@ function openSubmissionDetail(record) {
   openAssessmentDrawer(record, { mode: 'TEACHER', targets, targetIndex })
 }
 function pendingTeacherReviewTargets(board = selectedAssignment.value?.board || []) {
-  return board.filter(item => item.status === 'SUBMITTED' && item.files?.length && !item.teacher_grade)
+  return board.filter(item => item.status === 'SUBMITTED' && item.files?.length && (!item.teacher_grade || item.grade_carried_forward))
 }
 async function continueGrading(item) {
   try {
@@ -831,11 +869,16 @@ function openStudentAssignment(item) {
 }
 function openPeerReviewDrawer(candidate, file = candidate?.files?.[0]) {
   if (!candidate?.files?.length || !file) return message.warning('该组员没有可预览的提交文件')
+  peerReviewExpanded.value = true
   const lockedByOther = Boolean(candidate.review && candidate.can_review === false)
   const submission = { ...candidate, owner: lockedByOther ? candidate.review.evaluator_name : candidate.name }
-  openAssessmentDrawer(submission, { mode: 'PEER', file, initialFeedback: lockedByOther ? candidate.review : null, readonly: lockedByOther })
+  openAssessmentDrawer(submission, { mode: 'PEER', file, initialFeedback: lockedByOther ? candidate.review : null, readonly: lockedByOther, criteriaFiles: reviewTask.value?.criteria_files || [] })
 }
-function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false, readonly = false } = {}) {
+function updateFileReviewExpanded(value) {
+  if (filePreview.mode === 'PEER') peerReviewExpanded.value = value
+  else assignmentDrawerExpanded.value = value
+}
+function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false, readonly = false, criteriaFiles = [] } = {}) {
   selectedSubmission.value = record
   filePreview.mode = mode
   filePreview.targets = targets
@@ -845,6 +888,7 @@ function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, ini
   filePreview.readonly = readonly
   filePreview.assignmentTitle = ''
   filePreview.files = [...(record.files || [])]
+  filePreview.criteriaFiles = [...criteriaFiles]
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file?.id))
   filePreview.open = true
 }
@@ -866,7 +910,13 @@ function handleExternalReviewTarget(record) {
 async function handleFeedbackPublished(result) {
   if (selectedSubmission.value && result) Object.assign(selectedSubmission.value, result)
   if (role.value === 'TEACHER' && selectedAssignment.value) await refreshSubmissionBoard()
-  if (filePreview.mode === 'PEER' && view.value === 'review-detail' && selectedCampaign.value) await loadCampaignDetail(selectedCampaign.value, () => true, selectedSubmission.value?.user_id)
+  if (filePreview.mode === 'PEER' && selectedCampaign.value) {
+    const selectedUserId = selectedSubmission.value?.user_id
+    await loadCampaignDetail(selectedCampaign.value, () => true, selectedUserId)
+    const campaignData = await api(`/peer-review-assignments?class_id=${classId.value}`)
+    campaigns.value = campaignData.items
+    selectedCampaign.value = campaigns.value.find(item => item.assignment_id === selectedCampaign.value?.assignment_id) || selectedCampaign.value
+  }
 }
 async function clearTeacherGrade() {
   try {
@@ -902,8 +952,13 @@ async function loadCampaignDetail(item, isStillCurrent = () => true, preferredUs
   const first = task.candidates.find(candidate => candidate.user_id === preferredUserId) || task.candidates[0]
   Object.assign(reviewForm, { reviewee_id: first?.user_id || '', grade: first?.review?.grade, comment: first?.review?.comment || '' })
 }
-async function openCampaign(item) {
-  await router.push(`/reviews/${item.assignment_id}`)
+async function openCampaign(item, userId) {
+  try {
+    await loadCampaignDetail(item, () => true, userId)
+    const candidate = reviewTask.value?.candidates?.find(entry => entry.user_id === userId)
+    if (!candidate) return message.warning('该组员当前没有可评价的提交')
+    openPeerReviewDrawer(candidate)
+  } catch (error) { message.error(error.message) }
 }
 function selectReviewCandidate(userId) {
   const candidate = reviewTask.value?.candidates?.find(item => item.user_id === userId)
@@ -1108,7 +1163,7 @@ onBeforeUnmount(() => {
 })
 
 provide(shellContextKey, {
-  session, role, classId, menu, navView, notifications, noticesOpen, modals, audits, auditSearch, auditSemester, auditClassId, auditActorRole, auditSemesterOptions, auditClassOptions, auditPage, auditPageSize, auditTotal, loading, dashboard, memberQuery, filteredMembers,
+  session, role, classId, menu, navView, notifications, noticesOpen, modals, audits, auditSearch, auditSemester, auditClassId, auditActorRole, auditSearched, auditSemesterOptions, auditClassOptions, auditPage, auditPageSize, auditTotal, loading, dashboard, memberQuery, filteredMembers,
   teams, requests, ungroupedMembers, selectedTeam, selectedTeamAssignments, teamDrawerLoading, exportingTeamIds,
   activeClasses, assignments,
   grades, gradeAssignments, selectedGradeAssignmentId, campaigns, selectedCampaign, reviewTask, reviewForm, selectedReviewCandidate,
@@ -1116,7 +1171,7 @@ provide(shellContextKey, {
   studentPendingAssignments, studentUpcomingAssignments, studentPendingReviews, studentLatestGrade,
   changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, roleLabel, gradeSourceLabel, searchAudits, changeAuditSemester, changeAuditPage, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
   manageClass, closeClassDetail, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
-  applyTeam, openTeam, closeTeamDrawer, inviteTarget, inviteMember, closeTeamRecruitment, openTeamRecruitment, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
+  applyTeam, openTeam, closeTeamDrawer, inviteTarget, inviteMember, closeTeamRecruitment, openTeamRecruitment, disbandTeam, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
   openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading
 })
 </script>
@@ -1154,11 +1209,10 @@ provide(shellContextKey, {
                  <div><span class="student-workspace-label">作业要求</span><div class="rich-text detail-description" v-html="selectedAssignment.description"></div></div>
                  <div class="student-workspace-state" :class="{submitted:assignmentSubmitted,closed:!canEditAssignment&&!assignmentSubmitted}"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/><div><strong>{{assignmentSubmitted?'已提交':new Date(selectedAssignment.due_at)<=new Date()&&!selectedAssignment.allow_late?'已截止':'在线编写中'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · 可继续修改`:`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div>
                </header>
-               <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" :criteria-files="assignmentSubmitted?studentCriteriaMaterials:[]" @ready="onlineWorkspaceData=$event" @preview-criteria="openFilePreview"/>
+               <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" :can-submit="canSubmitAssignment&&Boolean(onlineWorkspaceData?.documents?.length)" :submit-label="assignmentIsUpdate?'更新提交':'提交当前版本'" @ready="onlineWorkspaceData=$event" @submit="submitAssignment"/>
                <footer class="student-submit-bar">
                  <span v-if="selectedAssignment.submitter_type==='TEAM'&&!canManageTeamSubmission">小组成员均可协作编辑，由组长正式提交</span>
                  <span v-else>{{onlineWorkspaceData?.documents?.length||0}} 份 Markdown 文档将作为一个版本提交</span>
-                 <a-button v-if="canSubmitAssignment" type="primary" :disabled="!onlineWorkspaceData?.documents?.length" @click="submitAssignment">{{assignmentIsUpdate?'更新提交':'提交当前版本'}}</a-button>
                </footer>
              </div>
            </template>
@@ -1188,15 +1242,14 @@ provide(shellContextKey, {
                   <div class="assignment-pane-heading"><h2>提交明细</h2></div>
                   <div class="board-toolbar"><a-input-search v-model:value="boardQuery" allow-clear placeholder="搜索姓名或学号"/><a-select v-model:value="boardTeamFilter" :options="boardTeamOptions"/><a-segmented v-model:value="boardFilter" :options="[{label:'全部',value:'ALL'},{label:'未提交',value:'NOT_SUBMITTED'},{label:'已提交',value:'SUBMITTED'},{label:'迟交',value:'LATE'},{label:'未批改',value:'PENDING_REVIEW'},{label:'已批改',value:'REVIEWED'}]"/></div>
                   <a-empty v-if="!groupedBoard.length" class="detail-empty" description="没有符合条件的提交记录"/>
-                  <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="最终成绩"><template #default="{record}"><a-tag v-if="record.final_grade" :color="record.grade_source==='TEACHER'?'green':record.grade_source==='SYSTEM'?'red':'blue'">{{record.final_grade}} · {{gradeSourceLabel(record.grade_source)}}</a-tag><a-tag v-else color="gold">{{statusLabel(record.grading_status)}}</a-tag></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
+                  <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column title="最终成绩"><template #default="{record}"><span v-if="record.final_grade" class="grade-result" :class="`source-${(record.grade_source||'unknown').toLowerCase()}`"><strong>{{record.final_grade}}</strong><span>{{gradeSourceLabel(record.grade_source)}}</span></span><a-tag v-else :color="gradingStatusColor(record.grading_status)">{{statusLabel(record.grading_status)}}</a-tag><a-tag v-if="record.grade_carried_forward" color="blue">待重新评分</a-tag></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
                 </section>
               </template>
               <template v-else>
               <div class="submission-summary" :class="{submitted:assignmentSubmitted,closed:!canEditAssignment&&!assignmentSubmitted}"><span class="submission-summary-icon"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/></span><div><strong>{{assignmentSubmitted?'已提交':new Date(selectedAssignment.due_at)<=new Date()&&!selectedAssignment.allow_late?'已截止':'在线编写中'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · 可继续编辑并更新提交`:`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div>
               <section class="assignment-pane online-workspace-pane">
-                <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" @ready="onlineWorkspaceData=$event"/>
-                <div v-if="canSubmitAssignment" class="submission-actions"><a-button type="primary" :disabled="!onlineWorkspaceData?.documents?.length" @click="submitAssignment">{{assignmentIsUpdate?'更新提交':'提交当前版本'}}</a-button></div>
-                <a-alert v-else-if="selectedAssignment.submitter_type==='TEAM'&&canEditAssignment" type="info" show-icon message="小组成员均可协作编辑，由组长正式提交"/>
+                <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" :can-submit="canSubmitAssignment&&Boolean(onlineWorkspaceData?.documents?.length)" :submit-label="assignmentIsUpdate?'更新提交':'提交当前版本'" @ready="onlineWorkspaceData=$event" @submit="submitAssignment"/>
+                <a-alert v-if="selectedAssignment.submitter_type==='TEAM'&&canEditAssignment" type="info" show-icon message="小组成员均可协作编辑，由组长正式提交"/>
               </section>
               </template>
             </a-tab-pane>
@@ -1207,7 +1260,6 @@ provide(shellContextKey, {
       </template>
 
       <ReviewsPage v-else-if="view==='reviews'" />
-      <ReviewDetailPage v-else-if="view==='review-detail'&&selectedCampaign" />
 
       <CapstonePage v-else-if="view==='capstone'" />
       <GradesPage v-else-if="view==='grades'" />
@@ -1225,7 +1277,7 @@ provide(shellContextKey, {
       :submission-version-id="selectedSubmission?.submission_version_id||''"
       :owner="selectedSubmission?.owner||''"
       :assignment-title="filePreview.assignmentTitle||selectedAssignment?.title||selectedCampaign?.assignment_title||reviewTask?.assignment?.title||''"
-      :criteria-files="filePreview.mode==='PEER' ? reviewTask?.review_criteria||[] : filePreview.mode==='TEACHER' ? gradingCriteriaFiles : []"
+      :criteria-files="filePreview.mode==='PEER' ? filePreview.criteriaFiles : filePreview.mode==='TEACHER' ? gradingCriteriaFiles : []"
       :criteria-locked="filePreview.mode==='PEER'&&Boolean(reviewTask?.review_criteria_locked)"
       :editable="!filePreview.readonly&&(filePreview.mode==='TEACHER'&&role==='TEACHER'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
       :mode="filePreview.mode"
@@ -1236,9 +1288,10 @@ provide(shellContextKey, {
       :peer-grade="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
       :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
       :allow-download="role==='TEACHER'"
-      :expanded="assignmentDrawerExpanded"
+      :expanded="filePreview.mode==='PEER'?peerReviewExpanded:assignmentDrawerExpanded"
+      :grade-cap="selectedSubmission?.grade_cap||''"
       @close="closeFilePreview"
-      @update:expanded="assignmentDrawerExpanded=$event"
+      @update:expanded="updateFileReviewExpanded"
       @feedback-published="handleFeedbackPublished"
       @clear-feedback="clearTeacherGrade"
       @target-change="changeReviewTarget"
