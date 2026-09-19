@@ -51,6 +51,26 @@ function inlineMarkdown(node) {
 function htmlToMarkdown(value) {
   const root = document.createElement('div')
   root.innerHTML = value
+  function tableCell(cell) {
+    return [...cell.childNodes]
+      .map(inlineMarkdown)
+      .join('')
+      .replace(/\r?\n+/g, '<br>')
+      .replace(/\|/g, '\\|')
+      .trim()
+  }
+  function markdownTable(table) {
+    const rows = [...table.rows]
+    if (!rows.length) return ''
+    const width = Math.max(...rows.map(row => row.cells.length))
+    const line = row => {
+      const cells = [...row.cells].map(tableCell)
+      while (cells.length < width) cells.push('')
+      return `| ${cells.join(' | ')} |`
+    }
+    const separator = `| ${Array.from({ length: width }, () => '---').join(' | ')} |`
+    return [line(rows[0]), separator, ...rows.slice(1).map(line)].join('\n')
+  }
   function block(node, depth = 0) {
     if (node.nodeType === Node.TEXT_NODE) return node.textContent
     if (node.nodeType !== Node.ELEMENT_NODE) return ''
@@ -59,6 +79,7 @@ function htmlToMarkdown(value) {
     if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${[...node.childNodes].map(inlineMarkdown).join('')}\n\n`
     if (tag === 'p') return `${[...node.childNodes].map(inlineMarkdown).join('')}\n\n`
     if (tag === 'blockquote') return `${inner.trim().split('\n').map(line => `> ${line}`).join('\n')}\n\n`
+    if (tag === 'table') return `${markdownTable(node)}\n\n`
     if (tag === 'pre') {
       const language = node.querySelector(':scope > code')?.classList.contains('language-mermaid') ? 'mermaid' : ''
       return `\`\`\`${language}\n${node.textContent.replace(/\n$/, '')}\n\`\`\`\n\n`
