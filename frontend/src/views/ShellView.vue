@@ -46,6 +46,7 @@ const auditSearch = ref('')
 const auditSemester = ref('ALL')
 const auditClassId = ref('ALL')
 const auditActorRole = ref('ALL')
+const auditSearched = ref(false)
 const auditPage = ref(1)
 const auditPageSize = 10
 const auditTotal = ref(0)
@@ -285,7 +286,11 @@ function auditSearchParams() {
   if (auditActorRole.value !== 'ALL') params.set('actor_role', auditActorRole.value)
   return params
 }
-async function searchAudits() { auditPage.value = 1; await loadView() }
+async function searchAudits() {
+  auditSearched.value = true
+  auditPage.value = 1
+  await loadView()
+}
 async function changeAuditSemester() {
   if (!auditClassOptions.value.some(item => item.value === auditClassId.value)) auditClassId.value = 'ALL'
   await searchAudits()
@@ -407,6 +412,11 @@ async function loadView({ silent = false, background = false } = {}) {
       return
     }
     if (view.value === 'system' && role.value === 'TEACHER') {
+      if (!auditSearched.value) {
+        audits.value = []
+        auditTotal.value = 0
+        return
+      }
       const params = auditSearchParams()
       params.set('page', auditPage.value)
       params.set('page_size', auditPageSize)
@@ -1121,7 +1131,7 @@ onBeforeUnmount(() => {
 })
 
 provide(shellContextKey, {
-  session, role, classId, menu, navView, notifications, noticesOpen, modals, audits, auditSearch, auditSemester, auditClassId, auditActorRole, auditSemesterOptions, auditClassOptions, auditPage, auditPageSize, auditTotal, loading, dashboard, memberQuery, filteredMembers,
+  session, role, classId, menu, navView, notifications, noticesOpen, modals, audits, auditSearch, auditSemester, auditClassId, auditActorRole, auditSearched, auditSemesterOptions, auditClassOptions, auditPage, auditPageSize, auditTotal, loading, dashboard, memberQuery, filteredMembers,
   teams, requests, ungroupedMembers, selectedTeam, selectedTeamAssignments, teamDrawerLoading, exportingTeamIds,
   activeClasses, assignments,
   grades, gradeAssignments, selectedGradeAssignmentId, campaigns, selectedCampaign, reviewTask, reviewForm, selectedReviewCandidate,
