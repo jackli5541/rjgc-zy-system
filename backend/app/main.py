@@ -917,7 +917,13 @@ def set_team_recruitment(tid: UUID, open_recruitment: bool, user: User, db: Sess
 def requests(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id); q = select(TeamRequest, Team, User).join(Team, Team.id == TeamRequest.team_id).join(User, User.id == TeamRequest.applicant_id).where(TeamRequest.class_id == class_id)
     if user.role == "STUDENT": q = q.where(or_(TeamRequest.applicant_id == user.id, Team.leader_id == user.id))
-    rows = db.execute(q.order_by(TeamRequest.created_at.desc())).all(); return {"items": [{"id": str(r.id), "team_id": str(t.id), "team_name": t.name, "applicant_id": str(p.id), "applicant_name": p.display_name, "kind": r.kind, "status": r.status, "is_incoming": t.leader_id == user.id} for r, t, p in rows]}
+    rows = db.execute(q.order_by(TeamRequest.created_at.desc())).all()
+    items = [{"id": str(r.id), "team_id": str(t.id), "team_name": t.name, "applicant_id": str(p.id), "applicant_name": p.display_name, "kind": r.kind, "status": r.status, "is_incoming": t.leader_id == user.id, "created_at": r.created_at} for r, t, p in rows]
+    if user.role == "STUDENT":
+        memberships = db.execute(select(TeamMember, Team).join(Team, Team.id == TeamMember.team_id).where(TeamMember.class_id == class_id, TeamMember.user_id == user.id, TeamMember.status == "LEFT")).all()
+        items.extend({"id": str(member.id), "team_id": str(team.id), "team_name": team.name, "applicant_id": str(user.id), "applicant_name": user.display_name, "kind": "MEMBERSHIP", "status": member.status, "is_incoming": False, "created_at": member.joined_at} for member, team in memberships)
+        items.sort(key=lambda item: item["created_at"].timestamp() if item["created_at"] else 0, reverse=True)
+    return {"items": items}
 
 
 @app.post("/api/v1/team-requests/{rid}/decision")
