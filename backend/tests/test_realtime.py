@@ -23,6 +23,10 @@ def test_realtime_hub_filters_class_role_and_user():
         assert (await student.queue.get())["id"] == "two"
         assert teacher.queue.empty()
 
+        hub.dispatch({"id": "three", "type": "invalidate", "user_ids": [student.user_id], "scopes": ["workspace"]})
+        assert (await student.queue.get())["id"] == "three"
+        assert teacher.queue.empty()
+
     asyncio.run(scenario())
 
 

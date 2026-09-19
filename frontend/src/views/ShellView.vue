@@ -789,7 +789,7 @@ async function submitAssignment() {
   if (!await onlineWorkspace.value?.save()) return message.warning('请先解决文档保存问题')
   const updating = assignmentIsUpdate.value
   const count = onlineWorkspaceData.value?.documents?.length || 0
-  Modal.confirm({ title: updating ? '确认更新提交？' : '确认正式提交？', content: `将提交在线工作区中的 ${count} 份 Markdown 文档${updating?'并生成新的提交版本':''}。`, okText: updating ? '确认更新' : '确认提交', cancelText: '继续检查', onOk: async () => action(async () => { await api(`/assignments/${selectedAssignment.value.id}/submission`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: JSON.stringify({}) }); await loadAssignmentDetail(selectedAssignment.value) }, updating ? '提交已更新' : '提交成功') })
+  Modal.confirm({ title: updating ? '确认更新提交？' : '确认正式提交？', content: `将提交在线工作区中的 ${count} 份 Markdown 文档${updating?'并生成新的提交版本':''}。`, okText: updating ? '确认更新' : '确认提交', cancelText: '继续检查', onOk: async () => action(() => api(`/assignments/${selectedAssignment.value.id}/submission`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey() }, body: JSON.stringify({}) }), updating ? '提交已更新' : '提交成功') })
 }
 function openSubmissionDetail(record) {
   const targets = (selectedAssignment.value?.board || []).filter(item => item.status === 'SUBMITTED' && item.files?.length)
@@ -1036,7 +1036,10 @@ function handleRealtimeEvent(event) {
   try {
     const payload = JSON.parse(event.data || '{}')
     if (payload.source_client_id && payload.source_client_id === apiClientId) return
-    if ((payload.scopes || []).includes('workspace')) window.dispatchEvent(new CustomEvent('workspace-changed', { detail: { assignmentId: selectedAssignment.value?.id, payload } }))
+    if ((payload.scopes || []).includes('workspace')) {
+      window.dispatchEvent(new CustomEvent('workspace-changed', { detail: { assignmentId: payload.assignment_id, workspaceId: payload.workspace_id, payload } }))
+      return
+    }
     scheduleRealtimeRefresh(payload.scopes)
   } catch (_) { scheduleRealtimeRefresh() }
 }

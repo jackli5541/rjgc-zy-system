@@ -139,8 +139,7 @@ async function loadFile() {
         const html = await loadMarkdownPreview(url)
         if (sequence === loadSequence) richHtml.value = html
       } else {
-        const rendered = await api(`/files/${file.id}/render`)
-        if (sequence === loadSequence) richHtml.value = rendered.html
+        throw new Error('仅支持 Markdown 文档在线预览')
       }
     } else if (renderType.value === 'IMAGE') {
       const response = await fetch(`/api/v1/files/${file.id}/preview`, { credentials: 'include' })

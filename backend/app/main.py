@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio, csv, hashlib, html, io, json, mimetypes, os, re, secrets
+import asyncio, csv, html, io, json, mimetypes, os, re, secrets
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
@@ -17,19 +17,18 @@ from zoneinfo import ZoneInfo
 from fastapi import Cookie, Depends, FastAPI, File, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 import bleach
-import markdown
 import zipfile
 from oss2.exceptions import NoSuchKey, OssError
 import tempfile
 from tempfile import TemporaryFile
 from openpyxl import Workbook, load_workbook
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, load_only
 
 from app.database import SessionLocal, get_db
 from app.grading import final_score, finalize_campaign
@@ -61,71 +60,12 @@ SAFE_HTML_ATTRIBUTES = {
     "img": ["src", "alt", "title", "width", "height"],
     "input": ["type", "checked", "disabled"],
 }
-PREVIEWABLE_FILE_SUFFIXES = {".md", ".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
-DOWNLOAD_ONLY_FILE_SUFFIXES = {".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
-SAFE_IMAGE_DATA_URL = re.compile(
-    r"data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]*={0,2}",
-    flags=re.IGNORECASE,
-)
-
-
+PREVIEWABLE_FILE_SUFFIXES = {".md"}
+DOWNLOAD_ONLY_FILE_SUFFIXES = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
+STUDENT_UPLOAD_FILE_SUFFIXES = PREVIEWABLE_FILE_SUFFIXES | {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
 def clean_html(value: str) -> str:
     cleaned = bleach.clean(value, tags=SAFE_HTML_TAGS, attributes=SAFE_HTML_ATTRIBUTES, protocols=["http", "https", "mailto"], strip=True)
     return re.sub(r'<a\s+([^>]*href="(?:https?://|mailto:)[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
-
-
-def clean_file_html(value: str) -> str:
-    def allowed_attribute(tag: str, name: str, attribute_value: str) -> bool:
-        if tag == "a" and name in {"title", "target", "rel"}: return True
-        if tag == "a" and name == "href": return attribute_value.startswith(("https://", "mailto:"))
-        if tag == "img" and name in {"alt", "title", "width", "height"}: return True
-        if tag == "img" and name == "src":
-            return attribute_value.startswith(("http://", "https://")) or bool(SAFE_IMAGE_DATA_URL.fullmatch(attribute_value))
-        if tag == "input" and name in {"type", "checked", "disabled"}: return name != "type" or attribute_value == "checkbox"
-        if tag == "code" and name == "class" and attribute_value.startswith("language-"): return True
-        if name in {"class", "id"}: return bool(re.fullmatch(r"[A-Za-z0-9_\- ]{1,200}", attribute_value))
-        return False
-
-    styles = re.findall(r"<style\b[^>]*>(.*?)</style\s*>", value, flags=re.IGNORECASE | re.DOTALL)
-    without_styles = re.sub(r"<style\b[^>]*>.*?</style\s*>", "", value, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = bleach.clean(without_styles, tags=SAFE_HTML_TAGS, attributes=allowed_attribute, protocols=["http", "https", "mailto", "data"], strip=True)
-    cleaned = re.sub(r'<a\s+([^>]*href="[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
-    scoped_css = scope_preview_css("\n".join(styles))
-    return f"<style>{scoped_css}</style>{cleaned}" if scoped_css else cleaned
-
-
-def scope_preview_css(value: str) -> str:
-    value = re.sub(r"/\*.*?\*/", "", value, flags=re.DOTALL)
-    value = re.sub(r"@(?:import|charset|namespace)\b[^;]*;", "", value, flags=re.IGNORECASE)
-    value = re.sub(r"@(?:page|font-face|keyframes|supports|media)\b[^{}]*\{(?:[^{}]|\{[^{}]*\})*\}", "", value, flags=re.IGNORECASE | re.DOTALL)
-    value = re.sub(r"url\s*\([^)]*\)|expression\s*\([^)]*\)|javascript:|behavior\s*:|-moz-binding\s*:", "", value, flags=re.IGNORECASE)
-    value = re.sub(r"position\s*:\s*fixed", "position:absolute", value, flags=re.IGNORECASE)
-    prefix = ".rich-document-content"
-    rules = []
-    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", value):
-        selectors, declarations = match.group(1).strip(), match.group(2).strip()
-        if not selectors or not declarations or selectors.startswith("@"):
-            continue
-        scoped = []
-        for selector in selectors.split(","):
-            selector = selector.strip()
-            if not selector: continue
-            selector = re.sub(r"(^|\s)(?::root|html|body)(?=\s|$|[.:#>+~\[])", r"\1", selector, flags=re.IGNORECASE).strip()
-            scoped.append(prefix if not selector else f"{prefix} {selector}")
-        if scoped:
-            rules.append(f"{','.join(scoped)}{{{declarations}}}")
-    return "\n".join(rules)
-
-
-def render_rich_file(data: bytes, suffix: str) -> tuple[str, str]:
-    if len(data) > settings.max_file_size_bytes:
-        raise ApiError(413, "RICH_TEXT_PREVIEW_TOO_LARGE", "Markdown 或 HTML 文件超过 500 MB，请下载原文件查看")
-    try: source = decode_text_file(data)
-    except UnicodeDecodeError: raise ApiError(422, "RICH_TEXT_ENCODING_INVALID", "Markdown 或 HTML 文件编码无法识别")
-    if suffix.lower() == ".md":
-        source = re.sub(r"(?m)^(\s*[-*]\s+)\[([ xX])\]\s+", lambda match: f'{match.group(1)}<input type="checkbox" disabled{" checked" if match.group(2).lower() == "x" else ""}> ', source)
-        source = markdown.markdown(source, extensions=["fenced_code", "tables", "sane_lists"])
-    return clean_file_html(source), hashlib.sha256(data).hexdigest()
 
 
 def content_disposition(filename: str, disposition: str = "attachment") -> str:
@@ -436,8 +376,8 @@ class AssignmentUpdateIn(BaseModel):
 class SubmissionDocumentIn(BaseModel):
     name: str = Field(min_length=1, max_length=255)
 class SubmissionDocumentUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     revision: int = Field(ge=1)
-    content_html: str = Field(max_length=settings.max_file_size_bytes + 1024 * 1024)
     markdown_content: str = Field(max_length=settings.max_file_size_bytes)
 class ReasonIn(BaseModel): reason: str = Field(min_length=2, max_length=500)
 class PasswordIn(BaseModel): current_password: str; new_password: str = Field(min_length=8, max_length=128)
@@ -1032,7 +972,7 @@ def has_review_criteria_file(db: Session, assignment_id: UUID) -> bool:
 
 def file_json(file: FileObject, owner_name: str | None = None, submitted: bool = False) -> dict:
     suffix = Path(file.original_name).suffix.lower()
-    render_type = "PDF" if suffix == ".pdf" else "RICH_TEXT" if suffix in {".md", ".html", ".htm"} else "IMAGE" if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"} else "DOWNLOAD_ONLY"
+    render_type = "RICH_TEXT" if suffix == ".md" else "DOWNLOAD_ONLY"
     previewable = render_type != "DOWNLOAD_ONLY"
     return {"id": str(file.id), "name": file.original_name, "size": file.size_bytes, "render_type": render_type, "preview_status": file.preview_status, "preview_error": file.preview_error, "previewable": previewable, "download_only": not previewable, "purpose": file.purpose, "material_type": file.material_type, "owner_name": owner_name, "created_at": file.created_at, "submitted": submitted}
 
@@ -1071,7 +1011,7 @@ def create_assignments_for_classes(data: AssignmentFields, courses: list[Teachin
 @app.get("/api/v1/assignments")
 def assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id)
-    if user.role == "STUDENT": require_team(db, class_id, user)
+    team = require_team(db, class_id, user)[1] if user.role == "STUDENT" else None
     q = select(Assignment).where(Assignment.class_id == class_id)
     if user.role == "STUDENT":
         q = q.where(
@@ -1079,11 +1019,21 @@ def assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
             or_(Assignment.starts_at.is_(None), Assignment.starts_at <= now()),
         )
     items = db.scalars(q.order_by(Assignment.created_at.desc())).all()
+    submissions_by_assignment = {}
+    if user.role == "STUDENT" and items:
+        assignment_ids = [item.id for item in items]
+        ownership = or_(Submission.owner_user_id == user.id, Submission.owner_team_id == team.id)
+        submissions_by_assignment = {
+            submission.assignment_id: submission
+            for submission in db.scalars(
+                select(Submission).where(Submission.assignment_id.in_(assignment_ids), ownership)
+            ).all()
+        }
     result = []
     for item in items:
         payload = assignment_json(item)
         if user.role == "STUDENT":
-            submission, _ = own_submission(db, item, user)
+            submission = submissions_by_assignment.get(item.id)
             payload["submission_status"] = submission.status if submission else "NOT_SUBMITTED"
         result.append(payload)
     return {"items": result, "total": len(result)}
@@ -1264,37 +1214,65 @@ def document_is_criteria(db: Session, item: SubmissionDocument) -> bool:
     return bool(source and source.material_type == "CRITERIA")
 
 
-def document_json(db: Session, item: SubmissionDocument, locked: bool = False) -> dict:
-    editor = db.get(User, item.updated_by)
-    return {"id": str(item.id), "name": item.name, "content_html": "" if locked else item.content_html, "markdown_content": "" if locked else item.markdown_content, "sort_order": item.sort_order, "revision": item.revision, "updated_at": item.updated_at, "updated_by": editor.display_name if editor else "", "locked": locked}
+def document_json(db: Session, item: SubmissionDocument, locked: bool = False, editor_name: str | None = None) -> dict:
+    if editor_name is None:
+        editor = db.get(User, item.updated_by)
+        editor_name = editor.display_name if editor else ""
+    return {"id": str(item.id), "name": item.name, "sort_order": item.sort_order, "revision": item.revision, "updated_at": item.updated_at.isoformat() if item.updated_at else None, "updated_by": editor_name, "locked": locked}
+
+
+def document_content_json(db: Session, item: SubmissionDocument, locked: bool = False) -> dict:
+    result = document_json(db, item, locked)
+    result["markdown_content"] = "" if locked else item.markdown_content
+    return result
 
 
 def workspace_json(db: Session, workspace: SubmissionWorkspace, user: User) -> dict:
-    documents = db.scalars(select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id).order_by(SubmissionDocument.sort_order, SubmissionDocument.created_at)).all()
-    submission = db.scalar(select(Submission).where(Submission.assignment_id == workspace.assignment_id, Submission.owner_user_id == workspace.owner_user_id)) if workspace.owner_user_id else db.scalar(select(Submission).where(Submission.assignment_id == workspace.assignment_id, Submission.owner_team_id == workspace.owner_team_id))
-    criteria_locked = not submission or submission.status != "SUBMITTED"
-    return {"id": str(workspace.id), "documents": [document_json(db, item, criteria_locked and document_is_criteria(db, item)) for item in documents], "updated_at": workspace.updated_at}
+    rows = db.execute(
+        select(SubmissionDocument, User.display_name)
+        .outerjoin(User, User.id == SubmissionDocument.updated_by)
+        .options(load_only(SubmissionDocument.id, SubmissionDocument.name, SubmissionDocument.sort_order, SubmissionDocument.revision, SubmissionDocument.updated_at, SubmissionDocument.updated_by, SubmissionDocument.source_file_id, SubmissionDocument.created_at))
+        .where(SubmissionDocument.workspace_id == workspace.id)
+        .order_by(SubmissionDocument.sort_order, SubmissionDocument.created_at)
+    ).all()
+    return {"id": str(workspace.id), "documents": [document_json(db, item, False, editor_name or "") for item, editor_name in rows], "updated_at": workspace.updated_at}
 
 
-def repair_corrupted_workspace(db: Session, workspace: SubmissionWorkspace, user: User) -> bool:
-    repaired = False
-    documents = db.scalars(select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id, SubmissionDocument.source_file_id.is_not(None))).all()
-    for document in documents:
-        source_file = db.get(FileObject, document.source_file_id)
-        if not source_file: continue
-        try: source = decode_text_file(storage.get_object_bytes(source_file.storage_path))
-        except (OssError, UnicodeDecodeError):
-            continue
-        corrupted_text = "???" in document.name or document.markdown_content.count("?") >= 5
-        restored = source if corrupted_text else restore_embedded_images(source, document.markdown_content)
-        if restored != document.markdown_content or document.name != Path(source_file.original_name).name:
-            document.name = Path(source_file.original_name).name
-            document.markdown_content = restored
-            document.content_html = clean_file_html(markdown.markdown(restored, extensions=["fenced_code", "tables", "sane_lists"]))
-            document.revision += 1
-            document.updated_by = user.id
-            repaired = True
-    return repaired
+def check_source_images(db: Session, workspace: SubmissionWorkspace, document: SubmissionDocument, user: User) -> bool:
+    if document.source_images_checked_at is not None:
+        return False
+    source_file = db.get(FileObject, document.source_file_id) if document.source_file_id else None
+    if not source_file:
+        source_file = db.scalar(
+            select(FileObject)
+            .where(
+                FileObject.assignment_id == workspace.assignment_id,
+                FileObject.purpose == "ATTACHMENT",
+                FileObject.active == True,  # noqa: E712
+                or_(FileObject.material_type.is_(None), FileObject.material_type != "CRITERIA"),
+                func.lower(FileObject.original_name) == document.name.lower(),
+            )
+            .order_by(FileObject.created_at.desc())
+            .limit(1)
+        )
+    if not source_file:
+        document.source_images_checked_at = now()
+        return True
+    try:
+        source = decode_text_file(storage.get_object_bytes(source_file.storage_path))
+    except (OssError, UnicodeDecodeError):
+        return False
+    corrupted_text = "???" in document.name or document.markdown_content.count("?") >= 5
+    restored = source if corrupted_text or not document.markdown_content.strip() else restore_embedded_images(source, document.markdown_content)
+    changed = restored != document.markdown_content or document.name != Path(source_file.original_name).name or document.source_file_id != source_file.id
+    document.source_file_id = source_file.id
+    document.name = Path(source_file.original_name).name
+    document.markdown_content = restored
+    document.source_images_checked_at = now()
+    if changed:
+        document.revision += 1
+        document.updated_by = user.id
+    return True
 
 
 def remove_criteria_workspace_documents(db: Session, workspace: SubmissionWorkspace) -> bool:
@@ -1305,11 +1283,17 @@ def remove_criteria_workspace_documents(db: Session, workspace: SubmissionWorksp
 
 
 def restore_embedded_images(template: str, draft: str) -> str:
-    image_pattern = re.compile(r"!\[[^\]]*\]\(data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+\)", re.IGNORECASE)
+    image_pattern = re.compile(
+        r"!\[[^\]\r\n]*\]\(data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+\)"
+        r"|<img\b[^>]*\bsrc\s*=\s*([\"'])data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+\1[^>]*>",
+        re.IGNORECASE,
+    )
+    data_url_pattern = re.compile(r"data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+", re.IGNORECASE)
     result = draft
     for match in image_pattern.finditer(template):
         image_markdown = match.group(0)
-        if image_markdown in result: continue
+        data_url = data_url_pattern.search(image_markdown)
+        if data_url and data_url.group(0) in result: continue
         prefix_lines = [line for line in template[:match.start()].splitlines() if line.strip()]
         anchor = next((line for line in reversed(prefix_lines) if line in result), None)
         if anchor:
@@ -1338,9 +1322,8 @@ def initialize_workspace(aid: UUID, user: CsrfUser, db: Db):
     owner_user_id, owner_team_id, _ = workspace_scope(db, assignment, user)
     workspace = db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_user_id == owner_user_id)) if owner_user_id else db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_team_id == owner_team_id))
     if workspace:
-        repaired = repair_corrupted_workspace(db, workspace, user)
         removed_criteria = remove_criteria_workspace_documents(db, workspace)
-        if repaired or removed_criteria: db.commit()
+        if removed_criteria: db.commit()
         return workspace_json(db, workspace, user)
     workspace = SubmissionWorkspace(assignment_id=aid, owner_user_id=owner_user_id, owner_team_id=owner_team_id)
     db.add(workspace); db.flush()
@@ -1351,11 +1334,7 @@ def initialize_workspace(aid: UUID, user: CsrfUser, db: Db):
         if name.casefold() in used_names:
             name = f"{Path(name).stem}-{index + 1}.md"
         used_names.add(name.casefold())
-        try: source = decode_text_file(storage.get_object_bytes(template.storage_path))
-        except (OssError, UnicodeDecodeError):
-            source = ""
-        rendered = markdown.markdown(source, extensions=["fenced_code", "tables", "sane_lists"])
-        db.add(SubmissionDocument(workspace_id=workspace.id, source_file_id=template.id, name=name, content_html=clean_file_html(rendered), markdown_content=source, sort_order=index, updated_by=user.id))
+        db.add(SubmissionDocument(workspace_id=workspace.id, source_file_id=template.id, name=name, markdown_content="", source_images_checked_at=None, sort_order=index, updated_by=user.id))
     audit(db, user, "SUBMISSION_WORKSPACE_CREATED", "submission_workspace", str(workspace.id)); db.commit()
     return workspace_json(db, workspace, user)
 
@@ -1371,8 +1350,16 @@ def create_workspace_document(aid: UUID, data: SubmissionDocumentIn, user: CsrfU
     if not name.lower().endswith(".md"): name += ".md"
     if db.scalar(select(SubmissionDocument.id).where(SubmissionDocument.workspace_id == workspace.id, func.lower(SubmissionDocument.name) == name.lower())): raise ApiError(409, "DOCUMENT_NAME_EXISTS", "同名文档已经存在")
     order = db.scalar(select(func.max(SubmissionDocument.sort_order)).where(SubmissionDocument.workspace_id == workspace.id))
-    item = SubmissionDocument(workspace_id=workspace.id, name=name, content_html="<p></p>", markdown_content="", sort_order=(order if order is not None else -1) + 1, updated_by=user.id)
+    item = SubmissionDocument(workspace_id=workspace.id, name=name, markdown_content="", source_images_checked_at=now(), sort_order=(order if order is not None else -1) + 1, updated_by=user.id)
     db.add(item); db.commit(); return document_json(db, item)
+
+
+@app.get("/api/v1/assignments/{aid}/workspace/documents/{document_id}")
+def get_workspace_document(aid: UUID, document_id: UUID, user: CurrentUser, db: Db):
+    _, workspace, document, _ = require_workspace_document(db, aid, document_id, user)
+    if check_source_images(db, workspace, document, user):
+        db.commit()
+    return document_content_json(db, document)
 
 
 @app.put("/api/v1/assignments/{aid}/workspace/documents/{document_id}")
@@ -1381,10 +1368,14 @@ def update_workspace_document(aid: UUID, document_id: UUID, data: SubmissionDocu
     locked = db.scalar(select(SubmissionDocument).where(SubmissionDocument.id == document.id).with_for_update())
     if locked.revision != data.revision:
         raise ApiError(409, "DOCUMENT_VERSION_CONFLICT", f"{db.get(User, locked.updated_by).display_name} 已更新此文档，请刷新后继续", {"document": document_json(db, locked)})
-    locked.content_html = clean_file_html(data.content_html)
     locked.markdown_content = data.markdown_content.replace("\x00", "")
     locked.revision += 1; locked.updated_by = user.id; workspace.updated_at = now()
-    publish_event(db, class_id=assignment.class_id, scopes=["workspace"], resource_type="submission_document", resource_id=document.id, roles=["STUDENT"], source_client_id=request_client_id.get())
+    audience = [user.id] if workspace.owner_user_id else list(db.scalars(select(TeamMember.user_id).where(TeamMember.team_id == workspace.owner_team_id, TeamMember.status == "ACTIVE")))
+    publish_event(
+        db, class_id=assignment.class_id, scopes=["workspace"], resource_type="submission_document",
+        resource_id=document.id, user_ids=audience, roles=["STUDENT"], source_client_id=request_client_id.get(),
+        assignment_id=str(assignment.id), workspace_id=str(workspace.id), revision=locked.revision,
+    )
     db.commit(); return document_json(db, locked)
 
 
@@ -1415,9 +1406,9 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
     suffix = Path(file.filename or "file").suffix.lower()
     if selected_material_type == "CRITERIA" and suffix != ".md":
         raise ApiError(422, "CRITERIA_FILE_TYPE_INVALID", "判定标准仅支持 Markdown 文档")
-    supported = PREVIEWABLE_FILE_SUFFIXES if user.role == "STUDENT" else PREVIEWABLE_FILE_SUFFIXES | DOWNLOAD_ONLY_FILE_SUFFIXES
+    supported = STUDENT_UPLOAD_FILE_SUFFIXES if user.role == "STUDENT" else PREVIEWABLE_FILE_SUFFIXES | DOWNLOAD_ONLY_FILE_SUFFIXES
     if suffix not in supported:
-        message = "学生提交仅支持可在线预览的 Markdown、HTML、PDF 和常见图片" if user.role == "STUDENT" else "仅支持 Markdown、HTML、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包"
+        message = "学生提交仅支持 Markdown、HTML、PDF 和常见图片" if user.role == "STUDENT" else "仅支持 Markdown、HTML、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包"
         raise ApiError(422, "FILE_TYPE_INVALID", message)
     expected_mimes = {
         ".md": {"text/markdown", "text/plain", "application/octet-stream"},
@@ -1599,6 +1590,8 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
     if workspace:
         documents = [document for document in db.scalars(select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id).order_by(SubmissionDocument.sort_order, SubmissionDocument.created_at)).all() if not document_is_criteria(db, document)]
         if not documents: raise ApiError(422, "SUBMISSION_DOCUMENTS_REQUIRED", "在线作业中至少需要一份 Markdown 文档")
+        for document in documents:
+            check_source_images(db, workspace, document, user)
         empty = next((document for document in documents if not document.markdown_content.strip()), None)
         if empty: raise ApiError(422, "SUBMISSION_DOCUMENT_EMPTY", f"文档 {empty.name} 不能为空")
         db.execute(FileObject.__table__.update().where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).values(active=False))  # noqa: E712
@@ -2685,9 +2678,10 @@ def close_campaign(cid: UUID, user: CsrfUser, db: Db):
 def preview_file(fid: UUID, user: CurrentUser, db: Db):
     file = require_file_access(db, user, fid)
     suffix = Path(file.storage_path).suffix.lower()
-    if suffix in {".md", ".html", ".htm"}:
-        rendered, _ = render_rich_file(storage.get_object_bytes(file.storage_path), suffix)
-        return HTMLResponse(rendered)
+    if suffix == ".md":
+        try: source = decode_text_file(storage.get_object_bytes(file.storage_path))
+        except UnicodeDecodeError: raise ApiError(422, "MARKDOWN_ENCODING_INVALID", "Markdown 文件编码无法识别")
+        return PlainTextResponse(source, media_type="text/markdown; charset=utf-8")
     if suffix in {".docx", ".pptx", ".xlsx"}:
         # Preview endpoints must render in the browser; the download endpoint keeps
         # the original filename and attachment disposition.
@@ -2711,12 +2705,8 @@ def preview_file_url(fid: UUID, user: CurrentUser, db: Db):
 
 @app.get("/api/v1/files/{fid}/render")
 def render_file(fid: UUID, user: CurrentUser, db: Db):
-    file = require_file_access(db, user, fid)
-    suffix = Path(file.storage_path).suffix.lower()
-    if suffix not in {".md", ".html", ".htm"}:
-        raise ApiError(422, "FILE_RENDER_TYPE_INVALID", "该文件不使用富文本渲染接口")
-    rendered, content_hash = render_rich_file(storage.get_object_bytes(file.storage_path), suffix)
-    return {"render_type": "RICH_TEXT", "html": rendered, "content_hash": content_hash}
+    require_file_access(db, user, fid)
+    raise ApiError(410, "FILE_RENDER_REMOVED", "Markdown 文件请使用前端预览")
 
 
 @app.get("/api/v1/assignments/{aid}/download.zip")

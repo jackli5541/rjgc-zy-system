@@ -27,3 +27,19 @@ def isolated_test_database() -> Generator[None, None, None]:
     _reset_database()
     yield
     _reset_database()
+
+
+@pytest.fixture(autouse=True)
+def isolated_object_storage(monkeypatch) -> Generator[dict[str, bytes], None, None]:
+    from app import storage
+
+    objects: dict[str, bytes] = {}
+    monkeypatch.setattr(storage, "put_object", lambda key, path: objects.__setitem__(key, path.read_bytes()))
+    monkeypatch.setattr(storage, "put_bytes", lambda key, data: objects.__setitem__(key, data))
+    monkeypatch.setattr(storage, "get_object_bytes", lambda key: objects[key])
+    monkeypatch.setattr(storage, "get_object_stream", lambda key: iter([objects[key]]))
+    monkeypatch.setattr(storage, "sign_get_url", lambda key, expires, params=None: f"https://storage.test/{key}")
+    monkeypatch.setattr(storage, "delete_object", lambda key: objects.pop(key, None))
+    monkeypatch.setattr(storage, "object_exists", lambda key: key in objects)
+    monkeypatch.setattr(storage, "bucket_reachable", lambda: True)
+    yield objects

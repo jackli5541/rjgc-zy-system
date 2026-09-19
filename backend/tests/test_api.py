@@ -15,7 +15,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app, parse_roster
 from app.grading import final_score
-from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, Team, TeamRequest
+from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionVersion, Team, TeamRequest
 from app.worker import process_auto_review, process_due_campaign
 
 
@@ -720,7 +720,7 @@ def test_one_to_one_class_review_freezes_assignment_and_validates_score():
     assert office_preview.status_code == 200 and "attachment" in office_preview.headers["content-disposition"]
     blocked_office = students[0][0].post(f"/api/v1/assignments/{assignment['id']}/files", headers=students[0][1], files={"file": ("work.docx", b"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
     assert blocked_office.status_code == 422 and blocked_office.json()["code"] == "FILE_TYPE_INVALID"
-    assert "仅支持可在线预览" in blocked_office.json()["message"]
+    assert "学生提交仅支持" in blocked_office.json()["message"]
 
     campaign = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": assignment["id"], "mode": "TEAM", "criteria_text": "按完整性与清晰度给出总分。", "due_at": "2099-01-01T00:00:00+08:00"})
     assert campaign.status_code == 201, campaign.text
@@ -958,7 +958,8 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
     markdown_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("report.md", markdown_content, "text/markdown")}).json()
     pdf_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("diagram.pdf", b"%PDF-1.4", "application/pdf")}).json()
     html_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("appendix.html", b'<h2>Safe</h2><script>alert(1)</script><img src="/private.png"><img src="http://localhost:9005/ok.png"><img src="https://example.com/ok.png"><a href="javascript:alert(1)">bad</a>', "text/html")})
-    assert html_file.status_code == 201 and html_file.json()["render_type"] == "RICH_TEXT"
+    assert pdf_file["download_only"] is True
+    assert html_file.status_code == 201 and html_file.json()["download_only"] is True
     submitted = student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "annotation-v1"}, json={})
     assert submitted.status_code == 201, submitted.text
     board_item = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions").json()["items"][0]
@@ -974,16 +975,10 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
     assert direct_preview.json() == {"url": "https://se-lab.example.test/signed-report.md", "expires_in": 300}
     assert signed["key"].endswith(".md") and signed["expires"] == 300
     assert signed["params"] == {"response-content-disposition": 'inline; filename="report.md"'}
-    blocked_direct_preview = teacher.get(f"/api/v1/files/{pdf_file['id']}/preview-url")
-    assert blocked_direct_preview.status_code == 422 and blocked_direct_preview.json()["code"] == "FILE_PREVIEW_TYPE_INVALID"
-
-    rendered = teacher.get(f"/api/v1/files/{html_file.json()['id']}/render")
-    assert rendered.status_code == 200 and rendered.json()["render_type"] == "RICH_TEXT"
-    assert "<script" not in rendered.json()["html"] and "javascript:" not in rendered.json()["html"]
-    assert 'src="/private.png"' not in rendered.json()["html"] and "http://localhost:9005/ok.png" in rendered.json()["html"] and "https://example.com/ok.png" in rendered.json()["html"]
     rendered_markdown = teacher.get(f"/api/v1/files/{markdown_file['id']}/render")
-    assert "data:image/png;base64,iVBORw0KGgo=" in rendered_markdown.json()["html"]
-    assert "data:image/svg+xml" not in rendered_markdown.json()["html"]
+    assert rendered_markdown.status_code == 410 and rendered_markdown.json()["code"] == "FILE_RENDER_REMOVED"
+    rendered_html = teacher.get(f"/api/v1/files/{html_file.json()['id']}/render")
+    assert rendered_html.status_code == 410 and rendered_html.json()["code"] == "FILE_RENDER_REMOVED"
 
     annotation = {"file_id": markdown_file["id"], "kind": "RICH_TEXT_RANGE", "mark_type": "COMMENT", "color": "BLUE", "anchor": {"start": {"block_id": "b0", "offset": 0}, "end": {"block_id": "b0", "offset": 7}, "exact": "Heading", "prefix": "", "suffix": "Done"}, "comment": "<p><strong>重点</strong><script>bad()</script></p>"}
     pure_mark = {"file_id": markdown_file["id"], "kind": "RICH_TEXT_RANGE", "mark_type": "UNDERLINE", "color": "GREEN", "anchor": {"start": {"block_id": "b1", "offset": 0}, "end": {"block_id": "b1", "offset": 4}, "exact": "Done", "prefix": "", "suffix": ""}, "comment": ""}
@@ -1018,6 +1013,66 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
     assert refreshed["submission_version_no"] == 2 and refreshed["submission_version_id"] != version_id
     assert refreshed["teacher_grade"] is None and refreshed["files"][0]["id"] == replacement["id"]
     assert student.get(f"/api/v1/submission-versions/{version_id}/feedback").json()["status"] == "PUBLISHED"
+
+
+def test_restore_embedded_images_supports_markdown_and_html_without_duplicates():
+    from app.main import restore_embedded_images
+
+    markdown_image = "![流程图](data:image/png;base64,aGVsbG8=)"
+    html_image = '<img src="data:image/jpeg;base64,d29ybGQ=" alt="截图" width="50%">'
+    template = f"# 任务一\n\n{markdown_image}\n\n## 任务二\n\n{html_image}\n"
+    draft = "# 任务一\n\n学生答案\n\n## 任务二\n\n补充说明\n"
+
+    restored = restore_embedded_images(template, draft)
+
+    assert markdown_image in restored
+    assert html_image in restored
+    assert "学生答案" in restored and "补充说明" in restored
+    assert restore_embedded_images(template, restored) == restored
+
+
+def test_workspace_loads_document_content_lazily_and_checks_source_images_once(monkeypatch):
+    stored_objects = {}
+    reads = []
+    monkeypatch.setattr("app.storage.put_object", lambda key, path: stored_objects.__setitem__(key, path.read_bytes()))
+    monkeypatch.setattr("app.storage.get_object_bytes", lambda key: reads.append(key) or stored_objects[key])
+    monkeypatch.setattr("app.storage.object_exists", lambda key: key in stored_objects)
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2036 春季", "name": "懒加载测试班"}).json()
+    teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20360001", "name": "懒加载学生"})
+    assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": course["id"], "title": "Markdown 懒加载", "description": "验证目录和正文拆分", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
+    source = b"# Task\n\n![source](data:image/png;base64,aGVsbG8=)\n"
+    uploaded = teacher.post(f"/api/v1/assignments/{assignment['id']}/files?material_type=TASK", headers=teacher_headers, files={"file": ("task.md", source, "text/markdown")})
+    assert uploaded.status_code == 201, uploaded.text
+    student, student_headers = login("20360001", "20360001", "student")
+
+    workspace = student.post(f"/api/v1/assignments/{assignment['id']}/workspace", headers=student_headers, json={})
+    assert workspace.status_code == 200, workspace.text
+    metadata = workspace.json()["documents"][0]
+    assert "markdown_content" not in metadata and "content_html" not in metadata
+    assert len(reads) == 0
+
+    with SessionLocal() as db:
+        document = db.get(SubmissionDocument, UUID(metadata["id"]))
+        document.markdown_content = "# Student draft\n"
+        document.source_images_checked_at = None
+        db.commit()
+
+    first = student.get(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{metadata['id']}")
+    assert first.status_code == 200, first.text
+    assert first.json()["markdown_content"].count("data:image") == 1
+    assert "content_html" not in first.json()
+    assert len(reads) == 1
+    second = student.get(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{metadata['id']}")
+    assert second.status_code == 200 and len(reads) == 1
+
+    saved = student.put(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{metadata['id']}", headers=student_headers, json={"revision": first.json()["revision"], "markdown_content": "# Saved\n"})
+    assert saved.status_code == 200 and "markdown_content" not in saved.json()
+    legacy_payload = student.put(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{metadata['id']}", headers=student_headers, json={"revision": saved.json()["revision"], "markdown_content": "# Saved\n", "content_html": "<h1>Saved</h1>"})
+    assert legacy_payload.status_code == 422
+    conflict = student.put(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{metadata['id']}", headers=student_headers, json={"revision": first.json()["revision"], "markdown_content": "# Stale\n"})
+    assert conflict.status_code == 409
+    assert "markdown_content" not in conflict.json()["details"]["document"]
 
 
 def test_teacher_assignment_and_review_lifecycle_controls():

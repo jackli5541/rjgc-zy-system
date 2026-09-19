@@ -29,8 +29,9 @@ services:
       - -c
       - >-
         /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -b
-        -Q "IF DB_ID(N'coursework') IS NULL CREATE DATABASE coursework;
-        ALTER DATABASE coursework SET COMPATIBILITY_LEVEL = 120;"
+        -Q "IF DB_ID(N'coursework') IS NULL CREATE DATABASE coursework;" &&
+        /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -b
+        -Q "ALTER DATABASE coursework SET COMPATIBILITY_LEVEL = 120;"
     depends_on:
       sqlserver:
         condition: service_healthy
@@ -39,7 +40,7 @@ services:
     profiles: ["container-app"]
     build: ./backend
     environment:
-      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
       CORS_ORIGINS: http://localhost:8080
       OSS_ENDPOINT: "${OSS_ENDPOINT:-https://oss-cn-hangzhou.aliyuncs.com}"
       OSS_BUCKET: "${OSS_BUCKET:-se-lab}"
@@ -61,7 +62,7 @@ services:
     build: ./backend
     command: ["python", "-m", "app.worker"]
     environment:
-      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -71,7 +72,7 @@ services:
     build: ./backend
     command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
     environment:
-      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
     depends_on:
       sqlserver-init:
         condition: service_completed_successfully
@@ -107,8 +108,9 @@ services:
       - -c
       - >-
         /opt/mssql-tools18/bin/sqlcmd -S test-sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -b
-        -Q "IF DB_ID(N'coursework_test') IS NULL CREATE DATABASE coursework_test;
-        ALTER DATABASE coursework_test SET COMPATIBILITY_LEVEL = 120;"
+        -Q "IF DB_ID(N'coursework_test') IS NULL CREATE DATABASE coursework_test;" &&
+        /opt/mssql-tools18/bin/sqlcmd -S test-sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -b
+        -Q "ALTER DATABASE coursework_test SET COMPATIBILITY_LEVEL = 120;"
     depends_on:
       test-sqlserver:
         condition: service_healthy
@@ -119,7 +121,7 @@ services:
     build: ./backend
     command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
     environment:
-      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@test-sqlserver:1433/coursework_test?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@test-sqlserver:1433/coursework_test?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
     depends_on:
       test-sqlserver-init:
         condition: service_completed_successfully
@@ -129,7 +131,7 @@ services:
     profiles: ["test"]
     build: ./backend
     environment:
-      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@test-sqlserver:1433/coursework_test?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+      DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@test-sqlserver:1433/coursework_test?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
       CORS_ORIGINS: http://test-frontend
       OSS_ENDPOINT: "${OSS_ENDPOINT:-https://oss-cn-hangzhou.aliyuncs.com}"
       OSS_BUCKET: "${OSS_BUCKET:-se-lab}"

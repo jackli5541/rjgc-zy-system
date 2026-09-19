@@ -30,6 +30,8 @@ export function renderMarkdown(source) {
   const rendered = markdown.render(prepareTaskItems(source))
   const clean = DOMPurify.sanitize(rendered, {
     USE_PROFILES: { html: true },
+    ADD_DATA_URI_TAGS: ['img'],
+    ADD_ATTR: ['width', 'height'],
     FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form'],
     FORBID_ATTR: ['style'],
     ALLOW_DATA_ATTR: false

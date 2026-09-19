@@ -27,8 +27,10 @@ def publish_event(
     resource_type: str | None = None,
     resource_id: UUID | str | None = None,
     user_id: UUID | str | None = None,
+    user_ids: list[UUID | str] | None = None,
     roles: list[str] | None = None,
     source_client_id: str | None = None,
+    **context,
 ) -> None:
     payload = {
         "id": uuid4().hex,
@@ -38,9 +40,11 @@ def publish_event(
         "resource_id": str(resource_id) if resource_id else None,
         "scopes": sorted(set(scopes)),
         "user_id": str(user_id) if user_id else None,
+        "user_ids": [str(value) for value in user_ids or []],
         "roles": roles or [],
         "source_client_id": source_client_id,
         "occurred_at": datetime.now(UTC).isoformat(),
+        **context,
     }
     db.add(RealtimeEvent(payload=payload))
 
@@ -101,6 +105,9 @@ class RealtimeHub:
     def _matches(subscriber: Subscriber, payload: dict) -> bool:
         target_user = payload.get("user_id")
         if target_user and target_user != subscriber.user_id:
+            return False
+        target_users = payload.get("user_ids") or []
+        if target_users and subscriber.user_id not in target_users:
             return False
         class_id = payload.get("class_id")
         if class_id and class_id != subscriber.class_id:

@@ -10,13 +10,20 @@ import RichTextViewer from './RichTextViewer.vue'
 const props = defineProps({ assignmentId: String, writable: Boolean, criteriaFiles: { type: Array, default: () => [] } })
 const emit = defineEmits(['ready', 'preview-criteria'])
 const loading = ref(false)
+const documentLoading = ref(false)
 const workspace = ref(null)
 const activeId = ref('')
+const loadedId = ref('')
 const editorHtml = ref('')
 const criteriaPreview = ref(null)
 const state = ref('idle')
 let saveTimer
+let savePromise
+let saveRequested = false
 let applying = false
+let loadSequence = 0
+const documentCache = new Map()
+const lastSavedMarkdown = new Map()
 const active = computed(() => workspace.value?.documents.find(item => item.id === activeId.value))
 
 function inlineMarkdown(node) {
@@ -68,42 +75,101 @@ async function load(preferredId) {
   loading.value = true
   try {
     workspace.value = await api(`/assignments/${props.assignmentId}/workspace`, { method: 'POST', body: JSON.stringify({}) })
+    criteriaPreview.value = null
     activeId.value = workspace.value.documents.some(item => item.id === preferredId) ? preferredId : workspace.value.documents[0]?.id || ''
-    applyActive()
     emit('ready', workspace.value)
+    if (activeId.value) await loadDocument(activeId.value)
+    else clearEditor()
   } catch (error) { message.error(error.message) }
   finally { loading.value = false }
 }
 
-function applyActive() {
+function clearEditor() {
   applying = true
-  editorHtml.value = active.value ? renderMarkdown(active.value.markdown_content || '') : '<p></p>'
+  loadedId.value = ''
+  editorHtml.value = '<p></p>'
   queueMicrotask(() => { applying = false })
 }
 
-watch(activeId, applyActive)
+function applyMarkdown(id, markdownContent) {
+  applying = true
+  loadedId.value = id
+  editorHtml.value = renderMarkdown(markdownContent || '')
+  lastSavedMarkdown.set(id, markdownContent || '')
+  queueMicrotask(() => { applying = false })
+}
+
+async function loadDocument(id, force = false) {
+  const target = workspace.value?.documents.find(item => item.id === id)
+  if (!target) return
+  const cached = documentCache.get(id)
+  if (!force && cached?.revision === target.revision) {
+    applyMarkdown(id, cached.markdownContent)
+    state.value = 'saved'
+    return
+  }
+  const sequence = ++loadSequence
+  documentLoading.value = true
+  loadedId.value = ''
+  try {
+    const document = await api(`/assignments/${props.assignmentId}/workspace/documents/${id}`)
+    if (sequence !== loadSequence || activeId.value !== id) return
+    Object.assign(target, document)
+    documentCache.set(id, { revision: document.revision, markdownContent: document.markdown_content || '' })
+    applyMarkdown(id, document.markdown_content || '')
+    state.value = 'saved'
+  } catch (error) {
+    if (sequence === loadSequence) message.error(error.message)
+  } finally {
+    if (sequence === loadSequence) documentLoading.value = false
+  }
+}
+
 watch(editorHtml, () => {
-  if (applying || !props.writable || !active.value) return
+  if (applying || loadedId.value !== activeId.value || !props.writable || !active.value) return
   state.value = 'dirty'
   clearTimeout(saveTimer)
   saveTimer = setTimeout(save, 900)
 })
 
 async function save() {
+  clearTimeout(saveTimer)
   if (active.value?.locked) return true
-  if (state.value !== 'dirty' || !active.value) return true
-  const target = active.value
-  state.value = 'saving'
-  try {
-    const saved = await api(`/assignments/${props.assignmentId}/workspace/documents/${target.id}`, { method: 'PUT', body: JSON.stringify({ revision: target.revision, content_html: editorHtml.value, markdown_content: htmlToMarkdown(editorHtml.value) }) })
-    Object.assign(target, saved)
-    state.value = 'saved'
-    return true
-  } catch (error) {
-    state.value = error.code === 'DOCUMENT_VERSION_CONFLICT' ? 'conflict' : 'error'
-    message.error(error.message)
-    return false
+  if (!active.value) return true
+  if (savePromise) {
+    saveRequested = true
+    return savePromise
   }
+  if (state.value !== 'dirty') return state.value !== 'conflict' && state.value !== 'error'
+  savePromise = (async () => {
+    try {
+      do {
+        saveRequested = false
+        const target = active.value
+        if (!target) return true
+        const markdownContent = htmlToMarkdown(editorHtml.value)
+        if (markdownContent === lastSavedMarkdown.get(target.id)) {
+          state.value = 'saved'
+          continue
+        }
+        state.value = 'saving'
+        const saved = await api(`/assignments/${props.assignmentId}/workspace/documents/${target.id}`, { method: 'PUT', body: JSON.stringify({ revision: target.revision, markdown_content: markdownContent }) })
+        Object.assign(target, saved)
+        documentCache.set(target.id, { revision: saved.revision, markdownContent })
+        lastSavedMarkdown.set(target.id, markdownContent)
+        if (target.id === activeId.value && htmlToMarkdown(editorHtml.value) !== markdownContent) saveRequested = true
+        state.value = saveRequested ? 'dirty' : 'saved'
+      } while (saveRequested)
+      return true
+    } catch (error) {
+      state.value = error.code === 'DOCUMENT_VERSION_CONFLICT' ? 'conflict' : 'error'
+      message.error(error.message)
+      return false
+    } finally {
+      savePromise = undefined
+    }
+  })()
+  return savePromise
 }
 
 async function selectDocument(id) {
@@ -111,10 +177,14 @@ async function selectDocument(id) {
   if (!await save()) return
   criteriaPreview.value = null
   activeId.value = id
+  await loadDocument(id)
 }
 
 async function selectCriteria(file) {
   if (!await save()) return
+  loadSequence += 1
+  documentLoading.value = false
+  loadedId.value = ''
   activeId.value = ''
   criteriaPreview.value = { file, loading: true, type: '', html: '', src: '' }
   const name = file.name || file.original_name || ''
@@ -135,11 +205,18 @@ async function selectCriteria(file) {
 function beforeUnload(event) { if (state.value === 'dirty' || state.value === 'saving') event.preventDefault() }
 function externalChange(event) {
   if (event.detail?.assignmentId !== props.assignmentId) return
-  if (state.value === 'dirty' || state.value === 'saving') { state.value = 'conflict'; message.warning('同组成员更新了文档，请先处理当前未保存内容') }
-  else load(activeId.value)
+  if (event.detail?.workspaceId && event.detail.workspaceId !== workspace.value?.id) return
+  const payload = event.detail?.payload || {}
+  const changedId = payload.resource_id
+  const target = workspace.value?.documents.find(item => item.id === changedId)
+  if (target && payload.revision) target.revision = payload.revision
+  if (changedId) documentCache.delete(changedId)
+  if (changedId !== activeId.value) return
+  if (state.value === 'dirty' || state.value === 'saving') { state.value = 'conflict'; message.warning('同组成员更新了当前文档，请先处理未保存内容') }
+  else loadDocument(activeId.value, true)
 }
 onMounted(() => { load(); window.addEventListener('beforeunload', beforeUnload); window.addEventListener('workspace-changed', externalChange) })
-onBeforeUnmount(() => { clearTimeout(saveTimer); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('workspace-changed', externalChange) })
+onBeforeUnmount(() => { loadSequence += 1; clearTimeout(saveTimer); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('workspace-changed', externalChange) })
 defineExpose({ save, reload: () => load(activeId.value) })
 </script>
 
@@ -155,7 +232,7 @@ defineExpose({ save, reload: () => load(activeId.value) })
     </aside>
     <main class="document-surface">
       <header class="document-status"><div class="document-title"><strong>{{criteriaPreview?.file.name||active?.name}}</strong><span v-if="criteriaPreview">判定标准 · 只读</span><span v-else-if="active?.updated_by">最近由 {{active.updated_by}} 编辑</span></div><div v-if="!criteriaPreview" class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'即将保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span><a-tooltip title="重新载入"><a-button type="text" shape="circle" @click="load(activeId)"><ReloadOutlined/></a-button></a-tooltip></div><span v-else class="readonly-indicator"><EyeOutlined/> 只读查看</span></header>
-      <div class="writing-stage" :class="{'criteria-stage':criteriaPreview}"><a-skeleton v-if="criteriaPreview?.loading" active/><RichTextViewer v-else-if="criteriaPreview?.type==='rich'" :html="criteriaPreview.html"/><a-empty v-else-if="criteriaPreview" description="判定标准仅支持 Markdown 文档"/><RichTextEditor v-else-if="active" v-model="editorHtml" document placeholder="开始编写作业..."/><a-skeleton v-else-if="loading" active/><a-empty v-else description="该作业没有可编辑的 Markdown 附件"/></div>
+      <div class="writing-stage" :class="{'criteria-stage':criteriaPreview}"><a-skeleton v-if="criteriaPreview?.loading||documentLoading||loading" active/><RichTextViewer v-else-if="criteriaPreview?.type==='rich'" :html="criteriaPreview.html"/><a-empty v-else-if="criteriaPreview" description="判定标准仅支持 Markdown 文档"/><RichTextEditor v-else-if="active&&loadedId===active.id" v-model="editorHtml" document placeholder="开始编写作业..."/><a-empty v-else description="该作业没有可编辑的 Markdown 附件"/></div>
     </main>
   </div>
 </template>
