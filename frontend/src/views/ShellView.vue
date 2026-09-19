@@ -12,6 +12,7 @@ import OnlineMarkdownWorkspace from '../components/OnlineMarkdownWorkspace.vue'
 import ShellHeader from '../components/ShellHeader.vue'
 import StudentPortfolioDrawer from '../components/StudentPortfolioDrawer.vue'
 import AssignmentsPage from './shell/AssignmentsPage.vue'
+import ClassDetailPage from './shell/ClassDetailPage.vue'
 import ClassesPage from './shell/ClassesPage.vue'
 import GradesPage from './shell/GradesPage.vue'
 import OverviewPage from './shell/OverviewPage.vue'
@@ -112,14 +113,14 @@ const descriptionEditor = useEditor({
 
 const role = computed(() => session.user?.role)
 const classId = computed(() => session.classId)
-const view = computed(() => route.name === 'assignment-detail' ? 'assignment-detail' : route.name === 'review-detail' ? 'review-detail' : route.name === 'grade-detail' ? 'grade-detail' : route.params.view || 'overview')
+const view = computed(() => route.name === 'assignment-detail' ? 'assignment-detail' : route.name === 'review-detail' ? 'review-detail' : route.name === 'grade-detail' ? 'grade-detail' : route.name === 'class-detail' ? 'class-detail' : route.params.view || 'overview')
 const detailId = computed(() => route.params.id)
 const pageKey = computed(() => `${role.value || 'guest'}:${classId.value || 'none'}:${view.value}:${detailId.value || ''}`)
 const surfaceKey = computed(() => role.value === 'TEACHER' && view.value === 'assignment-detail'
   ? `${role.value}:${classId.value || 'none'}:assignments:`
   : pageKey.value)
 const initialLoading = computed(() => loading.value && !loadedViewKeys.has(pageKey.value))
-const navView = computed(() => view.value === 'assignment-detail' ? 'assignments' : view.value === 'review-detail' ? 'reviews' : view.value === 'grade-detail' ? 'grades' : view.value)
+const navView = computed(() => view.value === 'assignment-detail' ? 'assignments' : view.value === 'review-detail' ? 'reviews' : view.value === 'grade-detail' ? 'grades' : view.value === 'class-detail' ? 'classes' : view.value)
 const activeClasses = computed(() => session.classes.filter(item => item.status === 'ACTIVE'))
 const classOptions = computed(() => activeClasses.value.map(item => ({ value: item.id, label: `${item.semester} · ${item.name}` })))
 const auditSemesterOptions = computed(() => [...new Set(session.classes.map(item => item.semester))].sort().map(value => ({ value, label: value })))
@@ -315,7 +316,10 @@ async function loadView({ silent = false, background = false } = {}) {
         assignments.value = assignmentData.items; campaigns.value = campaignData.items; grades.value = gradeData.items; teams.value = teamData.items
       }
     }
-    if (view.value === 'classes') {
+    if (view.value === 'class-detail') {
+      if (classId.value !== detailId.value) await session.refreshClasses(detailId.value)
+      if (!isCurrent()) return
+      if (classId.value !== detailId.value) { message.error('教学班不存在或无权查看'); await router.replace('/classes'); return }
       const memberData = await api(`/classes/${classId.value}/members`)
       if (!isCurrent()) return
       members.value = memberData.items
@@ -421,7 +425,8 @@ async function changeClass(id) {
   else await router.replace(target)
   await loadNotifications()
 }
-async function manageClass(item) { await session.refreshClasses(item.id); await router.replace('/classes'); await loadView() }
+async function manageClass(item) { await session.refreshClasses(item.id); await router.push({ name: 'class-detail', params: { id: item.id } }) }
+async function closeClassDetail() { await router.replace('/classes') }
 function openClassCreate() {
   Object.assign(classForm, { id: '', version: 1, semester: '', name: '', team_deadline: '', topic_public: false }); modals.class = true
 }
@@ -994,7 +999,8 @@ function currentViewUses(scopes) {
   if (scopes.includes('current_view')) return true
   const needed = {
     overview: ['dashboard', 'assignments', 'submissions', 'reviews', 'grades', 'teams'],
-    classes: ['classes', 'members'],
+    classes: ['classes'],
+    'class-detail': ['classes', 'members'],
     teams: ['teams', 'members'],
     assignments: ['assignments', 'submissions'],
     'assignment-detail': ['assignments', 'submissions', 'reviews', 'grades', 'teams'],
@@ -1094,7 +1100,7 @@ provide(shellContextKey, {
   latestOverviewAssignment, assignmentHistory, assignmentChartLine, assignmentChartPoints, currentTeam, needsTopicSubmission,
   studentPendingAssignments, studentUpcomingAssignments, studentPendingReviews, studentLatestGrade,
   changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, roleLabel, gradeSourceLabel, searchAudits, changeAuditSemester, changeAuditPage, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
-  manageClass, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
+  manageClass, closeClassDetail, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
   applyTeam, openTeam, closeTeamDrawer, inviteTarget, inviteMember, closeTeamRecruitment, openTeamRecruitment, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
   openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading
 })
@@ -1111,6 +1117,8 @@ provide(shellContextKey, {
       <OverviewPage v-if="view==='overview'" />
 
       <ClassesPage v-else-if="view==='classes'&&role==='TEACHER'" />
+
+      <ClassDetailPage v-else-if="view==='class-detail'&&role==='TEACHER'" />
 
       <TeamsPage v-else-if="view==='teams'" />
 
