@@ -1656,8 +1656,9 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
         snapshot = {"members": [{"id": str(person.id), "student_no": person.login_name, "name": person.display_name, "role": member.role} for member, person in rows]}
     submitted_at = now()
     s.current_version_no = (current.version_no + 1) if current else 1
-    teacher_graded_before_resubmit = bool(current and db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == current.id, SubmissionAssessment.kind == "TEACHER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
-    v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key, grade_cap="B" if teacher_graded_before_resubmit else None)
+    current_grade_result = submission_grade_result(db, current) if current else None
+    resubmission_grade_cap = "B" if current_grade_result and current_grade_result.get("final_grade") in {"C", "D", "E"} else None
+    v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key, grade_cap=resubmission_grade_cap)
     db.add(v); db.flush()
     old_versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.id != v.id)).all()
     for old in old_versions:
@@ -1831,6 +1832,7 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
         candidates.append({
             "user_id": str(person.id), "name": person.display_name, "student_no": person.login_name,
             "submitted_at": version.submitted_at, "submission_version_id": str(version.id),
+            "grade_cap": version.grade_cap,
             "files": [file_json(file) for file in files], "review": assessment_json(db, review) if review else None,
         })
     return {
@@ -1903,6 +1905,7 @@ def delete_teacher_submission_assessment(aid: UUID, student_id: UUID, user: Csrf
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     if item:
         item_id = str(item.id); db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id)); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
+        version.grade_cap = None
     result = submission_grade_result(db, version); db.commit()
     return result
 
@@ -2096,6 +2099,7 @@ def delete_submission_feedback(version_id: UUID, user: CsrfUser, db: Db):
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     if item:
         item_id = str(item.id); db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id)); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
+        version.grade_cap = None
     result = submission_grade_result(db, version); db.commit()
     return result
 
@@ -2709,9 +2713,14 @@ def leave_team(tid: UUID, user: CsrfUser, db: Db):
 
 @app.delete("/api/v1/teams/{tid}", status_code=204)
 def disband_team(tid: UUID, user: CsrfUser, db: Db):
-    team = db.get(Team, tid)
-    if not team or team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "仅组长可解散小组")
-    course = require_writable_class(db, user, team.class_id); require_team_window(course, user)
+    team = db.scalar(select(Team).where(Team.id == tid, Team.status == "ACTIVE").with_for_update())
+    if not team: raise ApiError(404, "TEAM_NOT_FOUND", "小组不存在")
+    if user.role == "TEACHER":
+        require_writable_class(db, user, team.class_id)
+    elif team.leader_id == user.id:
+        course = require_writable_class(db, user, team.class_id); require_team_window(course, user)
+    else:
+        raise ApiError(403, "TEAM_LEADER_REQUIRED", "仅组长或任课教师可解散小组")
     team.status = "DISBANDED"; db.execute(TeamMember.__table__.update().where(TeamMember.team_id == tid, TeamMember.status == "ACTIVE").values(status="LEFT")); db.execute(TeamRequest.__table__.update().where(TeamRequest.team_id == tid, TeamRequest.status == "PENDING").values(status="INVALID", resolved_at=now())); audit(db, user, "TEAM_DISBANDED", "team", str(tid)); db.commit(); return Response(status_code=204)
 
 

@@ -72,7 +72,7 @@ const activePeerAnnotations = computed(() => visiblePeerFeedbacks.value.flatMap(
   .map(item => ({ ...item, color: 'PURPLE', readonly: true, evaluator_name: peer.evaluator_name, peer_grade: peer.grade }))))
 const previewAnnotations = computed(() => [...activeAnnotations.value, ...activePeerAnnotations.value])
 const selectedAnnotation = computed(() => previewAnnotations.value.find(item => item.id === selectedAnnotationId.value) || null)
-const hasFeedbackPanel = computed(() => Boolean(props.submissionVersionId) && (props.editable || feedback.status))
+const hasFeedbackPanel = computed(() => Boolean(props.submissionVersionId) && (props.editable || feedback.status || visiblePeerFeedbacks.value.length))
 const hasTargetNavigation = computed(() => props.mode === 'TEACHER' && props.targets.length > 1)
 const colors = [
   { value: 'YELLOW', label: '黄色' }, { value: 'GREEN', label: '绿色' },
@@ -374,6 +374,12 @@ watch(() => props.open, value => {
   if (!value) { stopSpeechInput(); dismissTransient(); commentComposer.open = false; return }
   teacherAnnotationsExpanded.value = false
   peerAnnotationsExpanded.value = false
+  // Students should see both sources of feedback without needing to discover
+  // a collapsed section in the read-only results view.
+  if (!props.editable && props.mode === 'TEACHER') {
+    teacherAnnotationsExpanded.value = true
+    peerAnnotationsExpanded.value = true
+  }
   contentZoom.value = 1
   index.value = Math.min(props.initialIndex, Math.max(0, props.files.length - 1))
   loadFeedback(); loadFile()
@@ -468,7 +474,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
             </div>
           </article>
         </section>
-        <section v-if="mode==='TEACHER'&&peerFeedbackEnabled" class="peer-feedback-section">
+        <section v-if="mode==='TEACHER'&&visiblePeerFeedbacks.length" class="peer-feedback-section">
           <button type="button" class="peer-feedback-heading collapsible-section-heading" :aria-expanded="peerAnnotationsExpanded" @click="peerAnnotationsExpanded=!peerAnnotationsExpanded"><div><CaretRightOutlined :class="{expanded:peerAnnotationsExpanded}"/><strong>学生互评</strong><span v-if="peerGrade">综合等级 {{peerGrade}}</span></div><a-tag color="purple">{{visiblePeerFeedbacks.length}} 人</a-tag></button>
           <a-empty v-if="peerAnnotationsExpanded&&!visiblePeerFeedbacks.length" image="simple" description="暂无学生互评"/>
           <article v-for="peer in peerAnnotationsExpanded?visiblePeerFeedbacks:[]" :key="peer.id" class="peer-feedback-card">
@@ -483,7 +489,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         </section>
         <div v-if="!editable&&feedback.comment" class="published-overall"><strong>{{mode==='PEER'?'互评总评':'教师总评'}}</strong><div v-html="feedback.comment"></div></div>
         <div v-if="editable" class="feedback-actions">
-          <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in (mode === 'TEACHER' && gradeCap === 'B' ? ['B','C','D','E'] : ['A','B','C','D','E'])" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
+          <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in (mode === 'PEER' && gradeCap === 'B' ? ['B','C','D','E'] : ['A','B','C','D','E'])" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
           <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'&&feedback.status" danger @click="emit('clear-feedback')">清除反馈</a-button><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button></div>
         </div>
       </aside>

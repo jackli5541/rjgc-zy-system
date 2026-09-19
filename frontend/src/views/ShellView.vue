@@ -301,6 +301,7 @@ function roleLabel(value) { return roleLabels[value] || value || '-' }
 function objectLabel(value) { return objectLabels[value] || (value ? '其他业务对象' : '-') }
 function actionLabel(value) { return value === 'TEAM_RECRUITMENT_CLOSED' ? '截止小组招募' : value === 'TEAM_RECRUITMENT_OPENED' ? '继续小组招募' : actionLabels[value] || (value ? '其他系统操作' : '-') }
 function gradeSourceLabel(value) { return value === 'TEACHER' ? '教师评分' : value === 'PEER' ? '学生互评' : value === 'SYSTEM' ? '系统判定' : '-' }
+function gradeTagColor(grade) { return grade === 'A' ? 'green' : grade === 'B' ? 'gold' : 'red' }
 async function action(fn, success) {
   const originPath = route.fullPath
   const preserveTeacherDrawer = role.value === 'TEACHER' && view.value === 'assignment-detail'
@@ -573,7 +574,25 @@ async function openTeamRecruitment(item) {
   }, '已继续招募')
 }
 async function transferLeader(uid) { await action(async () => { await api(`/teams/${selectedTeam.value.id}/transfer`, { method: 'POST', body: JSON.stringify({ new_leader_id: uid }) }); selectedTeam.value = null }, '组长已移交') }
-function disbandTeam() { Modal.confirm({ title: '确认解散小组？', content: '组员将重新进入组队流程。', okText: '确认解散', okType: 'danger', onOk: () => action(async () => { await api(`/teams/${selectedTeam.value.id}`, { method: 'DELETE' }); selectedTeam.value = null; await session.refreshContext(); await router.replace('/teams') }, '小组已解散') }) }
+function disbandTeam(item = selectedTeam.value) {
+  if (!item) return
+  const teamId = item.id
+  const forcedByTeacher = role.value === 'TEACHER'
+  Modal.confirm({
+    title: forcedByTeacher ? `强制解散「${item.name}」？` : '确认解散小组？',
+    content: forcedByTeacher ? '所有组员将变为未进入小组状态，已有作业与成绩记录仍会保留。' : '组员将重新进入组队流程。',
+    okText: forcedByTeacher ? '强制解散' : '确认解散',
+    okType: 'danger',
+    onOk: () => action(async () => {
+      await api(`/teams/${teamId}`, { method: 'DELETE' })
+      if (selectedTeam.value?.id === teamId) closeTeamDrawer()
+      if (!forcedByTeacher) {
+        await session.refreshContext()
+        await router.replace('/teams')
+      }
+    }, '小组已解散')
+  })
+}
 function defaultClassSelection() {
   if (activeClasses.value.some(item => item.id === classId.value)) return [classId.value]
   return activeClasses.value[0] ? [activeClasses.value[0].id] : []
@@ -895,7 +914,7 @@ async function clearTeacherGrade() {
       ? `/submission-versions/${selectedSubmission.value.submission_version_id}/feedback`
       : `/assignments/${selectedAssignment.value.id}/submissions/${selectedSubmission.value.user_id}/grade`
     const result = await api(path, { method: 'DELETE' })
-    Object.assign(selectedSubmission.value, result)
+    Object.assign(selectedSubmission.value, result, { grade_cap: '' })
     await refreshSubmissionBoard()
     closeFilePreview()
     message.success(result.final_grade ? '已恢复由互评成绩决定' : '教师评分已清除，当前暂无互评成绩')
@@ -1139,7 +1158,7 @@ provide(shellContextKey, {
   studentPendingAssignments, studentUpcomingAssignments, studentPendingReviews, studentLatestGrade,
   changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, roleLabel, gradeSourceLabel, searchAudits, changeAuditSemester, changeAuditPage, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
   manageClass, closeClassDetail, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
-  applyTeam, openTeam, closeTeamDrawer, inviteTarget, inviteMember, closeTeamRecruitment, openTeamRecruitment, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
+  applyTeam, openTeam, closeTeamDrawer, inviteTarget, inviteMember, closeTeamRecruitment, openTeamRecruitment, disbandTeam, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
   openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading
 })
 </script>
@@ -1211,7 +1230,7 @@ provide(shellContextKey, {
                   <div class="assignment-pane-heading"><h2>提交明细</h2></div>
                   <div class="board-toolbar"><a-input-search v-model:value="boardQuery" allow-clear placeholder="搜索姓名或学号"/><a-select v-model:value="boardTeamFilter" :options="boardTeamOptions"/><a-segmented v-model:value="boardFilter" :options="[{label:'全部',value:'ALL'},{label:'未提交',value:'NOT_SUBMITTED'},{label:'已提交',value:'SUBMITTED'},{label:'迟交',value:'LATE'},{label:'未批改',value:'PENDING_REVIEW'},{label:'已批改',value:'REVIEWED'}]"/></div>
                   <a-empty v-if="!groupedBoard.length" class="detail-empty" description="没有符合条件的提交记录"/>
-                  <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="最终成绩"><template #default="{record}"><a-tag v-if="record.final_grade" :color="record.grade_source==='TEACHER'?'green':record.grade_source==='SYSTEM'?'red':'blue'">{{record.final_grade}} · {{gradeSourceLabel(record.grade_source)}}</a-tag><a-tag v-else color="gold">{{statusLabel(record.grading_status)}}</a-tag></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
+                  <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column title="最终成绩"><template #default="{record}"><a-tag v-if="record.final_grade" :color="gradeTagColor(record.final_grade)">{{record.final_grade}} · {{gradeSourceLabel(record.grade_source)}}</a-tag><a-tag v-else :color="record.grading_status==='NO_SUBMISSION'?'default':'gold'">{{statusLabel(record.grading_status)}}</a-tag></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
                 </section>
               </template>
               <template v-else>

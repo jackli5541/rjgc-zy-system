@@ -15,7 +15,7 @@ from sqlalchemy import event, select
 from app.database import SessionLocal, engine
 from app.main import app, parse_roster
 from app.grading import final_score
-from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionVersion, Team, TeamRequest
+from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionVersion, Team, TeamMember, TeamRequest
 from app.worker import process_auto_review, process_due_campaign
 
 
@@ -167,6 +167,34 @@ def test_team_leader_can_close_recruitment():
     teacher.patch(f"/api/v1/classes/{course['id']}", headers=headers, json={"status": "ARCHIVED", "version": deadline.json()["version"]})
     assert leader.post(url, headers=leader_headers).status_code == 409
     assert leader.post(open_url, headers=leader_headers).status_code == 409
+
+
+def test_teacher_can_force_disband_team():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    teacher_id = teacher.get("/api/v1/auth/session").json()["user"]["id"]
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "解散测试", "name": "强制解散教学班"}).json()
+    leader_record = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20996660", "name": "解散组长"}).json()
+    member_record = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20996661", "name": "解散组员"}).json()
+    leader, leader_headers = login(leader_record["student_no"], leader_record["student_no"], "student")
+    member, member_headers = login(member_record["student_no"], member_record["student_no"], "student")
+    team = leader.post("/api/v1/teams", headers=leader_headers, json={"class_id": course["id"], "name": "待解散小组"}).json()
+    application = member.post(f"/api/v1/teams/{team['id']}/applications", headers=member_headers).json()
+    assert leader.post(f"/api/v1/team-requests/{application['id']}/decision?decision=APPROVED", headers=leader_headers).status_code == 200
+
+    assert member.delete(f"/api/v1/teams/{team['id']}", headers=member_headers).status_code == 403
+    deadline = teacher.patch(f"/api/v1/classes/{course['id']}", headers=teacher_headers, json={"team_deadline": "2020-01-01T00:00:00+08:00", "version": course["version"]})
+    assert deadline.status_code == 200, deadline.text
+    disbanded = teacher.delete(f"/api/v1/teams/{team['id']}", headers=teacher_headers)
+    assert disbanded.status_code == 204, disbanded.text
+    assert teacher.get(f"/api/v1/teams?class_id={course['id']}").json()["items"] == []
+
+    with SessionLocal() as db:
+        stored_team = db.get(Team, UUID(team["id"]))
+        memberships = db.scalars(select(TeamMember).where(TeamMember.team_id == stored_team.id)).all()
+        audit_log = db.scalar(select(AuditLog).where(AuditLog.action == "TEAM_DISBANDED", AuditLog.object_id == team["id"]))
+        assert stored_team.status == "DISBANDED"
+        assert {item.status for item in memberships} == {"LEFT"}
+        assert audit_log is not None and audit_log.actor_id == UUID(teacher_id)
 
 
 def test_password_changes_revoke_existing_sessions():
