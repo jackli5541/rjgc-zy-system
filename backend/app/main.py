@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session, aliased, load_only
 
 from app.database import SessionLocal, get_db
 from app.grading import final_score, finalize_campaign
-from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionVersion, SubmissionWorkspace, TeachingClass, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionVersion, SubmissionWorkspace, TeachingClass, TeachingMaterial, TeachingMaterialFolder, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 from app import storage
@@ -316,6 +316,10 @@ class LoginIn(BaseModel):
     account: str; password: str; role: Literal["teacher", "student"] | None = None
 class ClassIn(BaseModel):
     semester: str = Field(min_length=2, max_length=40); name: str = Field(min_length=2, max_length=100); team_deadline: datetime | None = None; topic_public: bool = False; invite_requires_approval: bool = True
+class TeachingMaterialFolderIn(BaseModel):
+    class_id: UUID
+    parent_id: UUID | None = None
+    name: str = Field(min_length=1, max_length=120)
 class TeamIn(BaseModel):
     class_id: UUID; name: str = Field(min_length=2, max_length=40); open_recruitment: bool = True
 class AutoGroupIn(BaseModel):
@@ -958,6 +962,93 @@ def topic(tid: UUID, data: TopicIn, user: CsrfUser, db: Db):
 def assignment_json(x: Assignment): return {"id": str(x.id), "class_id": str(x.class_id), "title": x.title, "description": render_description(x.description), "submitter_type": x.submitter_type, "starts_at": x.starts_at, "due_at": x.due_at, "allow_late": x.allow_late, "auto_review_enabled": x.auto_review_enabled, "auto_review_mode": x.auto_review_mode, "auto_review_criteria_text": x.auto_review_criteria_text or "", "auto_review_due_at": x.auto_review_due_at, "auto_review_status": x.auto_review_status, "auto_review_error": x.auto_review_error, "status": x.status, "version": x.version}
 
 
+def assignment_progress_json(db: Session, assignment: Assignment) -> dict:
+    """Return the teacher-facing workflow counters shown on the assignment list."""
+    if assignment.submitter_type == "INDIVIDUAL":
+        owner_ids = set(db.scalars(select(ClassMember.user_id).where(
+            ClassMember.class_id == assignment.class_id,
+            ClassMember.status == "ACTIVE",
+            ClassMember.role == "STUDENT",
+        )).all())
+    else:
+        owner_ids = set(db.scalars(select(Team.id).where(
+            Team.class_id == assignment.class_id,
+            Team.status == "ACTIVE",
+        )).all())
+
+    expected_count = len(owner_ids)
+    submissions = [item for item in db.scalars(select(Submission).where(
+        Submission.assignment_id == assignment.id,
+    )).all() if (item.owner_user_id or item.owner_team_id) in owner_ids]
+    submitted = [item for item in submissions if item.status == "SUBMITTED" and item.current_version_no]
+    submitted_count = len(submitted)
+
+    latest_versions = []
+    if submitted:
+        version_rows = db.scalars(select(SubmissionVersion).where(
+            SubmissionVersion.submission_id.in_([item.id for item in submitted]),
+        )).all()
+        latest_by_submission = {}
+        for version in version_rows:
+            current = latest_by_submission.get(version.submission_id)
+            if current is None or version.version_no > current.version_no:
+                latest_by_submission[version.submission_id] = version
+        latest_versions = list(latest_by_submission.values())
+
+    teacher_graded_count = 0
+    peer_review_version_ids = set()
+    if latest_versions:
+        assessments = db.scalars(select(SubmissionAssessment).where(
+            SubmissionAssessment.submission_version_id.in_([item.id for item in latest_versions]),
+            SubmissionAssessment.status == "PUBLISHED",
+        )).all()
+        teacher_version_ids = {item.submission_version_id for item in assessments if item.kind == "TEACHER"}
+        peer_review_version_ids = {item.submission_version_id for item in assessments if item.kind == "PEER"}
+        teacher_graded_count = sum(item.id in teacher_version_ids for item in latest_versions)
+
+    campaign = assignment_review_campaign(db, assignment.id)
+    direct_peer_review_count = len(peer_review_version_ids)
+    review_enabled = assignment.submitter_type == "INDIVIDUAL" or campaign is not None
+    review_assigned_count = 0
+    review_completed_count = direct_peer_review_count
+    if campaign:
+        allocations = db.scalars(select(ReviewAssignment).where(ReviewAssignment.campaign_id == campaign.id)).all()
+        active_allocations = [item for item in allocations if item.status != "SKIPPED"]
+        review_assigned_count = len(active_allocations)
+        review_completed_count = sum(item.status == "COMPLETED" for item in active_allocations)
+        if not review_completed_count:
+            review_completed_count = db.scalar(select(func.count(PeerReview.id)).where(
+                PeerReview.campaign_id == campaign.id,
+                PeerReview.status == "VALID",
+            )) or 0
+    elif review_enabled:
+        # Direct student peer reviews have no campaign/allocation rows. In that
+        # mode each submitted work is one review target, so the denominator is
+        # the current submitted count.
+        review_assigned_count = submitted_count
+
+    if expected_count == 0:
+        completion_status = "NO_ROSTER"
+    elif submitted_count < expected_count:
+        completion_status = "PENDING_SUBMISSION"
+    elif review_enabled and review_assigned_count and review_completed_count < review_assigned_count:
+        completion_status = "PENDING_REVIEW"
+    elif teacher_graded_count < submitted_count:
+        completion_status = "PENDING_TEACHER_GRADING"
+    else:
+        completion_status = "COMPLETED"
+
+    return {
+        "expected_count": expected_count,
+        "submitted_count": submitted_count,
+        "teacher_graded_count": teacher_graded_count,
+        "review_enabled": review_enabled,
+        "review_assigned_count": review_assigned_count,
+        "review_completed_count": review_completed_count,
+        "completion_status": completion_status,
+    }
+
+
 def assignment_review_campaign(db: Session, assignment_id: UUID) -> ReviewCampaign | None:
     return db.scalar(select(ReviewCampaign).where(ReviewCampaign.assignment_id == assignment_id))
 
@@ -1035,6 +1126,8 @@ def assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
         if user.role == "STUDENT":
             submission = submissions_by_assignment.get(item.id)
             payload["submission_status"] = submission.status if submission else "NOT_SUBMITTED"
+        else:
+            payload["progress"] = assignment_progress_json(db, item)
         result.append(payload)
     return {"items": result, "total": len(result)}
 
@@ -1427,6 +1520,138 @@ def delete_workspace_document(aid: UUID, document_id: UUID, user: CsrfUser, db: 
     db.delete(document); db.commit(); return Response(status_code=204)
 
 
+TEACHING_MATERIAL_SUFFIXES = {".md", ".html", ".htm", ".mp4"}
+TEACHING_MATERIAL_MIME_TYPES = {
+    ".md": {"text/markdown", "text/plain", "application/octet-stream"},
+    ".html": {"text/html", "text/plain", "application/octet-stream"},
+    ".htm": {"text/html", "text/plain", "application/octet-stream"},
+    ".mp4": {"video/mp4", "application/octet-stream"},
+}
+
+
+def teaching_material_folder_json(folder: TeachingMaterialFolder) -> dict:
+    return {"id": str(folder.id), "parent_id": str(folder.parent_id) if folder.parent_id else None, "name": folder.name, "type": "folder"}
+
+
+def teaching_material_json(material: TeachingMaterial) -> dict:
+    return {
+        "id": str(material.id), "folder_id": str(material.folder_id) if material.folder_id else None,
+        "name": material.original_name, "type": "file", "media_type": material.media_type,
+        "size": material.size_bytes, "mime": material.detected_mime,
+        "content_url": f"/api/v1/teaching-materials/files/{material.id}/content",
+        "created_at": material.created_at,
+    }
+
+
+def require_material_folder(db: Session, user: User, folder_id: UUID, class_id: UUID | None = None) -> TeachingMaterialFolder:
+    folder = db.get(TeachingMaterialFolder, folder_id)
+    if not folder or (class_id and folder.class_id != class_id):
+        raise ApiError(404, "MATERIAL_FOLDER_NOT_FOUND", "鏂囦欢澶逛笉瀛樺湪")
+    require_class(db, user, folder.class_id)
+    return folder
+
+
+@app.get("/api/v1/teaching-materials")
+def teaching_materials(user: CurrentUser, db: Db, class_id: UUID = Query()):
+    require_class(db, user, class_id)
+    folders = db.scalars(select(TeachingMaterialFolder).where(TeachingMaterialFolder.class_id == class_id).order_by(TeachingMaterialFolder.name, TeachingMaterialFolder.created_at)).all()
+    files = db.scalars(select(TeachingMaterial).where(TeachingMaterial.class_id == class_id, TeachingMaterial.active == True).order_by(TeachingMaterial.original_name, TeachingMaterial.created_at)).all()  # noqa: E712
+    return {"class_id": str(class_id), "can_manage": user.role == "TEACHER", "folders": [teaching_material_folder_json(item) for item in folders], "files": [teaching_material_json(item) for item in files]}
+
+
+@app.post("/api/v1/teaching-materials/folders", status_code=201)
+def create_teaching_material_folder(data: TeachingMaterialFolderIn, user: CsrfUser, db: Db):
+    teacher(user)
+    require_writable_class(db, user, data.class_id)
+    if data.parent_id:
+        parent = require_material_folder(db, user, data.parent_id, data.class_id)
+        if parent.class_id != data.class_id:
+            raise ApiError(404, "MATERIAL_FOLDER_NOT_FOUND", "鐖剁骇鏂囦欢澶逛笉瀛樺湪")
+    name = data.name.strip()
+    if not name:
+        raise ApiError(422, "MATERIAL_FOLDER_NAME_INVALID", "鏂囦欢澶瑰悕涓嶈兘涓虹┖")
+    duplicate = db.scalar(select(TeachingMaterialFolder).where(TeachingMaterialFolder.class_id == data.class_id, TeachingMaterialFolder.parent_id == data.parent_id, TeachingMaterialFolder.name == name))
+    if duplicate:
+        raise ApiError(409, "MATERIAL_FOLDER_EXISTS", "鍚屼竴鐩綍涓嬪凡瀛樺湪鍚屽悕鏂囦欢澶�")
+    folder = TeachingMaterialFolder(class_id=data.class_id, parent_id=data.parent_id, owner_id=user.id, name=name)
+    db.add(folder); db.commit(); db.refresh(folder)
+    return teaching_material_folder_json(folder)
+
+
+@app.delete("/api/v1/teaching-materials/folders/{folder_id}", status_code=204)
+def delete_teaching_material_folder(folder_id: UUID, user: CsrfUser, db: Db):
+    teacher(user)
+    folder = require_material_folder(db, user, folder_id)
+    require_writable_class(db, user, folder.class_id)
+    has_child_folder = db.scalar(select(TeachingMaterialFolder.id).where(TeachingMaterialFolder.parent_id == folder.id).limit(1))
+    has_file = db.scalar(select(TeachingMaterial.id).where(TeachingMaterial.folder_id == folder.id, TeachingMaterial.active == True).limit(1))  # noqa: E712
+    if has_child_folder or has_file:
+        raise ApiError(409, "MATERIAL_FOLDER_NOT_EMPTY", "鏂囦欢澶归潪绌猴紝璇峰厛绉婚櫎鍐呭")
+    db.delete(folder); db.commit()
+    return Response(status_code=204)
+
+
+@app.post("/api/v1/teaching-materials/files", status_code=201)
+def upload_teaching_material(user: CsrfUser, db: Db, class_id: UUID = Query(), folder_id: UUID | None = Query(None), file: UploadFile = File(...)):
+    teacher(user)
+    require_writable_class(db, user, class_id)
+    if folder_id:
+        require_material_folder(db, user, folder_id, class_id)
+    original_name = Path(file.filename or "file").name
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in TEACHING_MATERIAL_SUFFIXES:
+        raise ApiError(422, "MATERIAL_FILE_TYPE_INVALID", "仅支持 Markdown、HTML 和 MP4 文件")
+    if file.content_type and file.content_type not in TEACHING_MATERIAL_MIME_TYPES[suffix]:
+        raise ApiError(422, "MATERIAL_FILE_MIME_INVALID", "文件 MIME 类型与扩展名不匹配")
+    duplicate = db.scalar(select(TeachingMaterial).where(TeachingMaterial.class_id == class_id, TeachingMaterial.folder_id == folder_id, TeachingMaterial.original_name == original_name, TeachingMaterial.active == True))  # noqa: E712
+    if duplicate:
+        raise ApiError(409, "MATERIAL_FILE_EXISTS", "同一目录下已存在同名文件")
+    material_id = uuid4()
+    relative = f"teaching-materials/{class_id}/{material_id.hex}{suffix}"
+    temporary = Path(tempfile.gettempdir()) / f"teaching-material-{material_id.hex}{suffix}"
+    size = 0
+    try:
+        with temporary.open("wb") as output:
+            while chunk := file.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.max_file_size_bytes:
+                    raise ApiError(422, "FILE_SIZE_INVALID", "文件不能超过 500 MB")
+                output.write(chunk)
+        if not size:
+            raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空")
+        storage.put_object(relative, temporary)
+    finally:
+        file.file.close()
+        temporary.unlink(missing_ok=True)
+    media_type = "MARKDOWN" if suffix == ".md" else "HTML" if suffix in {".html", ".htm"} else "VIDEO"
+    material = TeachingMaterial(class_id=class_id, folder_id=folder_id, owner_id=user.id, storage_path=relative, original_name=original_name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(original_name)[0] or "application/octet-stream", media_type=media_type)
+    db.add(material); db.commit(); db.refresh(material)
+    return teaching_material_json(material)
+
+
+@app.delete("/api/v1/teaching-materials/files/{file_id}", status_code=204)
+def delete_teaching_material(file_id: UUID, user: CsrfUser, db: Db):
+    teacher(user)
+    material = db.get(TeachingMaterial, file_id)
+    if not material or not material.active:
+        raise ApiError(404, "MATERIAL_FILE_NOT_FOUND", "文件不存在")
+    require_writable_class(db, user, material.class_id)
+    key = material.storage_path
+    db.delete(material); db.commit()
+    storage.delete_object(key)
+    return Response(status_code=204)
+
+
+@app.get("/api/v1/teaching-materials/files/{file_id}/content")
+def teaching_material_content(file_id: UUID, user: CurrentUser, db: Db):
+    material = db.get(TeachingMaterial, file_id)
+    if not material or not material.active:
+        raise ApiError(404, "MATERIAL_FILE_NOT_FOUND", "文件不存在")
+    require_class(db, user, material.class_id)
+    media_type = {"MARKDOWN": "text/markdown", "HTML": "text/html", "VIDEO": "video/mp4"}[material.media_type]
+    return StreamingResponse(storage.get_object_stream(material.storage_path), media_type=media_type, headers={"Content-Disposition": content_disposition(material.original_name, "inline")})
+
+
 @app.post("/api/v1/assignments/{aid}/files", status_code=201)
 def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purpose: Literal["ATTACHMENT", "REVIEW_CRITERIA"] | None = Query(None), material_type: Literal["TASK", "ATTACHMENT", "CRITERIA"] | None = Query(None)):
     a = db.get(Assignment, aid)
@@ -1695,6 +1920,34 @@ def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
     }
 
 
+def peer_assessment_summary(db: Session, item: SubmissionAssessment, current_user_id: UUID) -> dict:
+    evaluator = db.get(User, item.evaluator_id)
+    return {
+        "id": str(item.id), "grade": item.grade, "status": item.status, "revision": item.version,
+        "published_at": item.published_at, "evaluator_id": str(item.evaluator_id),
+        "evaluator_name": evaluator.display_name, "is_current_evaluator": item.evaluator_id == current_user_id,
+        "comment": "", "annotations": [], "has_draft": False,
+    }
+
+
+def peer_assessment_for_version(db: Session, version_id: UUID) -> SubmissionAssessment | None:
+    return db.scalar(
+        select(SubmissionAssessment)
+        .where(SubmissionAssessment.submission_version_id == version_id, SubmissionAssessment.kind == "PEER")
+        .order_by(SubmissionAssessment.created_at, SubmissionAssessment.id)
+    )
+
+
+def lock_submission_version(db: Session, version_id: UUID) -> None:
+    query = (
+        select(SubmissionVersion.id)
+        .where(SubmissionVersion.id == version_id)
+        .with_for_update()
+        .with_hint(SubmissionVersion, "WITH (UPDLOCK, HOLDLOCK)", dialect_name="mssql")
+    )
+    db.scalar(query)
+
+
 GRADE_POINTS = {"A": 5, "B": 4, "C": 3, "D": 2, "E": 1}
 POINT_GRADES = {value: key for key, value in GRADE_POINTS.items()}
 
@@ -1742,7 +1995,7 @@ def peer_review_assignments(user: CurrentUser, db: Db, class_id: UUID = Query())
         ).all()
         if not versions: continue
         version_ids = [row.id for row in versions]
-        reviewed = db.scalar(select(func.count()).select_from(SubmissionAssessment).where(SubmissionAssessment.submission_version_id.in_(version_ids), SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER")) or 0
+        reviewed = db.scalar(select(func.count(func.distinct(SubmissionAssessment.submission_version_id))).where(SubmissionAssessment.submission_version_id.in_(version_ids), SubmissionAssessment.kind == "PEER")) or 0
         payload = assignment_json(assignment)
         payload.update({"assignment_id": str(assignment.id), "assignment_title": assignment.title, "available_count": len(versions), "reviewed_count": reviewed, "pending_count": len(versions) - reviewed})
         items.append(payload)
@@ -1758,9 +2011,26 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
     _, team = require_team(db, assignment.class_id, user)
     attachments = db.scalars(
         select(FileObject)
-        .where(FileObject.assignment_id == aid, FileObject.purpose == "ATTACHMENT", FileObject.active == True)  # noqa: E712
+        .where(
+            FileObject.assignment_id == aid,
+            FileObject.purpose == "ATTACHMENT",
+            FileObject.active == True,  # noqa: E712
+            or_(FileObject.material_type.is_(None), FileObject.material_type != "CRITERIA"),
+        )
         .order_by(FileObject.created_at)
     ).all()
+    review_criteria = db.scalars(
+        select(FileObject)
+        .where(
+            FileObject.assignment_id == aid,
+            FileObject.purpose == "ATTACHMENT",
+            FileObject.material_type == "CRITERIA",
+            FileObject.active == True,  # noqa: E712
+        )
+        .order_by(FileObject.created_at)
+    ).all()
+    reviewer_submission, _ = own_submission(db, assignment, user)
+    criteria_unlocked = bool(reviewer_submission and reviewer_submission.status == "SUBMITTED")
     rows = db.execute(
         select(Submission, SubmissionVersion, User)
         .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
@@ -1772,15 +2042,20 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
     candidates = []
     for submission_item, version, person in rows:
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
-        review = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
+        review = peer_assessment_for_version(db, version.id)
         candidates.append({
             "user_id": str(person.id), "name": person.display_name, "student_no": person.login_name,
             "submitted_at": version.submitted_at, "submission_version_id": str(version.id),
-            "files": [file_json(file) for file in files], "review": assessment_json(db, review) if review else None,
+            "files": [file_json(file) for file in files],
+            "review": peer_assessment_summary(db, review, user.id) if review else None,
+            "can_review": review is None or review.evaluator_id == user.id,
+            "can_edit": bool(review and review.evaluator_id == user.id),
         })
     return {
         "assignment": assignment_json(assignment),
         "attachments": [file_json(file) for file in attachments],
+        "review_criteria": [file_json(file) for file in review_criteria] if criteria_unlocked else [],
+        "review_criteria_locked": bool(review_criteria and not criteria_unlocked),
         "team": {"id": str(team.id), "name": team.name},
         "candidates": candidates,
     }
@@ -1799,7 +2074,11 @@ def save_peer_submission_assessment(aid: UUID, data: PeerSubmissionAssessmentIn,
     submitted = latest_personal_submission(db, aid, data.reviewee_id)
     if not submitted: raise ApiError(409, "REVIEWEE_NOT_SUBMITTED", "该组员尚未提交作业")
     _, version = submitted
-    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
+    lock_submission_version(db, version.id)
+    item = peer_assessment_for_version(db, version.id)
+    if item and item.evaluator_id != user.id:
+        evaluator = db.get(User, item.evaluator_id)
+        raise ApiError(409, "PEER_REVIEW_TAKEN", f"该作品已由{evaluator.display_name}评价，不能重复评价或修改")
     updating = item is not None
     if item:
         item.grade, item.comment, item.status, item.published_at = data.grade, data.comment.strip(), "PUBLISHED", now()
@@ -1948,7 +2227,10 @@ def peer_feedback_context(db: Session, version_id: UUID, user: User):
 @app.get("/api/v1/submission-versions/{version_id}/peer-feedback")
 def get_peer_submission_feedback(version_id: UUID, user: CurrentUser, db: Db):
     version, _, _ = peer_feedback_context(db, version_id, user)
-    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
+    item = peer_assessment_for_version(db, version.id)
+    if item and item.evaluator_id != user.id:
+        evaluator = db.get(User, item.evaluator_id)
+        raise ApiError(409, "PEER_REVIEW_TAKEN", f"该作品已由{evaluator.display_name}评价，不能重复评价或修改")
     return feedback_json(db, item)
 
 
@@ -1956,7 +2238,11 @@ def get_peer_submission_feedback(version_id: UUID, user: CurrentUser, db: Db):
 def publish_peer_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user: CsrfUser, db: Db):
     version, submission_item, assignment = peer_feedback_context(db, version_id, user)
     require_writable_class(db, user, assignment.class_id)
-    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER").with_for_update())
+    lock_submission_version(db, version.id)
+    item = peer_assessment_for_version(db, version.id)
+    if item and item.evaluator_id != user.id:
+        evaluator = db.get(User, item.evaluator_id)
+        raise ApiError(409, "PEER_REVIEW_TAKEN", f"该作品已由{evaluator.display_name}评价，不能重复评价或修改")
     current_revision = item.version if item else 0
     if data.revision != current_revision: raise ApiError(409, "FEEDBACK_VERSION_CONFLICT", "反馈已在其他页面更新，请刷新后重试")
     annotations = validate_feedback_annotations(db, version.id, data.annotations)

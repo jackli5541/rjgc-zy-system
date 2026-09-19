@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { ApartmentOutlined, ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { api, apiClientId, randomUUID } from '../api'
@@ -12,6 +12,7 @@ import OnlineMarkdownWorkspace from '../components/OnlineMarkdownWorkspace.vue'
 import ShellHeader from '../components/ShellHeader.vue'
 import StudentPortfolioDrawer from '../components/StudentPortfolioDrawer.vue'
 import AssignmentsPage from './shell/AssignmentsPage.vue'
+import CapstonePage from './shell/CapstonePage.vue'
 import ClassDetailPage from './shell/ClassDetailPage.vue'
 import ClassesPage from './shell/ClassesPage.vue'
 import GradesPage from './shell/GradesPage.vue'
@@ -19,6 +20,7 @@ import OverviewPage from './shell/OverviewPage.vue'
 import ReviewDetailPage from './shell/ReviewDetailPage.vue'
 import ReviewsPage from './shell/ReviewsPage.vue'
 import SystemPage from './shell/SystemPage.vue'
+import TeachingMaterialsPage from './shell/TeachingMaterialsPage.vue'
 import TeamsPage from './shell/TeamsPage.vue'
 import { useSessionStore } from '../stores/session'
 import { shellContextKey } from '../shellContext'
@@ -173,6 +175,13 @@ const studentUpcomingAssignments = computed(() => {
 const studentPendingReviews = computed(() => campaigns.value.reduce((total, item) => total + Number(item.pending_count || 0), 0))
 const assignmentSubmitted = computed(() => selectedAssignment.value?.submission?.status === 'SUBMITTED')
 const studentCriteriaMaterials = computed(() => assignmentAttachments.value.filter(file => file.material_type === 'CRITERIA'))
+const gradingCriteriaFiles = computed(() => {
+  const files = [...reviewCriteriaFiles.value]
+  for (const file of assignmentAttachments.value.filter(item => item.material_type === 'CRITERIA')) {
+    if (!files.some(item => item.id === file.id)) files.push(file)
+  }
+  return files
+})
 const assignmentBeforeDue = computed(() => Boolean(selectedAssignment.value && new Date(selectedAssignment.value.due_at) > new Date()))
 const assignmentIsUpdate = computed(() => assignmentSubmitted.value && assignmentBeforeDue.value)
 const canManageTeamSubmission = computed(() => {
@@ -220,10 +229,10 @@ const assignmentChartLine = computed(() => assignmentChartPoints.value.map(point
 const menu = computed(() => {
   if (role.value === 'TEACHER') return [
     ['overview', DashboardOutlined, '总览'], ['classes', BookOutlined, '教学班'], ['teams', TeamOutlined, '小组与选题'],
-    ['assignments', FileTextOutlined, '作业管理'], ['grades', TrophyOutlined, '成绩与导出'], ['system', SettingOutlined, '系统与审计']
+    ['assignments', FileTextOutlined, '作业管理'], ['capstone', ApartmentOutlined, '大作业管理'], ['materials', FolderOpenOutlined, '教学资料'], ['grades', TrophyOutlined, '成绩与导出'], ['system', SettingOutlined, '系统与审计']
   ]
   if (session.teamGate) return [['teams', TeamOutlined, '加入小组']]
-  return [['overview', DashboardOutlined, '总览'], ['teams', TeamOutlined, '我的小组'], ['assignments', FileTextOutlined, '我的作业'], ['reviews', FormOutlined, '作品互评'], ['grades', TrophyOutlined, '成绩与反馈']]
+  return [['overview', DashboardOutlined, '总览'], ['teams', TeamOutlined, '我的小组'], ['assignments', FileTextOutlined, '我的作业'], ['reviews', FormOutlined, '作品互评'], ['capstone', ApartmentOutlined, '大作业'], ['grades', TrophyOutlined, '成绩与反馈'], ['materials', FolderOpenOutlined, '教学资料']]
 })
 
 function iso(value) { return value ? new Date(value).toISOString() : null }
@@ -822,17 +831,18 @@ function openStudentAssignment(item) {
 }
 function openPeerReviewDrawer(candidate, file = candidate?.files?.[0]) {
   if (!candidate?.files?.length || !file) return message.warning('该组员没有可预览的提交文件')
-  const submission = { ...candidate, owner: candidate.name }
-  openAssessmentDrawer(submission, { mode: 'PEER', file })
+  const lockedByOther = Boolean(candidate.review && candidate.can_review === false)
+  const submission = { ...candidate, owner: lockedByOther ? candidate.review.evaluator_name : candidate.name }
+  openAssessmentDrawer(submission, { mode: 'PEER', file, initialFeedback: lockedByOther ? candidate.review : null, readonly: lockedByOther })
 }
-function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false } = {}) {
+function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false, readonly = false } = {}) {
   selectedSubmission.value = record
   filePreview.mode = mode
   filePreview.targets = targets
   filePreview.targetIndex = targetIndex
   filePreview.initialFeedback = initialFeedback
   filePreview.pendingOnly = pendingOnly
-  filePreview.readonly = false
+  filePreview.readonly = readonly
   filePreview.assignmentTitle = ''
   filePreview.files = [...(record.files || [])]
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file?.id))
@@ -1006,7 +1016,9 @@ function currentViewUses(scopes) {
     'assignment-detail': ['assignments', 'submissions', 'reviews', 'grades', 'teams'],
     reviews: ['reviews', 'submissions'],
     'review-detail': ['reviews', 'submissions'],
+    capstone: [],
     grades: ['grades'],
+    materials: [],
     system: ['audit']
   }
   return (needed[view.value] || []).some(scope => scopes.includes(scope))
@@ -1197,7 +1209,9 @@ provide(shellContextKey, {
       <ReviewsPage v-else-if="view==='reviews'" />
       <ReviewDetailPage v-else-if="view==='review-detail'&&selectedCampaign" />
 
+      <CapstonePage v-else-if="view==='capstone'" />
       <GradesPage v-else-if="view==='grades'" />
+      <TeachingMaterialsPage v-else-if="view==='materials'" />
       <SystemPage v-else-if="view==='system'&&role==='TEACHER'" />
       </div>
       </Transition>
@@ -1211,6 +1225,8 @@ provide(shellContextKey, {
       :submission-version-id="selectedSubmission?.submission_version_id||''"
       :owner="selectedSubmission?.owner||''"
       :assignment-title="filePreview.assignmentTitle||selectedAssignment?.title||selectedCampaign?.assignment_title||reviewTask?.assignment?.title||''"
+      :criteria-files="filePreview.mode==='PEER' ? reviewTask?.review_criteria||[] : filePreview.mode==='TEACHER' ? gradingCriteriaFiles : []"
+      :criteria-locked="filePreview.mode==='PEER'&&Boolean(reviewTask?.review_criteria_locked)"
       :editable="!filePreview.readonly&&(filePreview.mode==='TEACHER'&&role==='TEACHER'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
       :mode="filePreview.mode"
       :targets="filePreview.targets"
