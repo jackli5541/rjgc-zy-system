@@ -1656,8 +1656,8 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
         snapshot = {"members": [{"id": str(person.id), "student_no": person.login_name, "name": person.display_name, "role": member.role} for member, person in rows]}
     submitted_at = now()
     s.current_version_no = (current.version_no + 1) if current else 1
-    current_grade_result = submission_grade_result(db, current) if current else None
-    resubmission_grade_cap = "B" if current_grade_result and current_grade_result.get("final_grade") in {"C", "D", "E"} else None
+    was_peer_reviewed = bool(current and db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == current.id, SubmissionAssessment.kind == "PEER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
+    resubmission_grade_cap = "B" if was_peer_reviewed else None
     v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key, grade_cap=resubmission_grade_cap)
     db.add(v); db.flush()
     old_versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.id != v.id)).all()
@@ -1829,10 +1829,11 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
     for submission_item, version, person in rows:
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
         review = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
+        was_peer_reviewed = bool(db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.kind == "PEER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
         candidates.append({
             "user_id": str(person.id), "name": person.display_name, "student_no": person.login_name,
             "submitted_at": version.submitted_at, "submission_version_id": str(version.id),
-            "grade_cap": version.grade_cap,
+            "grade_cap": "B" if version.grade_cap == "B" or was_peer_reviewed else None,
             "files": [file_json(file) for file in files], "review": assessment_json(db, review) if review else None,
         })
     return {
@@ -1858,9 +1859,10 @@ def save_peer_submission_assessment(aid: UUID, data: PeerSubmissionAssessmentIn,
     submitted = latest_personal_submission(db, aid, data.reviewee_id)
     if not submitted: raise ApiError(409, "REVIEWEE_NOT_SUBMITTED", "该组员尚未提交作业")
     _, version = submitted
-    if version.grade_cap == "B" and data.grade == "A":
-        raise ApiError(409, "GRADE_CAP_EXCEEDED", "重新提交版本的最高成绩为 B")
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER"))
+    was_peer_reviewed = bool(db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.kind == "PEER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
+    if data.grade == "A" and (version.grade_cap == "B" or was_peer_reviewed):
+        raise ApiError(409, "GRADE_CAP_EXCEEDED", "该作业已被互评，后续学生互评最高成绩为 B")
     updating = item is not None
     if item:
         item.grade, item.comment, item.status, item.published_at = data.grade, data.comment.strip(), "PUBLISHED", now()
@@ -1880,8 +1882,6 @@ def save_teacher_submission_assessment(aid: UUID, student_id: UUID, data: Submis
     submitted = latest_personal_submission(db, aid, student_id)
     if not submitted: raise ApiError(409, "SUBMISSION_REQUIRED", "该学生尚未提交作业")
     _, version = submitted
-    if version.grade_cap == "B" and data.grade == "A":
-        raise ApiError(409, "GRADE_CAP_EXCEEDED", "重新提交版本的最高成绩为 B")
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     updating = item is not None
     if item:
@@ -1905,7 +1905,6 @@ def delete_teacher_submission_assessment(aid: UUID, student_id: UUID, user: Csrf
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     if item:
         item_id = str(item.id); db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id)); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
-        version.grade_cap = None
     result = submission_grade_result(db, version); db.commit()
     return result
 
@@ -2024,6 +2023,9 @@ def publish_peer_submission_feedback(version_id: UUID, data: SubmissionFeedbackI
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER").with_for_update())
     current_revision = item.version if item else 0
     if data.revision != current_revision: raise ApiError(409, "FEEDBACK_VERSION_CONFLICT", "反馈已在其他页面更新，请刷新后重试")
+    was_peer_reviewed = bool(db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.kind == "PEER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
+    if data.grade == "A" and (version.grade_cap == "B" or was_peer_reviewed):
+        raise ApiError(409, "GRADE_CAP_EXCEEDED", "该作业已被互评，后续学生互评最高成绩为 B")
     annotations = validate_feedback_annotations(db, version.id, data.annotations)
     comment = clean_html(data.comment)
     updating = item is not None
@@ -2099,7 +2101,6 @@ def delete_submission_feedback(version_id: UUID, user: CsrfUser, db: Db):
     item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
     if item:
         item_id = str(item.id); db.execute(delete(SubmissionAnnotation).where(SubmissionAnnotation.assessment_id == item.id)); db.delete(item); db.flush(); audit(db, user, "TEACHER_ASSESSMENT_CLEARED", "submission_assessment", item_id)
-        version.grade_cap = None
     result = submission_grade_result(db, version); db.commit()
     return result
 

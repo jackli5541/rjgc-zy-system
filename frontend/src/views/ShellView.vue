@@ -914,7 +914,7 @@ async function clearTeacherGrade() {
       ? `/submission-versions/${selectedSubmission.value.submission_version_id}/feedback`
       : `/assignments/${selectedAssignment.value.id}/submissions/${selectedSubmission.value.user_id}/grade`
     const result = await api(path, { method: 'DELETE' })
-    Object.assign(selectedSubmission.value, result, { grade_cap: '' })
+    Object.assign(selectedSubmission.value, result)
     await refreshSubmissionBoard()
     closeFilePreview()
     message.success(result.final_grade ? '已恢复由互评成绩决定' : '教师评分已清除，当前暂无互评成绩')
