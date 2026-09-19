@@ -1263,7 +1263,7 @@ def check_source_images(db: Session, workspace: SubmissionWorkspace, document: S
     except (OssError, UnicodeDecodeError):
         return False
     corrupted_text = "???" in document.name or document.markdown_content.count("?") >= 5
-    restored = source if corrupted_text or not document.markdown_content.strip() else restore_embedded_images(source, document.markdown_content)
+    restored = source if corrupted_text or not document.markdown_content.strip() else restore_embedded_tables(source, restore_embedded_images(source, document.markdown_content))
     changed = restored != document.markdown_content or document.name != Path(source_file.original_name).name or document.source_file_id != source_file.id
     document.source_file_id = source_file.id
     document.name = Path(source_file.original_name).name
@@ -1301,6 +1301,45 @@ def restore_embedded_images(template: str, draft: str) -> str:
             result = f"{result[:position]}\n\n{image_markdown}{result[position:]}"
         else:
             result = f"{image_markdown}\n\n{result}"
+    return result
+
+
+def markdown_table_blocks(value: str) -> list[tuple[str, list[list[str]]]]:
+    def cells(line: str) -> list[str]:
+        stripped = line.strip()
+        if stripped.startswith("|"): stripped = stripped[1:]
+        if stripped.endswith("|"): stripped = stripped[:-1]
+        return [cell.strip() for cell in re.split(r"(?<!\\)\|", stripped)]
+
+    lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    tables = []
+    index = 0
+    while index + 1 < len(lines):
+        header = cells(lines[index])
+        separator = cells(lines[index + 1])
+        valid_separator = len(header) >= 2 and len(separator) == len(header) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator)
+        if "|" not in lines[index] or not valid_separator:
+            index += 1
+            continue
+        end = index + 2
+        rows = [header]
+        while end < len(lines) and "|" in lines[end]:
+            row = cells(lines[end])
+            if len(row) != len(header): break
+            rows.append(row)
+            end += 1
+        tables.append(("\n".join(lines[index:end]), rows))
+        index = end
+    return tables
+
+
+def restore_embedded_tables(template: str, draft: str) -> str:
+    result = draft.replace("\r\n", "\n").replace("\r", "\n")
+    for table, rows in markdown_table_blocks(template):
+        if table in result: continue
+        flattened = "".join(cell for row in rows for cell in row)
+        if flattened and result.count(flattened) == 1:
+            result = result.replace(flattened, table, 1)
     return result
 
 

@@ -1031,6 +1031,22 @@ def test_restore_embedded_images_supports_markdown_and_html_without_duplicates()
     assert restore_embedded_images(template, restored) == restored
 
 
+def test_restore_embedded_tables_repairs_only_unchanged_flattened_tables():
+    from app.main import restore_embedded_tables
+
+    table = "| 我发现的问题 | 属于哪一类 | 怎么改（修法） |\r\n|---|---|---|\r\n|  |  |  |\r\n|  |  |  |"
+    template = f"# 任务\r\n\r\n{table}\r\n\r\n---\r\n"
+    flattened = "我发现的问题属于哪一类怎么改（修法）"
+    draft = f"# 任务\n\n{flattened}\n\n---\n\n学生答案\n"
+
+    restored = restore_embedded_tables(template, draft)
+
+    assert table.replace("\r\n", "\n") in restored
+    assert "学生答案" in restored
+    assert restore_embedded_tables(template, restored) == restored
+    assert restore_embedded_tables(template, draft.replace(flattened, "已修改的表头")) == draft.replace(flattened, "已修改的表头")
+
+
 def test_workspace_loads_document_content_lazily_and_checks_source_images_once(monkeypatch):
     stored_objects = {}
     reads = []
