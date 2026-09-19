@@ -2203,7 +2203,7 @@ def create_campaign(data: AllocatedCampaignIn, user: CsrfUser, db: Db):
 @app.get("/api/v1/review-campaigns")
 def campaigns(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id)
-    query = select(ReviewCampaign, Assignment).join(Assignment).where(ReviewCampaign.class_id == class_id)
+    query = select(ReviewCampaign, Assignment).join(Assignment).where(ReviewCampaign.class_id == class_id, Assignment.submitter_type == "INDIVIDUAL")
     if user.role == "STUDENT": query = query.where(or_(ReviewCampaign.publish_at.is_(None), ReviewCampaign.publish_at <= now()))
     rows = db.execute(query.order_by(ReviewCampaign.due_at.desc())).all()
     items = []
@@ -2227,6 +2227,8 @@ def allocated_assignment(cid: UUID, user: CurrentUser, db: Db):
     allocation = db.scalar(select(ReviewAssignment).where(ReviewAssignment.campaign_id == cid, ReviewAssignment.reviewer_id == user.id))
     if not allocation: raise ApiError(404, "REVIEW_ASSIGNMENT_NOT_FOUND", "当前活动没有分配给你的任务")
     assignment = db.get(Assignment, campaign.assignment_id)
+    if not assignment or assignment.submitter_type != "INDIVIDUAL":
+        raise ApiError(404, "CAMPAIGN_NOT_FOUND", "小组作业不参与互评")
     criteria_files = db.scalars(select(FileObject).where(FileObject.assignment_id == campaign.assignment_id, FileObject.purpose == "REVIEW_CRITERIA").order_by(FileObject.created_at)).all()
     payload = {
         "id": str(allocation.id), "status": allocation.status, "skip_reason": allocation.skip_reason,
@@ -2247,6 +2249,9 @@ def allocated_assignment(cid: UUID, user: CurrentUser, db: Db):
 def review(cid: UUID, data: ReviewIn, user: CsrfUser, db: Db):
     c = db.get(ReviewCampaign, cid)
     if not c or c.status != "ACTIVE" or (c.publish_at and c.publish_at > now()) or c.due_at < now(): raise ApiError(409, "CAMPAIGN_CLOSED", "互评活动未开放或已截止")
+    assignment = db.get(Assignment, c.assignment_id)
+    if not assignment or assignment.submitter_type != "INDIVIDUAL":
+        raise ApiError(409, "INDIVIDUAL_ASSIGNMENT_REQUIRED", "小组作业不参与互评")
     require_writable_class(db, user, c.class_id)
     allocation = db.scalar(select(ReviewAssignment).where(ReviewAssignment.campaign_id == c.id, ReviewAssignment.reviewer_id == user.id).with_for_update())
     if not allocation: raise ApiError(403, "REVIEW_NOT_ASSIGNED", "当前活动没有分配给你的互评任务")
@@ -2320,8 +2325,8 @@ def campaign_reviews(cid: UUID, user: CurrentUser, db: Db):
 def grades(user: CurrentUser, db: Db, class_id: UUID = Query()):
     require_class(db, user, class_id)
     if user.role == "STUDENT":
-        require_team(db, class_id, user)
-        assignments = db.scalars(select(Assignment).where(Assignment.class_id == class_id, Assignment.submitter_type == "INDIVIDUAL", Assignment.status.in_(["PUBLISHED", "CLOSED"])).order_by(Assignment.due_at.desc())).all()
+        _, team = require_team(db, class_id, user)
+        assignments = db.scalars(select(Assignment).where(Assignment.class_id == class_id, Assignment.status.in_(["PUBLISHED", "CLOSED"])).order_by(Assignment.due_at.desc())).all()
         legacy_rows = db.execute(
             select(Grade, Assignment, GradeCoefficient).select_from(Grade).join(Assignment, Assignment.id == Grade.assignment_id).outerjoin(GradeCoefficient, GradeCoefficient.id == Grade.coefficient_id)
             .where(Assignment.class_id == class_id, Grade.subject_user_id == user.id, Grade.status == "PUBLISHED")
@@ -2329,18 +2334,25 @@ def grades(user: CurrentUser, db: Db, class_id: UUID = Query()):
         legacy_assignment_ids = {grade.assignment_id for grade, _, _ in legacy_rows}
         items = []
         for assignment in assignments:
-            submitted = latest_personal_submission(db, assignment.id, user.id)
+            if assignment.submitter_type == "INDIVIDUAL":
+                submitted = latest_personal_submission(db, assignment.id, user.id)
+            else:
+                submitted = db.execute(
+                    select(Submission, SubmissionVersion)
+                    .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+                    .where(Submission.assignment_id == assignment.id, Submission.owner_team_id == team.id, Submission.status == "SUBMITTED")
+                ).first()
             if submitted:
                 _, version = submitted
                 has_current_assessment = bool(db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == version.id).limit(1)))
                 if assignment.id in legacy_assignment_ids and not has_current_assessment: continue
                 result = submission_grade_result(db, version)
                 files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
-                items.append({"id": str(version.id), "submission_version_id": str(version.id), "submission_version_no": version.version_no, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "status": result["grading_status"], "files": [file_json(file) for file in files], **result})
+                items.append({"id": str(version.id), "submission_version_id": str(version.id), "submission_version_no": version.version_no, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "submitter_type": assignment.submitter_type, "status": result["grading_status"], "files": [file_json(file) for file in files], **result})
             else:
                 result = missing_submission_grade_result(assignment)
                 if result["final_grade"]:
-                    items.append({"id": str(assignment.id), "submission_version_id": None, "submission_version_no": None, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "status": result["grading_status"], "files": [], **result})
+                    items.append({"id": str(assignment.id), "submission_version_id": None, "submission_version_no": None, "assignment_id": str(assignment.id), "assignment_title": assignment.title, "submitter_type": assignment.submitter_type, "status": result["grading_status"], "files": [], **result})
         new_assignment_ids = {item["assignment_id"] for item in items}
         for grade, assignment, coefficient in legacy_rows:
             if str(assignment.id) not in new_assignment_ids:
