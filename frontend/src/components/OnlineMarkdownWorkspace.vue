@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { CheckCircleFilled, CloudSyncOutlined, CodeOutlined, EyeOutlined, FileTextOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons-vue'
+import { CheckCircleFilled, CloudSyncOutlined, CodeOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { api } from '../api'
 import { loadMarkdownPreview, renderMarkdown } from '../markdownPreview'
@@ -20,6 +20,7 @@ const editorMode = ref('visual')
 const sidebarCollapsed = ref(false)
 const criteriaPreview = ref(null)
 const state = ref('idle')
+const downloading = ref(false)
 let savePromise
 let pendingSave
 let applying = false
@@ -263,6 +264,27 @@ async function discardChanges() {
   applyMarkdown(active.value.id, lastSavedMarkdown.get(active.value.id) || '')
   state.value = 'saved'
 }
+
+async function downloadCurrent() {
+  if (!active.value || downloading.value) return
+  const documentId = active.value.id
+  if (state.value === 'conflict') return message.warning('请先处理编辑冲突再下载')
+  downloading.value = true
+  try {
+    if (state.value === 'dirty' || state.value === 'error') {
+      if (!await save(true)) return
+    } else if (state.value === 'saving' && !await savePromise) return
+    if (state.value !== 'saved' || activeId.value !== documentId) return message.warning('请先保存当前修改再下载')
+    const document = await api(`/assignments/${props.assignmentId}/workspace/documents/${documentId}`)
+    const url = URL.createObjectURL(new Blob([document.markdown_content], { type: 'text/markdown;charset=utf-8' }))
+    const link = window.document.createElement('a')
+    link.href = url
+    link.download = document.name
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (error) { message.error(error.message) }
+  finally { downloading.value = false }
+}
 function externalChange(event) {
   if (event.detail?.assignmentId !== props.assignmentId) return
   if (event.detail?.workspaceId && event.detail.workspaceId !== workspace.value?.id) return
@@ -291,7 +313,7 @@ defineExpose({ save: () => state.value === 'dirty' ? false : save(), reload: () 
     </aside>
     <main class="document-surface">
       <header class="document-status"><div class="document-title"><strong>{{criteriaPreview?.file.name||active?.name}}</strong><span v-if="criteriaPreview">判定标准 · 只读</span><span v-else-if="active?.updated_by">最近由 {{active.updated_by}} 编辑</span></div><div v-if="criteriaPreview" class="readonly-indicator"><EyeOutlined/> 只读查看</div><div v-else-if="active" class="editor-mode-switch" role="tablist" aria-label="编辑模式"><button type="button" :class="{active:editorMode==='visual'}" role="tab" :aria-selected="editorMode==='visual'" @click="setEditorMode('visual')">可视化</button><button type="button" :class="{active:editorMode==='source'}" role="tab" :aria-selected="editorMode==='source'" @click="setEditorMode('source')"><CodeOutlined/> Markdown 源码</button></div></header>
-      <div class="writing-stage" :class="{'criteria-stage':criteriaPreview}"><a-skeleton v-if="criteriaPreview?.loading||documentLoading||loading" active/><RichTextViewer v-else-if="criteriaPreview?.type==='rich'" :html="criteriaPreview.html"/><a-empty v-else-if="criteriaPreview" description="判定标准仅支持 Markdown 文档"/><template v-else-if="active&&loadedId===active.id"><RichTextEditor v-if="editorMode==='visual'" v-model="editorHtml" :editable="writable" document placeholder="开始编写作业..."><template #toolbarEnd><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></template></RichTextEditor><section v-else class="source-editor"><div class="source-editor-heading"><div><CodeOutlined/><strong>Markdown 源码</strong></div><div class="source-editor-actions"><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span></div><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></div><textarea v-model="sourceMarkdown" :readonly="!writable" class="source-editor-input" spellcheck="false" aria-label="Markdown 源码"></textarea></section></template><a-empty v-else description="该作业没有可编辑的 Markdown 附件"/></div>
+      <div class="writing-stage" :class="{'criteria-stage':criteriaPreview}"><a-skeleton v-if="criteriaPreview?.loading||documentLoading||loading" active/><RichTextViewer v-else-if="criteriaPreview?.type==='rich'" :html="criteriaPreview.html"/><a-empty v-else-if="criteriaPreview" description="判定标准仅支持 Markdown 文档"/><template v-else-if="active&&loadedId===active.id"><RichTextEditor v-if="editorMode==='visual'" v-model="editorHtml" :editable="writable" document placeholder="开始编写作业..."><template #toolbarEnd><a-tooltip title="下载当前原文件"><a-button type="text" shape="circle" aria-label="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button></a-tooltip><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></template></RichTextEditor><section v-else class="source-editor"><div class="source-editor-heading"><div><CodeOutlined/><strong>Markdown 源码</strong></div><div class="source-editor-actions"><a-tooltip title="下载当前原文件"><a-button type="text" shape="circle" aria-label="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button></a-tooltip><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span></div><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></div><textarea v-model="sourceMarkdown" :readonly="!writable" class="source-editor-input" spellcheck="false" aria-label="Markdown 源码"></textarea></section></template><a-empty v-else description="该作业没有可编辑的 Markdown 附件"/></div>
     </main>
   </div>
 </template>
