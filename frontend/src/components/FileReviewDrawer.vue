@@ -449,7 +449,17 @@ async function saveFeedback(publish) {
     emit('feedback-published', saved.result)
     message.success(peer ? (saved.updated ? '互评已更新' : '互评已提交') : publish ? '教师反馈已发布' : '反馈草稿已保存')
     return true
-  } catch (saveError) { message.error(saveError.message); return false }
+  } catch (saveError) {
+    if (saveError.code === 'FEEDBACK_VERSION_CONFLICT') {
+      try {
+        const peer = props.mode === 'PEER'
+        const latest = await api(peer ? `/submission-versions/${props.submissionVersionId}/peer-feedback` : `/submission-versions/${props.submissionVersionId}/feedback`)
+        feedback.revision = latest.revision ?? latest.version ?? feedback.revision
+        message.warning('内容已同步到最新版本，请再次点击提交，你填写的评语和批注不会丢失')
+      } catch (_) { message.error(saveError.message) }
+    } else message.error(saveError.message)
+    return false
+  }
   finally { saving.value = false }
 }
 

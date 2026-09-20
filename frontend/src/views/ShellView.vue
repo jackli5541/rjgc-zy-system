@@ -992,7 +992,7 @@ async function openNotification(item) {
   await router.push(item.link)
 }
 async function changePassword() { await action(async () => { await api('/auth/password', { method: 'POST', body: JSON.stringify(passwordForm) }); modals.password = false; await session.logout(); await router.replace('/login') }, '密码已修改，请重新登录') }
-async function logout() { try { await session.logout() } finally { await router.replace('/login') } }
+async function logout() { try { await session.logout() } catch (_) {} finally { await router.replace('/login') } }
 function downloadExport(kind, format = 'xlsx') {
   const assignment = kind === 'grades' && selectedGradeAssignmentId.value ? `&assignment_id=${selectedGradeAssignmentId.value}` : ''
   window.location.href = `/api/v1/exports/${kind}.${format}?class_id=${classId.value}${assignment}`

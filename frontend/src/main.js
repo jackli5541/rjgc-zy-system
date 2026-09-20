@@ -1,5 +1,4 @@
 import { createApp } from 'vue'
-import Antd from 'ant-design-vue'
 import 'ant-design-vue/dist/reset.css'
 import './style.css'
 import App from './App.vue'
@@ -13,4 +12,4 @@ window.addEventListener('auth-expired', () => {
   if (router.currentRoute.value.name !== 'login') router.replace('/login')
 })
 
-createApp(App).use(pinia).use(router).use(Antd).mount('#app')
+createApp(App).use(pinia).use(router).mount('#app')

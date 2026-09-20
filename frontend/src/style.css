@@ -18,18 +18,17 @@ body.ant-scrolling-effect { width: 100% !important; padding-right: 0 !important;
 button, input, textarea { letter-spacing: 0; }
 
 .login-page { min-height: 100vh; display: grid; grid-template-columns: minmax(420px, 1.05fr) minmax(440px, .95fr); background: #fff; }
-.login-visual { position: relative; overflow: hidden; display: flex; align-items: center; padding: 8vw; color: #fff; background: #102f50; }
-.login-visual::before { content: ''; position: absolute; inset: 0; background: linear-gradient(128deg, rgba(12,35,61,.22), rgba(11,88,126,.8)), url('https://images.unsplash.com/photo-1523240795612-9a054b0db644?auto=format&fit=crop&w=1600&q=82') center/cover; opacity: .76; }
-.login-visual::after { content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(10,28,47,.08), rgba(10,28,47,.68)); }
+.login-visual { position: relative; overflow: hidden; display: flex; align-items: center; padding: 8vw; color: #fff; background: linear-gradient(155deg, #0c233d 0%, #103a56 46%, #125864 78%, #176b78 100%); }
+.login-visual::before { content: ''; position: absolute; inset: 0; background-image: radial-gradient(circle at 82% 12%, rgba(142,212,255,.22), transparent 40%), radial-gradient(circle at 8% 92%, rgba(23,107,120,.55), transparent 46%), linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px); background-size: auto, auto, 40px 40px, 40px 40px; background-position: 0 0, 0 0, -1px -1px, -1px -1px; mask-image: linear-gradient(155deg, rgba(0,0,0,.9), rgba(0,0,0,.35) 70%); }
 .visual-inner { position: relative; z-index: 1; max-width: 620px; }
 .brand-mark { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; background: #176b78; color: #fff; font-weight: 800; font-size: 18px; box-shadow: 0 6px 16px rgba(6,44,78,.16); }
-.brand-mark.large { width: 52px; height: 52px; border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.12); backdrop-filter: blur(8px); }
-.visual-kicker { margin-top: 28px; color: #c6e7ff; font-weight: 600; }
-.login-visual h1 { margin: 16px 0 20px; font-size: clamp(42px, 4vw, 68px); line-height: 1.12; letter-spacing: 0; }
+.brand-mark.large { width: 52px; height: 52px; font-size: 24px; border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.1); backdrop-filter: blur(8px); }
+.visual-kicker { margin-top: 28px; color: #8ed4ff; font-weight: 600; letter-spacing: .02em; }
+.login-visual h1 { margin: 16px 0 20px; font-size: clamp(42px, 4vw, 68px); line-height: 1.12; letter-spacing: 0; font-weight: 700; }
 .login-visual h1 span { color: #8ed4ff; }
-.login-visual p { max-width: 520px; margin: 0; color: rgba(255,255,255,.78); font-size: 18px; line-height: 1.8; }
+.login-visual p { max-width: 520px; margin: 0; color: rgba(255,255,255,.72); font-size: 18px; line-height: 1.8; }
 .visual-line { display: flex; gap: 8px; margin-top: 44px; }
-.visual-line span { width: 42px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.28); }
+.visual-line span { width: 42px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.22); }
 .visual-line span:first-child { width: 76px; background: #8ed4ff; }
 .login-panel { display: grid; place-items: center; padding: 36px 56px; }
 .login-box { width: min(420px, 100%); }

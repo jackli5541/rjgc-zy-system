@@ -14,6 +14,7 @@ from urllib.parse import quote
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
+import anyio
 from fastapi import Cookie, Depends, FastAPI, File, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +41,7 @@ from app.realtime import hub as realtime_hub, publish_event
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 80
     await realtime_hub.start()
     try:
         yield
@@ -237,15 +239,24 @@ def current_user(session_id: Annotated[str | None, Cookie()] = None, db: Session
 CurrentUser = Annotated[User, Depends(current_user)]
 
 
-@app.get("/api/v1/events")
-async def realtime_events(request: Request, class_id: UUID = Query(), session_id: Annotated[str | None, Cookie()] = None):
-    session_hash = token_hash(session_id or "")
+def _events_authenticate(session_hash: str, class_id: UUID) -> tuple[UUID, str]:
     with SessionLocal() as db:
         login_session = db.scalar(select(LoginSession).where(LoginSession.token_hash == session_hash, LoginSession.revoked_at.is_(None), LoginSession.expires_at > now()))
         user = db.get(User, login_session.user_id) if login_session else None
         if not user or user.status != "ACTIVE": raise ApiError(401, "SESSION_INVALID", "会话已失效")
         require_class(db, user, class_id)
-        user_id, user_role = user.id, user.role
+        return user.id, user.role
+
+
+def _events_session_active(session_hash: str) -> bool:
+    with SessionLocal() as session_db:
+        return session_db.scalar(select(LoginSession.id).where(LoginSession.token_hash == session_hash, LoginSession.revoked_at.is_(None), LoginSession.expires_at > now()).limit(1)) is not None
+
+
+@app.get("/api/v1/events")
+async def realtime_events(request: Request, class_id: UUID = Query(), session_id: Annotated[str | None, Cookie()] = None):
+    session_hash = token_hash(session_id or "")
+    user_id, user_role = await asyncio.to_thread(_events_authenticate, session_hash, class_id)
     subscriber = realtime_hub.subscribe(user_id, user_role, class_id)
 
     async def stream():
@@ -260,9 +271,8 @@ async def realtime_events(request: Request, class_id: UUID = Query(), session_id
                     payload = await asyncio.wait_for(subscriber.queue.get(), timeout=15)
                     event_type = payload.get("type", "invalidate")
                     yield f"event: {event_type}\nid: {payload.get('id', '')}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
-                except TimeoutError:
-                    with SessionLocal() as session_db:
-                        active = session_db.scalar(select(LoginSession.id).where(LoginSession.token_hash == session_hash, LoginSession.revoked_at.is_(None), LoginSession.expires_at > now()).limit(1))
+                except asyncio.TimeoutError:
+                    active = await asyncio.to_thread(_events_session_active, session_hash)
                     if not active:
                         payload = {"id": uuid4().hex, "type": "auth_expired", "scopes": []}
                         yield f"event: auth_expired\nid: {payload['id']}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
@@ -1798,6 +1808,8 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
     preview_status = "READY" if suffix in PREVIEWABLE_FILE_SUFFIXES else "NOT_AVAILABLE"
     x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, material_type=selected_material_type, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
     db.add(x)
+    action = "SUBMISSION_FILE_UPLOADED" if selected_purpose == "SUBMISSION" else "ASSIGNMENT_FILE_UPLOADED"
+    audit(db, user, action, "assignment", str(aid), {"file_id": str(fid), "original_name": x.original_name})
     db.commit()
     return file_json(x, user.display_name)
 
@@ -1891,11 +1903,15 @@ def delete_file(fid: UUID, user: CsrfUser, db: Db):
         remaining = db.scalar(select(func.count()).select_from(FileObject).where(FileObject.assignment_id == assignment.id, FileObject.purpose == "REVIEW_CRITERIA", FileObject.active == True, FileObject.id != fid)) or 0  # noqa: E712
         if assignment.auto_review_enabled and not (assignment.auto_review_criteria_text or "").strip() and remaining == 0:
             raise ApiError(409, "REVIEW_CRITERIA_REQUIRED", "启用互评时必须保留标准文字或至少一个附件")
+    action = "SUBMISSION_FILE_DELETED" if file.purpose == "SUBMISSION" else "ASSIGNMENT_FILE_DELETED"
     if db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == fid).limit(1)):
         file.active = False
+        audit(db, user, action, "assignment", str(assignment.id), {"file_id": str(fid), "original_name": file.original_name})
         db.commit()
         return Response(status_code=204)
-    key = file.storage_path; db.delete(file); db.commit()
+    key = file.storage_path; original_name = file.original_name
+    audit(db, user, action, "assignment", str(assignment.id), {"file_id": str(fid), "original_name": original_name})
+    db.delete(file); db.commit()
     storage.delete_object(key)
     return Response(status_code=204)
 
@@ -1910,6 +1926,7 @@ def retype_file(fid: UUID, body: MaterialTypeIn, user: CsrfUser, db: Db):
     if body.material_type == "CRITERIA" and Path(file.original_name).suffix.lower() != ".md":
         raise ApiError(422, "CRITERIA_FILE_TYPE_INVALID", "判定标准仅支持 Markdown 文档")
     file.material_type = body.material_type
+    audit(db, user, "ASSIGNMENT_FILE_UPDATED", "assignment", str(assignment.id), {"file_id": str(fid), "material_type": body.material_type})
     db.commit()
     return file_json(file, user.display_name)
 

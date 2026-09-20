@@ -1,7 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useSessionStore } from './stores/session'
-import LoginView from './views/LoginView.vue'
-import ShellView from './views/ShellView.vue'
+
+const LoginView = () => import('./views/LoginView.vue')
+const ShellView = () => import('./views/ShellView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
