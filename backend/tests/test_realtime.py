@@ -65,3 +65,39 @@ def test_realtime_hub_polls_committed_events():
             await hub.stop()
 
     asyncio.run(scenario())
+
+
+def test_realtime_hub_sleeps_until_first_subscriber(monkeypatch):
+    async def scenario():
+        hub = RealtimeHub()
+        poll_count = 0
+
+        monkeypatch.setattr(hub, "_current_event_id", lambda: 0)
+
+        def events_after(_):
+            nonlocal poll_count
+            poll_count += 1
+            return []
+
+        monkeypatch.setattr(hub, "_events_after", events_after)
+        await hub.start()
+        try:
+            await asyncio.sleep(0.35)
+            assert poll_count == 0
+
+            subscriber = hub.subscribe(
+                "00000000-0000-0000-0000-000000000001",
+                "TEACHER",
+                "00000000-0000-0000-0000-000000000010",
+            )
+            await asyncio.sleep(0.6)
+            assert poll_count > 0
+
+            hub.unsubscribe(subscriber)
+            stopped_at = poll_count
+            await asyncio.sleep(2.2)
+            assert poll_count <= stopped_at + 1
+        finally:
+            await hub.stop()
+
+    asyncio.run(scenario())

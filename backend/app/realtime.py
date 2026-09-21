@@ -16,6 +16,7 @@ from app.models import RealtimeEvent
 
 
 POLL_INTERVAL_SECONDS = 0.25
+MAX_IDLE_POLL_INTERVAL_SECONDS = 2.0
 POLL_BATCH_SIZE = 200
 
 
@@ -63,6 +64,7 @@ class RealtimeHub:
         self._listener_task: asyncio.Task | None = None
         self._stopping = False
         self._last_event_id = 0
+        self._has_subscribers = asyncio.Event()
 
     async def start(self) -> None:
         if self._listener_task and not self._listener_task.done():
@@ -82,10 +84,13 @@ class RealtimeHub:
     def subscribe(self, user_id: UUID, role: str, class_id: UUID) -> Subscriber:
         subscriber = Subscriber(str(user_id), role, str(class_id), asyncio.Queue(maxsize=32))
         self._subscribers.add(subscriber)
+        self._has_subscribers.set()
         return subscriber
 
     def unsubscribe(self, subscriber: Subscriber) -> None:
         self._subscribers.discard(subscriber)
+        if not self._subscribers:
+            self._has_subscribers.clear()
 
     def dispatch(self, payload: dict) -> None:
         for subscriber in tuple(self._subscribers):
@@ -129,12 +134,21 @@ class RealtimeHub:
         delay = POLL_INTERVAL_SECONDS
         while not self._stopping:
             try:
+                if not self._subscribers:
+                    self._has_subscribers.clear()
+                    if not self._subscribers:
+                        await self._has_subscribers.wait()
+                    delay = POLL_INTERVAL_SECONDS
+
                 events = await asyncio.to_thread(self._events_after, self._last_event_id)
                 for event in events:
                     self.dispatch(event.payload)
                     self._last_event_id = event.id
-                delay = POLL_INTERVAL_SECONDS
-                await asyncio.sleep(0 if len(events) == POLL_BATCH_SIZE else POLL_INTERVAL_SECONDS)
+                if events:
+                    delay = POLL_INTERVAL_SECONDS
+                else:
+                    delay = min(delay * 2, MAX_IDLE_POLL_INTERVAL_SECONDS)
+                await asyncio.sleep(0 if len(events) == POLL_BATCH_SIZE else delay)
             except asyncio.CancelledError:
                 raise
             except Exception:

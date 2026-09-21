@@ -307,6 +307,84 @@ def test_submission_board_query_count_does_not_scale_with_class_size():
     assert len(statements) <= 10, f"提交看板执行了 {len(statements)} 条 SQL"
 
 
+def test_member_team_and_dashboard_queries_do_not_scale_with_list_size():
+    teacher, headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=headers, json={"semester": "批量查询", "name": "列表性能测试"}).json()
+    class_id = UUID(course["id"])
+    accounts = []
+    for index in range(8):
+        account = f"208801{index:02d}"
+        accounts.append(account)
+        response = teacher.post(
+            f"/api/v1/classes/{course['id']}/members",
+            headers=headers,
+            json={"student_no": account, "name": f"列表性能学生{index}"},
+        )
+        assert response.status_code == 201, response.text
+
+    with SessionLocal.begin() as db:
+        students = db.scalars(select(User).where(User.login_name.in_(accounts)).order_by(User.login_name)).all()
+        for index, student in enumerate(students):
+            team = Team(class_id=class_id, leader_id=student.id, name=f"性能小组{index}", normalized_name=f"性能小组{index}")
+            db.add(team)
+            db.flush()
+            db.add(TeamMember(team_id=team.id, class_id=class_id, user_id=student.id, role="LEADER"))
+
+    def count_request(path):
+        statements = []
+
+        def count_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", count_statement)
+        try:
+            response = teacher.get(path)
+        finally:
+            event.remove(engine, "before_cursor_execute", count_statement)
+        assert response.status_code == 200, response.text
+        return response, len(statements)
+
+    member_response, member_queries = count_request(f"/api/v1/classes/{course['id']}/members")
+    team_response, team_queries = count_request(f"/api/v1/teams?class_id={course['id']}")
+    assert member_response.json()["total"] == 8
+    assert team_response.json()["total"] == 8
+    assert member_queries <= 8, f"成员列表执行了 {member_queries} 条 SQL"
+    assert team_queries <= 12, f"团队列表执行了 {team_queries} 条 SQL"
+
+    assignment_payload = {
+        "class_id": course["id"],
+        "description": "验证仪表盘按作业数量批量统计",
+        "submitter_type": "INDIVIDUAL",
+        "due_at": "2099-01-01T00:00:00+08:00",
+        "publish": True,
+    }
+    first = teacher.post("/api/v1/assignments", headers=headers, json={**assignment_payload, "title": "仪表盘性能作业0"})
+    assert first.status_code == 201, first.text
+    _, baseline_queries = count_request(f"/api/v1/classes/{course['id']}/dashboard")
+    latest_assignment = first.json()
+    for index in range(1, 6):
+        response = teacher.post("/api/v1/assignments", headers=headers, json={**assignment_payload, "title": f"仪表盘性能作业{index}"})
+        assert response.status_code == 201, response.text
+        latest_assignment = response.json()
+    student, student_headers = login(accounts[0], accounts[0], "student")
+    uploaded = student.post(
+        f"/api/v1/assignments/{latest_assignment['id']}/files",
+        headers=student_headers,
+        files={"file": ("dashboard.pdf", b"dashboard", "application/pdf")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    submitted = student.post(
+        f"/api/v1/assignments/{latest_assignment['id']}/submission",
+        headers={**student_headers, "Idempotency-Key": "dashboard-query-count"},
+        json={"file_ids": [uploaded.json()["id"]]},
+    )
+    assert submitted.status_code == 201, submitted.text
+    dashboard_response, populated_queries = count_request(f"/api/v1/classes/{course['id']}/dashboard")
+    assert len(dashboard_response.json()["assignment_history"]) == 6
+    assert dashboard_response.json()["summary"]["latest_submission"]["assignment_id"] == latest_assignment["id"]
+    assert populated_queries <= baseline_queries + 1, f"仪表盘 SQL 从 {baseline_queries} 增长到 {populated_queries}"
+
+
 def test_published_assignment_can_change_class():
     teacher, headers = login("teacher", "123456", "teacher")
     first = teacher.post("/api/v1/classes", headers=headers, json={"semester": "班级调整", "name": "原教学班"}).json()

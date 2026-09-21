@@ -349,15 +349,19 @@ def class_json(x: TeachingClass, *, member_count: int | None = None, assignment_
     return item
 
 
+def team_payload(x: Team, viewer: User, leader_name: str, member_count: int, topic: Topic | None, pending_count: int, topic_public: bool, own_team_id: UUID | None):
+    can_view_topic = viewer.role == "TEACHER" or own_team_id == x.id or topic_public
+    return {"id": str(x.id), "name": x.name, "leader_id": str(x.leader_id), "leader_name": leader_name, "member_count": member_count, "open_recruitment": x.open_recruitment, "status": x.status, "is_leader": x.leader_id == viewer.id, "pending_count": pending_count, "topic": None if not topic or not can_view_topic else {"id": str(topic.id), "name": topic.name, "description": topic.description, "status": topic.review_status, "reason": topic.review_reason}, "version": x.version}
+
+
 def team_json(db: Session, x: Team, viewer: User):
     leader = db.get(User, x.leader_id)
     count = db.scalar(select(func.count()).select_from(TeamMember).where(TeamMember.team_id == x.id, TeamMember.status == "ACTIVE")) or 0
     topic = db.scalar(select(Topic).where(Topic.team_id == x.id))
     pending = db.scalar(select(func.count()).select_from(TeamRequest).where(TeamRequest.team_id == x.id, TeamRequest.status == "PENDING")) or 0
     course = db.get(TeachingClass, x.class_id)
-    own_team = membership(db, x.class_id, viewer.id)
-    can_view_topic = viewer.role == "TEACHER" or (own_team and own_team[1].id == x.id) or bool(course and course.topic_public)
-    return {"id": str(x.id), "name": x.name, "leader_id": str(x.leader_id), "leader_name": leader.display_name, "member_count": count, "open_recruitment": x.open_recruitment, "status": x.status, "is_leader": x.leader_id == viewer.id, "pending_count": pending, "topic": None if not topic or not can_view_topic else {"id": str(topic.id), "name": topic.name, "description": topic.description, "status": topic.review_status, "reason": topic.review_reason}, "version": x.version}
+    own_team = membership(db, x.class_id, viewer.id) if viewer.role == "STUDENT" else None
+    return team_payload(x, viewer, leader.display_name, count, topic, pending, bool(course and course.topic_public), own_team[1].id if own_team else None)
 
 
 class LoginIn(BaseModel):
@@ -661,10 +665,16 @@ def dashboard(cid: UUID, user: CurrentUser, db: Db):
         .order_by(Assignment.due_at.desc())
         .limit(6)
     ).all()))
+    recent_assignment_ids = [item.id for item in recent_assignments]
+    submitted_counts = dict(db.execute(
+        select(Submission.assignment_id, func.count())
+        .where(Submission.assignment_id.in_(recent_assignment_ids), Submission.status == "SUBMITTED")
+        .group_by(Submission.assignment_id)
+    ).all()) if recent_assignment_ids else {}
     assignment_history = []
     for item in recent_assignments:
         expected = members if item.submitter_type == "INDIVIDUAL" else teams
-        submitted = db.scalar(select(func.count()).select_from(Submission).where(Submission.assignment_id == item.id, Submission.status == "SUBMITTED")) or 0
+        submitted = submitted_counts.get(item.id, 0)
         assignment_history.append({
             "id": str(item.id),
             "title": item.title,
@@ -689,9 +699,9 @@ def dashboard(cid: UUID, user: CurrentUser, db: Db):
                     SubmissionAssessment.kind == "TEACHER",
                     SubmissionAssessment.status == "PUBLISHED",
                 ).exists(),
+                select(VersionFile.file_id).where(VersionFile.version_id == SubmissionVersion.id).exists(),
             )
         ).all()
-        submitted_rows = [row for row in submitted_rows if db.scalar(select(VersionFile.file_id).where(VersionFile.version_id == row.SubmissionVersion.id).limit(1))]
         if submitted_rows:
             assignment, version, submission_item = min(
                 submitted_rows,
@@ -805,8 +815,16 @@ def import_result(cid: UUID, bid: UUID, user: CurrentUser, db: Db):
 @app.get("/api/v1/classes/{cid}/members")
 def members(cid: UUID, user: CurrentUser, db: Db):
     require_class(db, user, cid)
-    rows = db.execute(select(ClassMember, User).join(User).where(ClassMember.class_id == cid, ClassMember.status == "ACTIVE").order_by(User.login_name)).all()
-    items = [{"id": str(s.id), "student_no": s.login_name, "name": s.display_name, "status": m.status, "team": membership(db, cid, s.id)[1].name if membership(db, cid, s.id) else None, "joined_at": m.joined_at.isoformat()} for m, s in rows]
+    rows = db.execute(
+        select(ClassMember, User, Team.name)
+        .select_from(ClassMember)
+        .join(User, User.id == ClassMember.user_id)
+        .outerjoin(TeamMember, and_(TeamMember.class_id == cid, TeamMember.user_id == User.id, TeamMember.status == "ACTIVE"))
+        .outerjoin(Team, and_(Team.id == TeamMember.team_id, Team.status == "ACTIVE"))
+        .where(ClassMember.class_id == cid, ClassMember.status == "ACTIVE")
+        .order_by(User.login_name)
+    ).all()
+    items = [{"id": str(student.id), "student_no": student.login_name, "name": student.display_name, "status": member.status, "team": team_name, "joined_at": member.joined_at.isoformat()} for member, student, team_name in rows]
     return {"items": items, "total": len(items)}
 
 
@@ -904,14 +922,35 @@ def reset_password(cid: UUID, uid: UUID, user: CsrfUser, db: Db):
 
 @app.get("/api/v1/teams")
 def teams(user: CurrentUser, db: Db, class_id: UUID = Query()):
-    require_class(db, user, class_id)
+    course = require_class(db, user, class_id)
     query = select(Team).where(Team.class_id == class_id, Team.status == "ACTIVE")
+    own_team = None
     if user.role == "STUDENT":
         own_team = membership(db, class_id, user.id)
         if own_team:
             query = query.where(Team.id == own_team[1].id)
     items = db.scalars(query.order_by(Team.created_at)).all()
-    return {"items": [team_json(db, x, user) for x in items], "total": len(items)}
+    if not items:
+        return {"items": [], "total": 0}
+    team_ids = [item.id for item in items]
+    leaders = {item.id: item.display_name for item in db.scalars(select(User).where(User.id.in_({team.leader_id for team in items}))).all()}
+    member_counts = dict(db.execute(
+        select(TeamMember.team_id, func.count())
+        .where(TeamMember.team_id.in_(team_ids), TeamMember.status == "ACTIVE")
+        .group_by(TeamMember.team_id)
+    ).all())
+    topics = {item.team_id: item for item in db.scalars(select(Topic).where(Topic.team_id.in_(team_ids))).all()}
+    pending_counts = dict(db.execute(
+        select(TeamRequest.team_id, func.count())
+        .where(TeamRequest.team_id.in_(team_ids), TeamRequest.status == "PENDING")
+        .group_by(TeamRequest.team_id)
+    ).all())
+    own_team_id = own_team[1].id if own_team else None
+    payloads = [
+        team_payload(item, user, leaders[item.leader_id], member_counts.get(item.id, 0), topics.get(item.id), pending_counts.get(item.id, 0), course.topic_public, own_team_id)
+        for item in items
+    ]
+    return {"items": payloads, "total": len(payloads)}
 
 
 @app.post("/api/v1/teams", status_code=201)
