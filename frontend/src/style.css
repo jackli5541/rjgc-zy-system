@@ -66,6 +66,18 @@ button, input, textarea { letter-spacing: 0; }
 .page-title h1 { margin: 3px 0 4px; color: #152536; font-size: 28px; line-height: 1.25; letter-spacing: 0; }
 .page-title p { margin: 0; color: #778698; }
 .eyebrow { color: #1769aa; font-size: 12px; font-weight: 700; }
+
+/* Give large desktop displays more usable canvas without scaling content indefinitely. */
+@media (min-width: 1600px) {
+  :root { --shell-width: 1500px; --page-gutter: 44px; }
+  .page-title h1 { font-size: 30px; }
+  .top-nav button { padding-inline: 21px; }
+}
+
+@media (min-width: 2200px) {
+  :root { --shell-width: 1680px; --page-gutter: 52px; }
+}
+
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
 .stat-card { min-height: 132px; display: flex; align-items: flex-start; gap: 16px; padding: 22px; border: 1px solid #e8edf3; border-radius: 8px; background: #fff; box-shadow: 0 2px 9px rgba(16,41,67,.035); }
 .stat-icon { width: 42px; height: 42px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; font-size: 20px; }
