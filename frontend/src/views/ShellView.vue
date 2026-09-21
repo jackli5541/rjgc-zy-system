@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { ApartmentOutlined, ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, ControlOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
@@ -77,6 +77,7 @@ const onlineWorkspaceData = ref(null)
 const boardFilter = ref('ALL')
 const boardQuery = ref('')
 const boardTeamFilter = ref('ALL')
+const submissionBoardPane = ref(null)
 const assignmentDetailTab = ref('details')
 const DRAWER_EXPANDED_STORAGE_KEY = 'assignment-drawers-expanded'
 const assignmentDrawerExpanded = ref(localStorage.getItem(DRAWER_EXPANDED_STORAGE_KEY) === 'true')
@@ -215,6 +216,17 @@ const teacherSubmissionSummary = computed(() => {
     late: submitted.filter(item => item.is_late).length
   }
 })
+async function focusSubmissionStatus(filter) {
+  boardFilter.value = filter
+  boardQuery.value = ''
+  boardTeamFilter.value = 'ALL'
+  await nextTick()
+  const pane = submissionBoardPane.value
+  if (!pane) return
+  const target = pane.querySelector('.submission-group tbody tr') || pane
+  const top = target.getBoundingClientRect().top + window.scrollY - 24
+  window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+}
 const canSubmitAssignment = computed(() => {
   const assignment = selectedAssignment.value
   if (!assignment) return false
@@ -1245,13 +1257,15 @@ provide(shellContextKey, {
               <template v-if="role==='TEACHER'">
                 <section class="assignment-pane teacher-submission-pane">
                   <div class="assignment-pane-heading"><h2>提交概览</h2><a-space wrap><a-button :loading="exportingAssignment" @click="downloadAssignmentSubmissions"><DownloadOutlined/> 下载全部学生作业</a-button><a-button v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" :href="`/api/v1/exports/grades.xlsx?class_id=${classId}&assignment_id=${selectedAssignment.id}`"><DownloadOutlined/> 导出所有学生成绩</a-button></a-space></div>
-                  <div class="detail-metrics"><div><span>应提交</span><strong>{{teacherSubmissionSummary.total}}</strong></div><div><span>已提交</span><strong>{{teacherSubmissionSummary.submitted}}</strong></div><div><span>未提交</span><strong>{{teacherSubmissionSummary.pending}}</strong></div><div><span>迟交</span><strong>{{teacherSubmissionSummary.late}}</strong></div></div>
+                  <div class="detail-metrics"><div class="detail-metric" role="button" tabindex="0" aria-label="查看全部应提交记录" @click="focusSubmissionStatus('ALL')" @keydown.enter.prevent="focusSubmissionStatus('ALL')" @keydown.space.prevent="focusSubmissionStatus('ALL')"><span>应提交</span><strong>{{teacherSubmissionSummary.total}}</strong></div><div class="detail-metric" role="button" tabindex="0" aria-label="查看已提交记录" @click="focusSubmissionStatus('SUBMITTED')" @keydown.enter.prevent="focusSubmissionStatus('SUBMITTED')" @keydown.space.prevent="focusSubmissionStatus('SUBMITTED')"><span>已提交</span><strong>{{teacherSubmissionSummary.submitted}}</strong></div><div class="detail-metric" role="button" tabindex="0" aria-label="查看未提交记录" @click="focusSubmissionStatus('NOT_SUBMITTED')" @keydown.enter.prevent="focusSubmissionStatus('NOT_SUBMITTED')" @keydown.space.prevent="focusSubmissionStatus('NOT_SUBMITTED')"><span>未提交</span><strong>{{teacherSubmissionSummary.pending}}</strong></div><div class="detail-metric" role="button" tabindex="0" aria-label="查看迟交记录" @click="focusSubmissionStatus('LATE')" @keydown.enter.prevent="focusSubmissionStatus('LATE')" @keydown.space.prevent="focusSubmissionStatus('LATE')"><span>迟交</span><strong>{{teacherSubmissionSummary.late}}</strong></div></div>
                 </section>
                 <section class="assignment-pane">
+                  <div ref="submissionBoardPane">
                   <div class="assignment-pane-heading"><h2>提交明细</h2></div>
                   <div class="board-toolbar"><a-input-search v-model:value="boardQuery" allow-clear placeholder="搜索姓名或学号"/><a-select v-model:value="boardTeamFilter" :options="boardTeamOptions"/><a-segmented v-model:value="boardFilter" :options="[{label:'全部',value:'ALL'},{label:'未提交',value:'NOT_SUBMITTED'},{label:'已提交',value:'SUBMITTED'},{label:'迟交',value:'LATE'},{label:'未批改',value:'PENDING_REVIEW'},{label:'已批改',value:'REVIEWED'}]"/></div>
                   <a-empty v-if="!groupedBoard.length" class="detail-empty" description="没有符合条件的提交记录"/>
                   <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column title="最终成绩"><template #default="{record}"><span v-if="record.final_grade" class="grade-result" :class="`source-${(record.grade_source||'unknown').toLowerCase()}`"><strong>{{record.final_grade}}</strong><span>{{gradeSourceLabel(record.grade_source)}}</span></span><a-tag v-else :color="gradingStatusColor(record.grading_status)">{{statusLabel(record.grading_status)}}</a-tag><a-tag v-if="record.grade_carried_forward" color="blue">待重新评分</a-tag></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
+                  </div>
                 </section>
               </template>
               <template v-else>
