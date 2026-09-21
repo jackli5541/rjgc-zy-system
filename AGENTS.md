@@ -2,12 +2,12 @@
 
 ## 项目结构与模块组织
 
-- `backend/app/`：FastAPI 应用、SQLAlchemy 模型、配置、安全工具、初始化逻辑和后台任务。
+- `backend/app/`：FastAPI 应用（当前业务路由主要在 `main.py`）、SQLAlchemy 模型、配置与安全工具；`storage.py` 对接阿里云 OSS，`worker.py` 处理后台任务，`archive_exports.py` 生成异步 ZIP 导出。
 - `backend/migrations/versions/`：按顺序保存 Alembic 数据库迁移；持久化模型变化时应同步新增迁移。
 - `backend/tests/`：pytest 接口及业务流程测试。
-- `frontend/src/`：Vue 3 页面、路由、Pinia 会话状态、API 客户端和全局样式。
+- `frontend/src/`：Vue 3 页面（`views/shell/` 为主要业务页面）、组件、路由、Pinia 会话状态、API 客户端和全局样式。
 - `frontend/tests/e2e/`：Playwright 端到端测试。
-- `docs/`：架构、接口、部署和验收文档；`scripts/`：Windows 初始化、启动和停止脚本。
+- `docs/`：架构、接口、部署和验收文档，部分早期方案仅供历史参考；`scripts/`：Windows 本地初始化、启动和停止脚本；根目录 `start-server.bat`：Windows 服务器托管前端构建产物的入口。
 
 ## 构建、测试与开发命令
 
@@ -18,9 +18,11 @@
 - `.\scripts\stop-local.ps1`：停止本地服务。
 - `cd frontend; npm run dev`：仅启动前端开发服务器。
 - `cd frontend; npm run build`：生成前端生产构建。
+- `.\start-server.bat`：Windows 服务器启动 API 并托管 `frontend\dist`（需先构建前端）。
 - `docker compose --profile test build`：构建隔离的测试镜像。
 - `docker compose --profile test run --rm test-api pytest -q`：运行后端测试。
-跳过所有e2e测试
+
+项目约定跳过所有 E2E 测试，不运行 Playwright 测试命令。
 
 
 ## 编码风格与命名规范
@@ -29,7 +31,7 @@ Python 使用 4 空格缩进并遵循现有 PEP 8 风格：函数采用 `snake_c
 
 ## 测试规范
 
-后端测试命名为 `test_*.py`，Playwright 测试命名为 `*.spec.js`。接口变更应覆盖权限、参数校验、数据库副作用及状态码；用户流程或响应式界面变化应补充浏览器测试。测试必须使用 Compose 的独立测试环境，禁止连接开发数据库。目前没有强制覆盖率门槛，但所有行为变更都应有回归测试。
+后端测试命名为 `test_*.py`，Playwright 测试命名为 `*.spec.js`。接口变更应覆盖权限、参数校验、数据库副作用及状态码；用户流程或响应式界面变化可补充浏览器测试用例，但按项目约定不运行 E2E。需要数据库的后端测试必须使用 Compose 的独立测试环境，禁止连接开发数据库。目前没有强制覆盖率门槛，但所有行为变更都应有回归测试。
 
 ## 提交与拉取请求规范
 
