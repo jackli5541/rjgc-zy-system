@@ -303,6 +303,35 @@ class SubmissionDocument(Base):
     __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_workspace_document_name"),)
 
 
+class MarkdownAsset(Base):
+    __tablename__ = "markdown_assets"
+    id: Mapped[UUID] = uuid_pk()
+    assignment_id: Mapped[UUID] = mapped_column(ForeignKey("assignments.id"), index=True)
+    workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("submission_workspaces.id"), index=True)
+    uploader_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    storage_path: Mapped[str] = mapped_column(String(255), unique=True)
+    original_name: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(String(64))
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    orphaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SubmissionDocumentAsset(Base):
+    __tablename__ = "submission_document_assets"
+    document_id: Mapped[UUID] = mapped_column(ForeignKey("submission_documents.id"), primary_key=True)
+    asset_id: Mapped[UUID] = mapped_column(ForeignKey("markdown_assets.id"), primary_key=True, index=True)
+
+
+class FileObjectAsset(Base):
+    __tablename__ = "file_object_assets"
+    file_id: Mapped[UUID] = mapped_column(ForeignKey("file_objects.id"), primary_key=True)
+    asset_id: Mapped[UUID] = mapped_column(ForeignKey("markdown_assets.id"), primary_key=True, index=True)
+
+
 class SubmissionAssessment(Base):
     __tablename__ = "submission_assessments"
     id: Mapped[UUID] = uuid_pk()

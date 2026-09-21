@@ -12,7 +12,9 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("UPDATE submission_documents SET source_images_checked_at = NULL WHERE source_file_id IS NOT NULL")
-    op.add_column("submission_versions", sa.Column("grade_cap", sa.String(length=1), nullable=True))
+    bind = op.get_bind()
+    if "grade_cap" not in {column["name"] for column in sa.inspect(bind).get_columns("submission_versions")}:
+        op.add_column("submission_versions", sa.Column("grade_cap", sa.String(length=1), nullable=True))
 
 
 def downgrade() -> None:

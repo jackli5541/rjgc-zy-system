@@ -19,7 +19,12 @@ def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "mssql":
         raise RuntimeError("This schema supports SQL Server only.")
-    Base.metadata.create_all(bind=bind)
+    later_tables = {
+        "submission_workspaces", "submission_documents",
+        "teaching_material_folders", "teaching_materials", "role_menu_permissions",
+        "markdown_assets", "submission_document_assets", "file_object_assets",
+    }
+    Base.metadata.create_all(bind=bind, tables=[table for table in Base.metadata.sorted_tables if table.name not in later_tables])
 
 
 def downgrade() -> None:

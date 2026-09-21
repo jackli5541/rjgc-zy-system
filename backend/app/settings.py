@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     secure_cookies: bool = False
     trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"
     max_file_size_bytes: int = 500 * 1024 * 1024
+    markdown_max_bytes: int = 5 * 1024 * 1024
+    markdown_image_max_bytes: int = 10 * 1024 * 1024
+    markdown_image_max_pixels: int = 40_000_000
+    markdown_asset_orphan_hours: int = 24
     frontend_dist: Path = PROJECT_ROOT / "frontend" / "dist"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

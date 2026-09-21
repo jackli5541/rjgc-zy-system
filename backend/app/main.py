@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio, csv, html, io, json, mimetypes, os, re, secrets
+import asyncio, csv, hashlib, html, io, json, mimetypes, os, re, secrets
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
@@ -18,7 +18,7 @@ import anyio
 from fastapi import Cookie, Depends, FastAPI, File, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 import bleach
 import zipfile
@@ -26,6 +26,7 @@ from oss2.exceptions import NoSuchKey, OssError
 import tempfile
 from tempfile import TemporaryFile
 from openpyxl import Workbook, load_workbook
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -33,7 +34,8 @@ from sqlalchemy.orm import Session, aliased, load_only
 
 from app.database import SessionLocal, get_db
 from app.grading import final_score, finalize_campaign
-from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, Notification, PeerReview, ReviewAssignment, ReviewCampaign, RoleMenuPermission, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionVersion, SubmissionWorkspace, TeachingClass, TeachingMaterial, TeachingMaterialFolder, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.markdown_assets import extract_assets
+from app.models import Assignment, AuditLog, BackgroundJob, ClassJoinRequest, ClassMember, FileObject, FileObjectAsset, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, MarkdownAsset, Notification, PeerReview, ReviewAssignment, ReviewCampaign, RoleMenuPermission, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, SubmissionWorkspace, TeachingClass, TeachingMaterial, TeachingMaterialFolder, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 from app import storage
@@ -65,6 +67,14 @@ SAFE_HTML_ATTRIBUTES = {
 PREVIEWABLE_FILE_SUFFIXES = {".md"}
 DOWNLOAD_ONLY_FILE_SUFFIXES = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
 STUDENT_UPLOAD_FILE_SUFFIXES = PREVIEWABLE_FILE_SUFFIXES | {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MARKDOWN_ASSET_URL_PATTERN = re.compile(r"/api/v1/markdown-assets/([0-9a-fA-F-]{36})/content(?:\?[^\s)\"']*)?")
+BASE64_IMAGE_PATTERN = re.compile(r"data:image/[^;,\s]+;base64,", re.IGNORECASE)
+MARKDOWN_IMAGE_FORMATS = {
+    "PNG": (".png", "image/png"),
+    "JPEG": (".jpg", "image/jpeg"),
+    "GIF": (".gif", "image/gif"),
+    "WEBP": (".webp", "image/webp"),
+}
 MENU_CATALOG = [
     {"key": "overview", "labels": {"TEACHER": "总览", "STUDENT": "总览"}, "roles": ["TEACHER", "STUDENT"]},
     {"key": "classes", "labels": {"TEACHER": "教学班"}, "roles": ["TEACHER"]},
@@ -420,7 +430,7 @@ class SubmissionDocumentIn(BaseModel):
 class SubmissionDocumentUpdateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: int = Field(ge=1)
-    markdown_content: str = Field(max_length=settings.max_file_size_bytes)
+    markdown_content: str = Field(max_length=settings.markdown_max_bytes)
 class ReasonIn(BaseModel): reason: str = Field(min_length=2, max_length=500)
 class PasswordIn(BaseModel): current_password: str; new_password: str = Field(min_length=8, max_length=128)
 class ClassJoinIn(BaseModel): invite_code: str = Field(min_length=4, max_length=12)
@@ -1362,7 +1372,12 @@ def delete_assignment(aid: UUID, user: CsrfUser, db: Db):
     teacher(user); assignment = db.scalar(select(Assignment).where(Assignment.id == aid).with_for_update())
     if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_writable_class(db, user, assignment.class_id)
-    keys = [item.storage_path for item in db.scalars(select(FileObject).where(FileObject.assignment_id == aid)).all()]
+    assignment_files = list(db.scalars(select(FileObject).where(FileObject.assignment_id == aid)).all())
+    keys = [item.storage_path for item in assignment_files]
+    markdown_assets = list(db.scalars(select(MarkdownAsset).where(MarkdownAsset.assignment_id == aid)).all())
+    asset_keys = [item.storage_path for item in markdown_assets]
+    cleanup_keys = keys + asset_keys
+    cleanup_job = BackgroundJob(kind="OSS_DELETE", payload={"keys": cleanup_keys}, available_at=now() + timedelta(minutes=5)) if cleanup_keys else None
     title = assignment.title
     audit(db, user, "ASSIGNMENT_DELETED", "assignment", str(aid), {"title": title})
     submission_ids = select(Submission.id).where(Submission.assignment_id == aid)
@@ -1381,11 +1396,35 @@ def delete_assignment(aid: UUID, user: CsrfUser, db: Db):
     db.execute(delete(Submission).where(Submission.assignment_id == aid))
     db.execute(delete(GradeCoefficient).where(GradeCoefficient.assignment_id == aid))
     db.execute(delete(ReviewCampaign).where(ReviewCampaign.assignment_id == aid))
+    asset_ids = [item.id for item in markdown_assets]
+    file_ids = [item.id for item in assignment_files]
+    workspace_ids = select(SubmissionWorkspace.id).where(SubmissionWorkspace.assignment_id == aid)
+    document_ids = select(SubmissionDocument.id).where(SubmissionDocument.workspace_id.in_(workspace_ids))
+    if asset_ids:
+        db.execute(delete(SubmissionDocumentAsset).where(SubmissionDocumentAsset.asset_id.in_(asset_ids)))
+        db.execute(delete(FileObjectAsset).where(FileObjectAsset.asset_id.in_(asset_ids)))
+    if file_ids:
+        db.execute(delete(FileObjectAsset).where(FileObjectAsset.file_id.in_(file_ids)))
+    db.execute(delete(SubmissionDocumentAsset).where(SubmissionDocumentAsset.document_id.in_(document_ids)))
+    db.execute(delete(MarkdownAsset).where(MarkdownAsset.assignment_id == aid))
     db.execute(delete(FileObject).where(FileObject.assignment_id == aid))
     db.delete(assignment)
+    if cleanup_job:
+        db.add(cleanup_job)
     db.commit()
-    for key in keys:
-        storage.delete_object(key)
+    if cleanup_job:
+        failed_keys = []
+        for key in cleanup_keys:
+            try:
+                storage.delete_object(key)
+            except Exception:
+                failed_keys.append(key)
+        with SessionLocal.begin() as cleanup_db:
+            persisted_job = cleanup_db.get(BackgroundJob, cleanup_job.id)
+            if persisted_job:
+                persisted_job.payload = {"keys": failed_keys}
+                persisted_job.status = "PENDING" if failed_keys else "COMPLETED"
+                persisted_job.last_error = "OSS 对象删除失败，等待重试" if failed_keys else None
     return Response(status_code=204)
 
 
@@ -1421,6 +1460,68 @@ def document_content_json(db: Session, item: SubmissionDocument, locked: bool = 
     result = document_json(db, item, locked)
     result["markdown_content"] = "" if locked else item.markdown_content
     return result
+
+
+def markdown_asset_ids(value: str) -> set[UUID]:
+    result = set()
+    for raw_id in MARKDOWN_ASSET_URL_PATTERN.findall(value):
+        try:
+            result.add(UUID(raw_id))
+        except ValueError:
+            continue
+    return result
+
+
+def mark_asset_orphan_if_unused(db: Session, asset: MarkdownAsset) -> None:
+    has_document = db.scalar(select(SubmissionDocumentAsset.asset_id).where(SubmissionDocumentAsset.asset_id == asset.id).limit(1))
+    has_file = db.scalar(select(FileObjectAsset.asset_id).where(FileObjectAsset.asset_id == asset.id).limit(1))
+    asset.orphaned_at = None if has_document or has_file else (asset.orphaned_at or now())
+
+
+def remove_file_asset_links(db: Session, file_ids: list[UUID]) -> None:
+    if not file_ids:
+        return
+    asset_ids = set(db.scalars(select(FileObjectAsset.asset_id).where(FileObjectAsset.file_id.in_(file_ids))).all())
+    db.execute(delete(FileObjectAsset).where(FileObjectAsset.file_id.in_(file_ids)))
+    db.flush()
+    if asset_ids:
+        for asset in db.scalars(select(MarkdownAsset).where(MarkdownAsset.id.in_(asset_ids))).all():
+            mark_asset_orphan_if_unused(db, asset)
+
+
+def sync_document_assets(db: Session, assignment: Assignment, workspace: SubmissionWorkspace, document: SubmissionDocument, markdown_content: str) -> set[UUID]:
+    requested = markdown_asset_ids(markdown_content)
+    assets = {item.id: item for item in db.scalars(select(MarkdownAsset).where(MarkdownAsset.id.in_(requested))).all()} if requested else {}
+    if set(assets) != requested or any(item.assignment_id != assignment.id for item in assets.values()):
+        raise ApiError(422, "MARKDOWN_ASSET_INVALID", "Markdown 中包含不存在或不属于当前作业的图片")
+    source_asset_ids = set()
+    foreign = [item.id for item in assets.values() if item.workspace_id != workspace.id]
+    if foreign:
+        source_asset_ids = set(db.scalars(
+            select(FileObjectAsset.asset_id)
+            .join(FileObject, FileObject.id == FileObjectAsset.file_id)
+            .where(
+                FileObjectAsset.asset_id.in_(foreign),
+                FileObject.assignment_id == assignment.id,
+                FileObject.purpose == "ATTACHMENT",
+                FileObject.active == True,  # noqa: E712
+                or_(FileObject.material_type.is_(None), FileObject.material_type != "CRITERIA"),
+            )
+        ).all())
+    if any(item.workspace_id != workspace.id and item.id not in source_asset_ids for item in assets.values()):
+        raise ApiError(403, "MARKDOWN_ASSET_FORBIDDEN", "不能引用其他工作区的图片")
+
+    existing = set(db.scalars(select(SubmissionDocumentAsset.asset_id).where(SubmissionDocumentAsset.document_id == document.id)).all())
+    for asset_id in requested - existing:
+        db.add(SubmissionDocumentAsset(document_id=document.id, asset_id=asset_id))
+        assets[asset_id].orphaned_at = None
+    removed = existing - requested
+    if removed:
+        db.execute(delete(SubmissionDocumentAsset).where(SubmissionDocumentAsset.document_id == document.id, SubmissionDocumentAsset.asset_id.in_(removed)))
+        db.flush()
+        for asset in db.scalars(select(MarkdownAsset).where(MarkdownAsset.id.in_(removed))).all():
+            mark_asset_orphan_if_unused(db, asset)
+    return requested
 
 
 def workspace_json(db: Session, workspace: SubmissionWorkspace, user: User) -> dict:
@@ -1466,6 +1567,9 @@ def check_source_images(db: Session, workspace: SubmissionWorkspace, document: S
     document.markdown_content = restored
     document.source_images_checked_at = now()
     if changed:
+        assignment = db.get(Assignment, workspace.assignment_id)
+        if assignment:
+            sync_document_assets(db, assignment, workspace, document, restored)
         document.revision += 1
         document.updated_by = user.id
     return True
@@ -1479,17 +1583,18 @@ def remove_criteria_workspace_documents(db: Session, workspace: SubmissionWorksp
 
 
 def restore_embedded_images(template: str, draft: str) -> str:
+    image_source = r"(?:data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+|/api/v1/markdown-assets/[0-9a-fA-F-]{36}/content)"
     image_pattern = re.compile(
-        r"!\[[^\]\r\n]*\]\(data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+\)"
-        r"|<img\b[^>]*\bsrc\s*=\s*([\"'])data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+\1[^>]*>",
+        rf"!\[[^\]\r\n]*\]\({image_source}\)"
+        rf"|<img\b[^>]*\bsrc\s*=\s*([\"']){image_source}\1[^>]*>",
         re.IGNORECASE,
     )
-    data_url_pattern = re.compile(r"data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+", re.IGNORECASE)
+    source_pattern = re.compile(image_source, re.IGNORECASE)
     result = draft
     for match in image_pattern.finditer(template):
         image_markdown = match.group(0)
-        data_url = data_url_pattern.search(image_markdown)
-        if data_url and data_url.group(0) in result: continue
+        source_url = source_pattern.search(image_markdown)
+        if source_url and source_url.group(0) in result: continue
         prefix_lines = [line for line in template[:match.start()].splitlines() if line.strip()]
         anchor = next((line for line in reversed(prefix_lines) if line in result), None)
         if anchor:
@@ -1597,13 +1702,74 @@ def get_workspace_document(aid: UUID, document_id: UUID, user: CurrentUser, db: 
     return document_content_json(db, document)
 
 
+@app.post("/api/v1/assignments/{aid}/workspace/documents/{document_id}/images", status_code=201)
+def upload_workspace_image(aid: UUID, document_id: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...)):
+    assignment, workspace, _, _ = require_workspace_document(db, aid, document_id, user)
+    asset_id = uuid4()
+    temporary = Path(tempfile.gettempdir()) / f"markdown-image-{asset_id.hex}.upload"
+    digest = hashlib.sha256()
+    size = 0
+    storage_path = None
+    try:
+        with temporary.open("wb") as output:
+            while chunk := file.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.markdown_image_max_bytes:
+                    raise ApiError(413, "MARKDOWN_IMAGE_TOO_LARGE", "图片不能超过 10 MB")
+                digest.update(chunk)
+                output.write(chunk)
+        if size == 0:
+            raise ApiError(422, "MARKDOWN_IMAGE_EMPTY", "图片内容为空")
+        try:
+            with Image.open(temporary) as image:
+                image_format = image.format
+                width, height = image.size
+                if image_format not in MARKDOWN_IMAGE_FORMATS:
+                    raise ApiError(422, "MARKDOWN_IMAGE_TYPE_INVALID", "仅支持 PNG、JPEG、GIF 或 WebP 图片")
+                if width <= 0 or height <= 0 or width * height > settings.markdown_image_max_pixels:
+                    raise ApiError(422, "MARKDOWN_IMAGE_DIMENSIONS_INVALID", "图片像素尺寸过大")
+                image.verify()
+        except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+            raise ApiError(422, "MARKDOWN_IMAGE_INVALID", "图片内容损坏或格式不受支持")
+        suffix, mime_type = MARKDOWN_IMAGE_FORMATS[image_format]
+        storage_path = f"markdown-assets/{assignment.id}/{workspace.id}/{asset_id.hex}{suffix}"
+        storage.put_object(storage_path, temporary)
+        asset = MarkdownAsset(
+            id=asset_id, assignment_id=assignment.id, workspace_id=workspace.id, uploader_id=user.id,
+            storage_path=storage_path, original_name=Path(file.filename or f"image{suffix}").name,
+            mime_type=mime_type, size_bytes=size, sha256=digest.hexdigest(), width=width, height=height,
+            orphaned_at=now(),
+        )
+        db.add(asset)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            storage.delete_object(storage_path)
+            raise
+        return {
+            "id": str(asset.id), "url": f"/api/v1/markdown-assets/{asset.id}/content",
+            "name": asset.original_name, "mime_type": asset.mime_type, "size_bytes": asset.size_bytes,
+            "width": asset.width, "height": asset.height,
+        }
+    finally:
+        file.file.close()
+        temporary.unlink(missing_ok=True)
+
+
 @app.put("/api/v1/assignments/{aid}/workspace/documents/{document_id}")
 def update_workspace_document(aid: UUID, document_id: UUID, data: SubmissionDocumentUpdateIn, user: CsrfUser, db: Db):
     assignment, workspace, document, _ = require_workspace_document(db, aid, document_id, user)
     locked = db.scalar(select(SubmissionDocument).where(SubmissionDocument.id == document.id).with_for_update())
     if locked.revision != data.revision:
         raise ApiError(409, "DOCUMENT_VERSION_CONFLICT", f"{db.get(User, locked.updated_by).display_name} 已更新此文档，请刷新后继续", {"document": document_json(db, locked)})
-    locked.markdown_content = data.markdown_content.replace("\x00", "")
+    markdown_content = data.markdown_content.replace("\x00", "")
+    if len(markdown_content.encode("utf-8")) > settings.markdown_max_bytes:
+        raise ApiError(413, "MARKDOWN_TOO_LARGE", "Markdown 正文不能超过 5 MB")
+    if BASE64_IMAGE_PATTERN.search(markdown_content):
+        raise ApiError(422, "MARKDOWN_BASE64_IMAGE_FORBIDDEN", "请重新插入图片，Markdown 不再支持 Base64 内嵌图片")
+    sync_document_assets(db, assignment, workspace, locked, markdown_content)
+    locked.markdown_content = markdown_content
     locked.revision += 1; locked.updated_by = user.id; workspace.updated_at = now()
     audience = [user.id] if workspace.owner_user_id else list(db.scalars(select(TeamMember.user_id).where(TeamMember.team_id == workspace.owner_team_id, TeamMember.status == "ACTIVE")))
     publish_event(
@@ -1620,6 +1786,11 @@ def delete_workspace_document(aid: UUID, document_id: UUID, user: CsrfUser, db: 
     if document.source_file_id: raise ApiError(403, "SOURCE_DOCUMENT_DELETE_FORBIDDEN", "教师提供的作业文档不能删除")
     count = db.scalar(select(func.count()).select_from(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id)) or 0
     if count <= 1: raise ApiError(409, "LAST_DOCUMENT_REQUIRED", "作业至少需要保留一份 Markdown 文档")
+    asset_ids = set(db.scalars(select(SubmissionDocumentAsset.asset_id).where(SubmissionDocumentAsset.document_id == document.id)).all())
+    db.execute(delete(SubmissionDocumentAsset).where(SubmissionDocumentAsset.document_id == document.id))
+    db.flush()
+    for asset in db.scalars(select(MarkdownAsset).where(MarkdownAsset.id.in_(asset_ids))).all() if asset_ids else []:
+        mark_asset_orphan_if_unused(db, asset)
     db.delete(document); db.commit(); return Response(status_code=204)
 
 
@@ -1792,6 +1963,8 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
     fid = uuid4(); relative = f"{aid}/{fid.hex}{suffix}"
     temporary = Path(tempfile.gettempdir()) / f"upload-{fid.hex}{suffix}"
     size = 0
+    prepared_assets = []
+    uploaded_asset_keys = []
     try:
         with temporary.open("wb") as output:
             while chunk := file.file.read(1024 * 1024):
@@ -1800,7 +1973,32 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
                     raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空且不得超过 500 MB")
                 output.write(chunk)
         if not size: raise ApiError(422, "FILE_SIZE_INVALID", "文件不能为空")
+        if suffix == ".md":
+            try:
+                source = decode_text_file(temporary.read_bytes())
+            except UnicodeDecodeError:
+                raise ApiError(422, "MARKDOWN_ENCODING_INVALID", "Markdown 文件编码无法识别")
+            if BASE64_IMAGE_PATTERN.search(source):
+                try:
+                    source, prepared_assets = extract_assets(source)
+                except ValueError as error:
+                    raise ApiError(422, "MARKDOWN_IMAGE_INVALID", str(error))
+                if BASE64_IMAGE_PATTERN.search(source):
+                    raise ApiError(422, "MARKDOWN_IMAGE_TYPE_INVALID", "Base64 图片仅支持 PNG、JPEG、GIF 或 WebP")
+                encoded = source.encode("utf-8")
+                if len(encoded) > settings.markdown_max_bytes:
+                    raise ApiError(413, "MARKDOWN_TOO_LARGE", "移除图片后的 Markdown 正文不能超过 5 MB")
+                temporary.write_bytes(encoded)
+                size = len(encoded)
+                for prepared in prepared_assets:
+                    asset_key = f"markdown-assets/{aid}/files/{fid}/{prepared.id.hex}{prepared.suffix}"
+                    storage.put_bytes(asset_key, prepared.payload)
+                    uploaded_asset_keys.append(asset_key)
         storage.put_object(relative, temporary)
+    except Exception:
+        for asset_key in uploaded_asset_keys:
+            storage.delete_object(asset_key)
+        raise
     finally:
         file.file.close()
         temporary.unlink(missing_ok=True)
@@ -1808,9 +2006,29 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
     preview_status = "READY" if suffix in PREVIEWABLE_FILE_SUFFIXES else "NOT_AVAILABLE"
     x = FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team_id, purpose=selected_purpose, material_type=selected_material_type, storage_path=relative, original_name=Path(file.filename or "file").name, size_bytes=size, detected_mime=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream", preview_status=preview_status)
     db.add(x)
+    pending_asset_ids = []
+    for prepared, asset_key in zip(prepared_assets, uploaded_asset_keys):
+        db.add(MarkdownAsset(
+            id=prepared.id, assignment_id=aid, workspace_id=None, uploader_id=user.id,
+            storage_path=asset_key, original_name=f"{Path(x.original_name).stem}-{prepared.id.hex}{prepared.suffix}",
+            mime_type=prepared.mime_type, size_bytes=len(prepared.payload), sha256=prepared.sha256,
+            width=prepared.width, height=prepared.height, orphaned_at=None,
+        ))
+        pending_asset_ids.append(prepared.id)
+    if pending_asset_ids:
+        db.flush()
+        for asset_id in pending_asset_ids:
+            db.add(FileObjectAsset(file_id=fid, asset_id=asset_id))
     action = "SUBMISSION_FILE_UPLOADED" if selected_purpose == "SUBMISSION" else "ASSIGNMENT_FILE_UPLOADED"
     audit(db, user, action, "assignment", str(aid), {"file_id": str(fid), "original_name": x.original_name})
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        storage.delete_object(relative)
+        for asset_key in uploaded_asset_keys:
+            storage.delete_object(asset_key)
+        raise
     return file_json(x, user.display_name)
 
 
@@ -1911,6 +2129,7 @@ def delete_file(fid: UUID, user: CsrfUser, db: Db):
         return Response(status_code=204)
     key = file.storage_path; original_name = file.original_name
     audit(db, user, action, "assignment", str(assignment.id), {"file_id": str(fid), "original_name": original_name})
+    remove_file_asset_links(db, [file.id])
     db.delete(file); db.commit()
     storage.delete_object(key)
     return Response(status_code=204)
@@ -1960,57 +2179,84 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
         s = db.scalar(select(Submission).where(Submission.assignment_id == aid, Submission.owner_team_id == team.id).with_for_update())
         if team.leader_id != user.id: raise ApiError(403, "TEAM_LEADER_REQUIRED", "小组作业仅组长可正式提交")
     current = db.scalar(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.version_no == s.current_version_no)) if s and s.current_version_no else None
+    if idempotency_key and current and current.idempotency_key == idempotency_key:
+        return {"id": str(s.id), "submitted_at": current.submitted_at, "is_late": current.is_late}
     assert_submission_update_allowed(db, s, current) if s else None
     can_update_low_grade = bool(current and submission_grade_result(db, current).get("final_grade") in {"C", "D", "E"})
     if a.due_at < now() and not a.allow_late and not can_update_low_grade:
         raise ApiError(409, "ASSIGNMENT_CLOSED", "作业已截止且不允许迟交")
     file_scope = FileObject.owner_id == user.id if not team else FileObject.team_id == team.id
     workspace = db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_user_id == user.id)) if not team else db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid, SubmissionWorkspace.owner_team_id == team.id))
-    if workspace:
-        documents = [document for document in db.scalars(select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id).order_by(SubmissionDocument.sort_order, SubmissionDocument.created_at)).all() if not document_is_criteria(db, document)]
-        if not documents: raise ApiError(422, "SUBMISSION_DOCUMENTS_REQUIRED", "在线作业中至少需要一份 Markdown 文档")
-        for document in documents:
-            check_source_images(db, workspace, document, user)
-        empty = next((document for document in documents if not document.markdown_content.strip()), None)
-        if empty: raise ApiError(422, "SUBMISSION_DOCUMENT_EMPTY", f"文档 {empty.name} 不能为空")
-        db.execute(FileObject.__table__.update().where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).values(active=False))  # noqa: E712
-        for document in documents:
-            content = document.markdown_content.encode("utf-8")
-            fid = uuid4(); relative = f"{aid}/{fid.hex}.md"
-            storage.put_bytes(relative, content)
-            db.add(FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team.id if team else None, purpose="SUBMISSION", storage_path=relative, original_name=document.name, size_bytes=len(content), detected_mime="text/markdown", preview_status="READY"))
+    snapshot_keys = []
+    try:
+        if workspace:
+            documents = [document for document in db.scalars(select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id).order_by(SubmissionDocument.sort_order, SubmissionDocument.created_at)).all() if not document_is_criteria(db, document)]
+            if not documents: raise ApiError(422, "SUBMISSION_DOCUMENTS_REQUIRED", "在线作业中至少需要一份 Markdown 文档")
+            for document in documents:
+                check_source_images(db, workspace, document, user)
+            empty = next((document for document in documents if not document.markdown_content.strip()), None)
+            if empty: raise ApiError(422, "SUBMISSION_DOCUMENT_EMPTY", f"文档 {empty.name} 不能为空")
+            if any(BASE64_IMAGE_PATTERN.search(document.markdown_content) for document in documents):
+                raise ApiError(422, "MARKDOWN_BASE64_IMAGE_FORBIDDEN", "作业中仍有 Base64 图片，请重新插入后再提交")
+            db.execute(FileObject.__table__.update().where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).values(active=False))  # noqa: E712
+            for document in documents:
+                asset_ids = markdown_asset_ids(document.markdown_content)
+                linked_ids = set(db.scalars(select(SubmissionDocumentAsset.asset_id).where(SubmissionDocumentAsset.document_id == document.id)).all())
+                if asset_ids != linked_ids:
+                    asset_ids = sync_document_assets(db, a, workspace, document, document.markdown_content)
+                assets = db.scalars(select(MarkdownAsset).where(MarkdownAsset.id.in_(asset_ids))).all() if asset_ids else []
+                if any(not storage.object_exists(asset.storage_path) for asset in assets):
+                    raise ApiError(409, "MARKDOWN_ASSET_MISSING", f"文档 {document.name} 中有图片存储不可用")
+                content = document.markdown_content.encode("utf-8")
+                fid = uuid4(); relative = f"{aid}/{fid.hex}.md"
+                storage.put_bytes(relative, content)
+                snapshot_keys.append(relative)
+                db.add(FileObject(id=fid, owner_id=user.id, assignment_id=aid, team_id=team.id if team else None, purpose="SUBMISSION", storage_path=relative, original_name=document.name, size_bytes=len(content), detected_mime="text/markdown", preview_status="READY"))
+                for asset_id in asset_ids:
+                    db.add(FileObjectAsset(file_id=fid, asset_id=asset_id))
+            db.flush()
+    except Exception:
+        db.rollback()
+        for key in snapshot_keys:
+            storage.delete_object(key)
+        raise
+    try:
+        files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).order_by(FileObject.created_at)).all()  # noqa: E712
+        if not files: raise ApiError(422, "SUBMISSION_FILES_REQUIRED", "请先上传作业附件")
+        if not s: s = Submission(assignment_id=aid, owner_user_id=user.id if not team else None, owner_team_id=team.id if team else None); db.add(s); db.flush()
+        snapshot = {}
+        if team:
+            rows = db.execute(select(TeamMember, User).join(User).where(TeamMember.team_id == team.id, TeamMember.status == "ACTIVE").order_by(User.login_name)).all()
+            snapshot = {"members": [{"id": str(person.id), "student_no": person.login_name, "name": person.display_name, "role": member.role} for member, person in rows]}
+        submitted_at = now()
+        s.current_version_no = (current.version_no + 1) if current else 1
+        was_peer_reviewed = bool(current and db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == current.id, SubmissionAssessment.kind == "PEER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
+        resubmission_grade_cap = "B" if was_peer_reviewed else None
+        v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key, grade_cap=resubmission_grade_cap)
+        db.add(v); db.flush()
+        old_versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.id != v.id)).all()
+        for old in old_versions:
+            frozen = db.scalar(select(ReviewAssignment.id).where(ReviewAssignment.submission_version_id == old.id).limit(1)) or db.scalar(select(PeerReview.id).where(PeerReview.submission_version_id == old.id).limit(1)) or db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == old.id).limit(1))
+            if not frozen:
+                db.execute(delete(VersionFile).where(VersionFile.version_id == old.id))
+                db.delete(old)
+        s.status = "SUBMITTED"
+        for f in files: db.add(VersionFile(version_id=v.id, file_id=f.id))
         db.flush()
-    files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == True, file_scope).order_by(FileObject.created_at)).all()  # noqa: E712
-    if not files: raise ApiError(422, "SUBMISSION_FILES_REQUIRED", "请先上传作业附件")
-    if not s: s = Submission(assignment_id=aid, owner_user_id=user.id if not team else None, owner_team_id=team.id if team else None); db.add(s); db.flush()
-    if idempotency_key and current and current.idempotency_key == idempotency_key:
-        return {"id": str(s.id), "submitted_at": current.submitted_at, "is_late": current.is_late}
-    snapshot = {}
-    if team:
-        rows = db.execute(select(TeamMember, User).join(User).where(TeamMember.team_id == team.id, TeamMember.status == "ACTIVE").order_by(User.login_name)).all()
-        snapshot = {"members": [{"id": str(person.id), "student_no": person.login_name, "name": person.display_name, "role": member.role} for member, person in rows]}
-    submitted_at = now()
-    s.current_version_no = (current.version_no + 1) if current else 1
-    was_peer_reviewed = bool(current and db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == current.id, SubmissionAssessment.kind == "PEER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
-    resubmission_grade_cap = "B" if was_peer_reviewed else None
-    v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key, grade_cap=resubmission_grade_cap)
-    db.add(v); db.flush()
-    old_versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.id != v.id)).all()
-    for old in old_versions:
-        frozen = db.scalar(select(ReviewAssignment.id).where(ReviewAssignment.submission_version_id == old.id).limit(1)) or db.scalar(select(PeerReview.id).where(PeerReview.submission_version_id == old.id).limit(1)) or db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == old.id).limit(1))
-        if not frozen:
-            db.execute(delete(VersionFile).where(VersionFile.version_id == old.id))
-            db.delete(old)
-    s.status = "SUBMITTED"
-    for f in files: db.add(VersionFile(version_id=v.id, file_id=f.id))
-    db.flush()
-    stale_keys = []
-    inactive = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == False, file_scope)).all()  # noqa: E712
-    for file in inactive:
-        if not db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == file.id).limit(1)):
-            stale_keys.append(file.storage_path)
-            db.delete(file)
-    audit(db, user, "SUBMISSION_CREATED", "submission", str(s.id)); db.commit()
+        stale_keys = []
+        inactive = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.purpose == "SUBMISSION", FileObject.active == False, file_scope)).all()  # noqa: E712
+        for file in inactive:
+            if not db.scalar(select(VersionFile.file_id).where(VersionFile.file_id == file.id).limit(1)):
+                stale_keys.append(file.storage_path)
+                remove_file_asset_links(db, [file.id])
+                db.delete(file)
+        audit(db, user, "SUBMISSION_CREATED", "submission", str(s.id))
+        db.commit()
+    except Exception:
+        db.rollback()
+        for key in snapshot_keys:
+            storage.delete_object(key)
+        raise
     for key in stale_keys:
         storage.delete_object(key)
     return {"id": str(s.id), "submitted_at": v.submitted_at, "is_late": v.is_late}
@@ -2541,6 +2787,40 @@ def require_file_access(db: Session, user: User, fid: UUID) -> FileObject:
                 allowed = bool(owner and mine and owner[1].id == mine.id and linked and reviewer_submitted)
     if not allowed: raise ApiError(403, "FILE_FORBIDDEN", "无权访问该文件")
     return f
+
+
+def require_markdown_asset_access(db: Session, user: User, asset_id: UUID) -> MarkdownAsset:
+    asset = db.get(MarkdownAsset, asset_id)
+    if not asset:
+        raise ApiError(404, "MARKDOWN_ASSET_NOT_FOUND", "图片不存在")
+    assignment = db.get(Assignment, asset.assignment_id)
+    if not assignment:
+        raise ApiError(404, "MARKDOWN_ASSET_NOT_FOUND", "图片不存在")
+    require_class(db, user, assignment.class_id)
+    if asset.workspace_id:
+        workspace = db.get(SubmissionWorkspace, asset.workspace_id)
+        if workspace and workspace.owner_user_id == user.id:
+            return asset
+        if workspace and workspace.owner_team_id and db.scalar(select(TeamMember.id).where(TeamMember.team_id == workspace.owner_team_id, TeamMember.user_id == user.id, TeamMember.status == "ACTIVE").limit(1)):
+            return asset
+    file_ids = list(db.scalars(select(FileObjectAsset.file_id).where(FileObjectAsset.asset_id == asset.id)).all())
+    for file_id in file_ids:
+        try:
+            require_file_access(db, user, file_id)
+            return asset
+        except ApiError as error:
+            if error.status not in {403, 404}:
+                raise
+    raise ApiError(403, "MARKDOWN_ASSET_FORBIDDEN", "无权访问该图片")
+
+
+@app.get("/api/v1/markdown-assets/{asset_id}/content")
+def markdown_asset_content(asset_id: UUID, user: CurrentUser, db: Db):
+    asset = require_markdown_asset_access(db, user, asset_id)
+    if not storage.object_exists(asset.storage_path):
+        raise ApiError(404, "MARKDOWN_ASSET_MISSING", "图片存储不可用")
+    expires = max(60, min(settings.oss_preview_url_ttl_seconds, 900))
+    return RedirectResponse(storage.sign_get_url(asset.storage_path, expires), status_code=302, headers={"Cache-Control": "private, no-store"})
 
 
 @app.get("/api/v1/files/{fid}")
@@ -3311,6 +3591,30 @@ def render_file(fid: UUID, user: CurrentUser, db: Db):
     raise ApiError(410, "FILE_RENDER_REMOVED", "Markdown 文件请使用前端预览")
 
 
+def export_markdown_with_assets(db: Session, bundle: zipfile.ZipFile, owner_name: str, file: FileObject, written_assets: set[tuple[str, UUID]]) -> bytes:
+    source = decode_text_file(storage.get_object_bytes(file.storage_path))
+    asset_ids = set(db.scalars(select(FileObjectAsset.asset_id).where(FileObjectAsset.file_id == file.id)).all())
+    assets = {item.id: item for item in db.scalars(select(MarkdownAsset).where(MarkdownAsset.id.in_(asset_ids))).all()} if asset_ids else {}
+
+    def replace(match: re.Match) -> str:
+        try:
+            asset_id = UUID(match.group(1))
+        except ValueError:
+            return match.group(0)
+        asset = assets.get(asset_id)
+        if not asset:
+            return match.group(0)
+        suffix = Path(asset.storage_path).suffix.lower()
+        archive_name = f"{owner_name}/images/{asset.id}{suffix}"
+        marker = (owner_name, asset.id)
+        if marker not in written_assets:
+            bundle.writestr(archive_name, storage.get_object_bytes(asset.storage_path))
+            written_assets.add(marker)
+        return f"images/{asset.id}{suffix}"
+
+    return MARKDOWN_ASSET_URL_PATTERN.sub(replace, source).encode("utf-8")
+
+
 @app.get("/api/v1/assignments/{aid}/download.zip")
 def download_submissions(aid: UUID, user: CurrentUser, db: Db):
     teacher(user); assignment = db.get(Assignment, aid)
@@ -3332,10 +3636,14 @@ def download_submissions(aid: UUID, user: CurrentUser, db: Db):
     archive = TemporaryFile()
     try:
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
+            written_assets: set[tuple[str, UUID]] = set()
             for submission, version in rows:
                 owner = users.get(submission.owner_user_id) if submission.owner_user_id else teams.get(submission.owner_team_id)
                 owner_name = owner.login_name if isinstance(owner, User) else owner.name
                 for file in files_by_version.get(version.id, []):
+                    if Path(file.original_name).suffix.lower() == ".md":
+                        bundle.writestr(f"{owner_name}/{file.original_name}", export_markdown_with_assets(db, bundle, owner_name, file, written_assets))
+                        continue
                     with bundle.open(f"{owner_name}/{file.original_name}", "w") as dest:
                         for chunk in storage.get_object_stream(file.storage_path):
                             dest.write(chunk)
@@ -3400,13 +3708,19 @@ def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
     archive_file = TemporaryFile()
     try:
         with zipfile.ZipFile(archive_file, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+            written_assets: set[tuple[str, UUID]] = set()
             for assignment in assignments:
                 submission = submissions.get(assignment.id)
                 version = versions.get(submission.id) if submission else None
                 files = files_by_version.get(version.id, []) if version else []
                 homework_rows.append([assignment.title, assignment.due_at, "已提交" if version else "未提交", version.submitted_at if version else None, "是" if version and version.is_late else "否", len(files)])
                 for file in files:
-                    with archive.open(f"小组作业/{assignment.id}/{file.id}-{Path(file.original_name).name}", "w") as dest:
+                    folder = f"小组作业/{assignment.id}"
+                    archive_name = f"{folder}/{file.id}-{Path(file.original_name).name}"
+                    if Path(file.original_name).suffix.lower() == ".md":
+                        archive.writestr(archive_name, export_markdown_with_assets(db, archive, folder, file, written_assets))
+                        continue
+                    with archive.open(archive_name, "w") as dest:
                         for chunk in storage.get_object_stream(file.storage_path):
                             dest.write(chunk)
             archive.writestr("小组作业提交记录.csv", csv_bytes(homework_rows))

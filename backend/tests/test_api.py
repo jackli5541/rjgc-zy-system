@@ -1,3 +1,4 @@
+import base64
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -10,13 +11,15 @@ from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
+import pytest
 from sqlalchemy import event, select
 
 from app.database import SessionLocal, engine
 from app.main import app, parse_roster
 from app.grading import final_score
-from app.models import Assignment, AuditLog, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionVersion, Team, TeamMember, TeamRequest, User
-from app.worker import process_auto_review, process_due_campaign
+from app.markdown_assets import extract_assets
+from app.models import Assignment, AuditLog, BackgroundJob, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, Team, TeamMember, TeamRequest, User
+from app.worker import process_auto_review, process_due_campaign, process_oss_delete
 
 
 def login(account: str, password: str, role: str):
@@ -24,6 +27,16 @@ def login(account: str, password: str, role: str):
     response = client.post("/api/v1/auth/login", json={"account": account, "password": password, "role": role})
     assert response.status_code == 200, response.text
     return client, {"X-CSRF-Token": response.json()["csrf_token"]}
+
+
+def test_markdown_asset_extraction_deduplicates_and_rejects_invalid_images():
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    rewritten, assets = extract_assets(f"![first](data:image/png;base64,{png})\n<img src=\"data:image/png;base64,{png}\">")
+    assert len(assets) == 1
+    assert rewritten.count(f"/api/v1/markdown-assets/{assets[0].id}/content") == 2
+    assert "data:image" not in rewritten
+    with pytest.raises(ValueError, match="损坏"):
+        extract_assets("![broken](data:image/png;base64,aGVsbG8=)")
 
 
 def test_role_menu_permissions_are_persisted_and_teacher_managed():
@@ -181,6 +194,86 @@ def test_student_workspace_initializes_idempotently():
     second = student.post(f"/api/v1/assignments/{assignment['id']}/workspace", headers=student_headers, json={})
     assert second.status_code == 200, second.text
     assert second.json()["id"] == first.json()["id"]
+
+
+def test_workspace_images_are_stored_separately_authorized_and_frozen_in_submission(monkeypatch, isolated_object_storage):
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "图片分离", "name": "图片分离测试班"}).json()
+    first_member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990131", "name": "图片学生一"}).json()
+    second_member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990132", "name": "图片学生二"}).json()
+    assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={
+        "class_id": course["id"], "title": "图片作业", "description": "验证 OSS 图片分离",
+        "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True,
+    }).json()
+    template = teacher.post(f"/api/v1/assignments/{assignment['id']}/files", headers=teacher_headers, files={"file": ("task.md", b"# Task", "text/markdown")})
+    assert template.status_code == 201, template.text
+    first, first_headers = login(first_member["student_no"], first_member["student_no"], "student")
+    second, second_headers = login(second_member["student_no"], second_member["student_no"], "student")
+    first_workspace = first.post(f"/api/v1/assignments/{assignment['id']}/workspace", headers=first_headers, json={}).json()
+    second_workspace = second.post(f"/api/v1/assignments/{assignment['id']}/workspace", headers=second_headers, json={}).json()
+    document = first.get(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{first_workspace['documents'][0]['id']}").json()
+
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+    missing_csrf = first.post(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{document['id']}/images", files={"file": ("pixel.png", png, "image/png")})
+    assert missing_csrf.status_code == 403
+    invalid = first.post(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{document['id']}/images", headers=first_headers, files={"file": ("fake.png", b"not-png", "image/png")})
+    assert invalid.status_code == 422
+    uploaded = first.post(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{document['id']}/images", headers=first_headers, files={"file": ("pixel.png", png, "image/png")})
+    assert uploaded.status_code == 201, uploaded.text
+    asset = uploaded.json()
+    assert asset["url"] == f"/api/v1/markdown-assets/{asset['id']}/content"
+
+    base64_save = first.put(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{document['id']}", headers=first_headers, json={"revision": document["revision"], "markdown_content": "![x](data:image/png;base64,AAAA)"})
+    assert base64_save.status_code == 422
+    saved = first.put(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{document['id']}", headers=first_headers, json={"revision": document["revision"], "markdown_content": f"# Work\n\n![pixel]({asset['url']})\n"})
+    assert saved.status_code == 200, saved.text
+
+    signed_images = []
+    monkeypatch.setattr("app.storage.sign_get_url", lambda key, expires, params=None: signed_images.append((key, expires, params)) or f"https://storage.test/{key}")
+    own_image = first.get(asset["url"], follow_redirects=False)
+    assert own_image.status_code == 302
+    assert own_image.headers["location"].startswith("https://storage.test/")
+    assert signed_images[-1][1:] == (300, None)
+    assert second.get(asset["url"], follow_redirects=False).status_code == 403
+    second_document = second.get(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{second_workspace['documents'][0]['id']}").json()
+    foreign_save = second.put(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{second_document['id']}", headers=second_headers, json={"revision": second_document["revision"], "markdown_content": f"![stolen]({asset['url']})"})
+    assert foreign_save.status_code == 403
+
+    submitted = first.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**first_headers, "Idempotency-Key": "asset-submit"}, json={"file_ids": []})
+    assert submitted.status_code == 201, submitted.text
+    object_count = len(isolated_object_storage)
+    repeated = first.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**first_headers, "Idempotency-Key": "asset-submit"}, json={"file_ids": []})
+    assert repeated.status_code == 201 and len(isolated_object_storage) == object_count
+    assert teacher.get(asset["url"], follow_redirects=False).status_code == 302
+    with SessionLocal() as db:
+        asset_row = db.get(MarkdownAsset, UUID(asset["id"]))
+        assert asset_row and asset_row.orphaned_at is None
+        assert db.scalar(select(SubmissionDocumentAsset).where(SubmissionDocumentAsset.asset_id == asset_row.id))
+        assert db.scalar(select(FileObjectAsset).where(FileObjectAsset.asset_id == asset_row.id))
+
+    downloaded = teacher.get(f"/api/v1/assignments/{assignment['id']}/download.zip")
+    assert downloaded.status_code == 200, downloaded.text
+    with ZipFile(BytesIO(downloaded.content)) as archive:
+        names = archive.namelist()
+        markdown_name = next(name for name in names if name.endswith("task.md"))
+        markdown = archive.read(markdown_name).decode("utf-8")
+        assert "data:image" not in markdown and "images/" in markdown
+        assert any("/images/" in name and name.endswith(".png") for name in names)
+
+    monkeypatch.setattr("app.storage.delete_object", lambda _key: (_ for _ in ()).throw(RuntimeError("OSS unavailable")))
+    deleted = teacher.delete(f"/api/v1/assignments/{assignment['id']}", headers=teacher_headers)
+    assert deleted.status_code == 204, deleted.text
+    with SessionLocal() as db:
+        cleanup_job = db.scalar(select(BackgroundJob).where(BackgroundJob.kind == "OSS_DELETE"))
+        assert cleanup_job and cleanup_job.status == "PENDING" and cleanup_job.payload["keys"]
+        cleanup_job_id = cleanup_job.id
+        cleanup_keys = cleanup_job.payload["keys"]
+
+    monkeypatch.setattr("app.storage.delete_object", lambda key: isolated_object_storage.pop(key, None))
+    process_oss_delete(cleanup_job_id, cleanup_keys)
+    with SessionLocal() as db:
+        cleanup_job = db.get(BackgroundJob, cleanup_job_id)
+        assert cleanup_job.status == "COMPLETED" and cleanup_job.payload["keys"] == []
 
 
 def test_submission_board_query_count_does_not_scale_with_class_size():
@@ -1231,7 +1324,7 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
     student.post("/api/v1/teams", headers=student_headers, json={"class_id": class_id, "name": "批注测试组", "open_recruitment": True})
     assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "富文本报告", "description": "验证安全预览和批注", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
 
-    markdown_content = b"# Heading\n\n- [x] Done\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n![chart](data:image/png;base64,iVBORw0KGgo=)\n\n![unsafe](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)"
+    markdown_content = b"# Heading\n\n- [x] Done\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n![chart](http://localhost:9005/chart.png)\n\n![remote](https://example.com/chart.png)"
     markdown_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("report.md", markdown_content, "text/markdown")}).json()
     pdf_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("diagram.pdf", b"%PDF-1.4", "application/pdf")}).json()
     html_file = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("appendix.html", b'<h2>Safe</h2><script>alert(1)</script><img src="/private.png"><img src="http://localhost:9005/ok.png"><img src="https://example.com/ok.png"><a href="javascript:alert(1)">bad</a>', "text/html")})
@@ -1346,7 +1439,8 @@ def test_workspace_loads_document_content_lazily_and_checks_source_images_once(m
     course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2036 春季", "name": "懒加载测试班"}).json()
     teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20360001", "name": "懒加载学生"})
     assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": course["id"], "title": "Markdown 懒加载", "description": "验证目录和正文拆分", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
-    source = b"# Task\n\n![source](data:image/png;base64,aGVsbG8=)\n"
+    png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    source = f"# Task\n\n![source](data:image/png;base64,{png_base64})\n".encode()
     uploaded = teacher.post(f"/api/v1/assignments/{assignment['id']}/files?material_type=TASK", headers=teacher_headers, files={"file": ("task.md", source, "text/markdown")})
     assert uploaded.status_code == 201, uploaded.text
     student, student_headers = login("20360001", "20360001", "student")
@@ -1365,7 +1459,7 @@ def test_workspace_loads_document_content_lazily_and_checks_source_images_once(m
 
     first = student.get(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{metadata['id']}")
     assert first.status_code == 200, first.text
-    assert first.json()["markdown_content"].count("data:image") == 1
+    assert first.json()["markdown_content"].count("/api/v1/markdown-assets/") == 1
     assert "content_html" not in first.json()
     assert len(reads) == 1
     second = student.get(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{metadata['id']}")

@@ -63,6 +63,12 @@ services:
     command: ["python", "-m", "app.worker"]
     environment:
       DATABASE_URL: "mssql+pyodbc://sa:${MSSQL_SA_PASSWORD_URLENCODED:-Coursework_2026%21}@sqlserver:1433/coursework?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+      OSS_ENDPOINT: "${OSS_ENDPOINT:-https://oss-cn-hangzhou.aliyuncs.com}"
+      OSS_BUCKET: "${OSS_BUCKET:-se-lab}"
+      OSS_ACCESS_KEY_ID: "${OSS_ACCESS_KEY_ID}"
+      OSS_ACCESS_KEY_SECRET: "${OSS_ACCESS_KEY_SECRET}"
+      OSS_KEY_PREFIX: "${OSS_KEY_PREFIX:-}"
+      MARKDOWN_ASSET_ORPHAN_HOURS: "${MARKDOWN_ASSET_ORPHAN_HOURS:-24}"
     depends_on:
       migrate:
         condition: service_completed_successfully

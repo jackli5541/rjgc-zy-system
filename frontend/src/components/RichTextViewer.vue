@@ -1,6 +1,6 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import mermaid from 'mermaid'
+import { cleanupMermaidArtifacts, renderMermaid } from '../mermaidRenderer'
 
 const props = defineProps({ html: { type: String, default: '' }, annotations: { type: Array, default: () => [] }, editable: Boolean, selectedAnnotationId: { type: String, default: '' } })
 const emit = defineEmits(['selection', 'select'])
@@ -9,15 +9,13 @@ const highlights = ref([])
 const blockSelector = 'p,h1,h2,h3,h4,li,blockquote,pre,td,th'
 let mermaidRenderVersion = 0
 
-mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' })
-
 async function renderMermaidBlocks() {
   const version = ++mermaidRenderVersion
   const blocks = [...(root.value?.querySelectorAll('pre > code.language-mermaid') || [])]
   await Promise.all(blocks.map(async (code, index) => {
     const pre = code.parentElement
     try {
-      const { svg } = await mermaid.render(`mermaid-viewer-${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`, code.textContent || '')
+      const { svg } = await renderMermaid(code.textContent || '', `viewer-${index}`)
       if (version !== mermaidRenderVersion || !pre?.isConnected) return
       pre.classList.add('mermaid-rendered-block')
       pre.innerHTML = svg
@@ -152,7 +150,7 @@ watch(() => props.html, refresh)
 watch(() => props.annotations, refresh, { deep: true })
 watch(() => props.selectedAnnotationId, focusAnnotation)
 onMounted(() => { refresh(); window.addEventListener('resize', rebuildHighlights) })
-onBeforeUnmount(() => { mermaidRenderVersion += 1; window.removeEventListener('resize', rebuildHighlights) })
+onBeforeUnmount(() => { mermaidRenderVersion += 1; cleanupMermaidArtifacts(); window.removeEventListener('resize', rebuildHighlights) })
 </script>
 
 <template>

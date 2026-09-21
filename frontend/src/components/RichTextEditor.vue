@@ -5,14 +5,14 @@ import { Node } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
 import { TableKit } from '@tiptap/extension-table'
-import mermaid from 'mermaid'
 import { AudioOutlined, BlockOutlined, BoldOutlined, CodeOutlined, DeleteColumnOutlined, DeleteOutlined, DeleteRowOutlined, DeploymentUnitOutlined, InsertRowAboveOutlined, InsertRowBelowOutlined, InsertRowLeftOutlined, InsertRowRightOutlined, ItalicOutlined, LinkOutlined, MinusOutlined, OrderedListOutlined, PictureOutlined, RedoOutlined, StopOutlined, TableOutlined, UndoOutlined, UnorderedListOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
+import { cleanupMermaidArtifacts, renderMermaid as renderMermaidSvg } from '../mermaidRenderer'
 
 let activeSpeechStop = null
-const MAX_MARKDOWN_BYTES = 500 * 1024 * 1024
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true } })
+const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true }, imageUpload: Function })
 const emit = defineEmits(['update:modelValue'])
 const speechSupported = ref(false)
 const listening = ref(false)
@@ -31,8 +31,6 @@ const editorVersion = ref(0)
 let recognition = null
 let speechStopRequested = false
 let speechRestartTimer = 0
-
-mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' })
 
 const MermaidBlock = Node.create({
   name: 'mermaidBlock',
@@ -75,7 +73,7 @@ const MermaidBlock = Node.create({
         const version = ++renderVersion
         preview.innerHTML = '<span class="mermaid-document-loading">正在绘制图表...</span>'
         try {
-          const { svg } = await mermaid.render(`mermaid-block-${Date.now()}-${Math.random().toString(16).slice(2)}`, source)
+          const { svg } = await renderMermaidSvg(source, 'editor-block')
           if (version === renderVersion) preview.innerHTML = svg
         } catch (error) {
           if (version === renderVersion) preview.innerHTML = '<span class="mermaid-document-error">图表语法有误，点击修改</span>'
@@ -130,6 +128,8 @@ const EditableImage = Image.extend({
       const dom = document.createElement('figure')
       dom.className = 'document-image-block'
       const image = document.createElement('img')
+      image.loading = 'lazy'
+      image.decoding = 'async'
       const resizeFrame = document.createElement('span')
       resizeFrame.className = 'document-image-resize-frame'
       resizeFrame.setAttribute('aria-hidden', 'true')
@@ -230,7 +230,7 @@ const EditableImage = Image.extend({
 
 const editor = useEditor({
   content: props.modelValue,
-  extensions: [StarterKit.configure({ link: { openOnClick: false } }), EditableImage.configure({ allowBase64: true }), TableKit, MermaidBlock],
+  extensions: [StarterKit.configure({ link: { openOnClick: false } }), EditableImage.configure({ allowBase64: false }), TableKit, MermaidBlock],
   editable: props.editable,
   editorProps: { attributes: { 'data-placeholder': props.placeholder } },
   onCreate: ({ editor: instance }) => {
@@ -352,6 +352,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   stopRecognition()
+  cleanupMermaidArtifacts()
   editor.value?.destroy()
 })
 
@@ -379,27 +380,22 @@ const tableActive = computed(() => {
   return Boolean(editor.value?.isActive('table'))
 })
 
-function readDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
-}
-
 async function prepareImage(file) {
-  const original = await readDataUrl(file)
-  if (file.size <= 600 * 1024 || file.type === 'image/gif') return original
+  if (file.size <= 600 * 1024 || file.type === 'image/gif') return file
+  const original = URL.createObjectURL(file)
   const image = new window.Image()
   image.src = original
-  await image.decode()
-  const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight))
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
-  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
-  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height)
-  return canvas.toDataURL('image/webp', 0.84)
+  try {
+    await image.decode()
+    const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height)
+    return await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('图片压缩失败')), 'image/webp', 0.84))
+  } finally {
+    URL.revokeObjectURL(original)
+  }
 }
 
 async function insertImage(event) {
@@ -408,16 +404,15 @@ async function insertImage(event) {
   input.value = ''
   if (!file) return
   if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) return message.error('仅支持 PNG、JPEG、GIF 或 WebP 图片')
-  if (file.size > MAX_MARKDOWN_BYTES) return message.error('图片不能超过 500 MB')
+  if (file.size > MAX_IMAGE_BYTES) return message.error('图片不能超过 10 MB')
+  if (!props.imageUpload) return message.error('当前编辑器不支持图片上传')
   imageLoading.value = true
   try {
-    const src = await prepareImage(file)
-    if ((editor.value?.getHTML().length || 0) + src.length > MAX_MARKDOWN_BYTES) {
-      return message.error('插入图片后 Markdown 将超过 500 MB，请压缩图片或删除部分内容')
-    }
-    editor.value?.chain().focus().setImage({ src, alt: file.name.replace(/\.[^.]+$/, '') }).run()
+    const prepared = await prepareImage(file)
+    const uploaded = await props.imageUpload(prepared, file)
+    editor.value?.chain().focus().setImage({ src: uploaded.url, alt: file.name.replace(/\.[^.]+$/, '') }).run()
   } catch (error) {
-    message.error('图片读取失败，请重新选择')
+    message.error(error.message || '图片上传失败，请重新选择')
   } finally {
     imageLoading.value = false
   }
@@ -434,7 +429,7 @@ async function renderMermaid() {
   mermaidRendering.value = true
   mermaidError.value = ''
   try {
-    const { svg } = await mermaid.render(`mermaid-${Date.now()}`, mermaidSource.value)
+    const { svg } = await renderMermaidSvg(mermaidSource.value, 'editor-dialog')
     mermaidSvg.value = svg
     return svg
   } catch (error) {

@@ -8,7 +8,8 @@ from sqlalchemy import and_, delete, select
 
 from app.database import SessionLocal
 from app.grading import finalize_campaign
-from app.models import Assignment, AuditLog, BackgroundJob, ClassMember, FileObject, ImportBatch, LoginSession, Notification, RealtimeEvent, ReviewAssignment, ReviewCampaign, Submission, SubmissionVersion, TeachingClass, Team, TeamMember, User
+from app import storage
+from app.models import Assignment, AuditLog, BackgroundJob, ClassMember, FileObject, FileObjectAsset, ImportBatch, LoginSession, MarkdownAsset, Notification, RealtimeEvent, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocumentAsset, SubmissionVersion, TeachingClass, Team, TeamMember, User
 from app.realtime import publish_event
 from app.settings import settings
 
@@ -28,6 +29,30 @@ def fail_preview(job_id: UUID, file_id: UUID | None, reason: str) -> None:
 
 def process_preview(job_id: UUID, file_id: UUID) -> None:
     fail_preview(job_id, file_id, "Office 文件本期仅支持权限校验后的原文件下载")
+
+
+def process_oss_delete(job_id: UUID, keys: list[str]) -> None:
+    failed_keys = []
+    errors = []
+    for key in keys:
+        try:
+            storage.delete_object(key)
+        except Exception as error:
+            failed_keys.append(key)
+            errors.append(f"{key}: {type(error).__name__}")
+    with SessionLocal.begin() as db:
+        job = db.get(BackgroundJob, job_id)
+        if not job:
+            return
+        job.payload = {"keys": failed_keys}
+        if failed_keys:
+            job.status = "PENDING"
+            job.available_at = datetime.now(UTC) + timedelta(minutes=min(60, 2 ** min(job.attempts, 5)))
+            job.locked_at = None
+            job.last_error = "; ".join(errors)[:500]
+        else:
+            job.status = "COMPLETED"
+            job.last_error = None
 
 
 def process_auto_review(db, current: datetime) -> None:
@@ -112,6 +137,25 @@ def process_due_campaign(db, current: datetime) -> None:
     publish_event(db, class_id=campaign.class_id, scopes=["reviews", "grades", "dashboard"], resource_type="review_campaign", resource_id=campaign.id)
 
 
+def cleanup_markdown_assets(db, current: datetime) -> None:
+    cutoff = current - timedelta(hours=settings.markdown_asset_orphan_hours)
+    assets = db.scalars(
+        select(MarkdownAsset)
+        .where(MarkdownAsset.orphaned_at.is_not(None), MarkdownAsset.orphaned_at <= cutoff)
+        .order_by(MarkdownAsset.orphaned_at)
+        .with_for_update(skip_locked=True)
+        .limit(20)
+    ).all()
+    for asset in assets:
+        has_document = db.scalar(select(SubmissionDocumentAsset.asset_id).where(SubmissionDocumentAsset.asset_id == asset.id).limit(1))
+        has_file = db.scalar(select(FileObjectAsset.asset_id).where(FileObjectAsset.asset_id == asset.id).limit(1))
+        if has_document or has_file:
+            asset.orphaned_at = None
+            continue
+        storage.delete_object(asset.storage_path)
+        db.delete(asset)
+
+
 def run_once() -> None:
     with SessionLocal.begin() as db:
         current = datetime.now(UTC)
@@ -120,6 +164,7 @@ def run_once() -> None:
         db.execute(delete(RealtimeEvent).where(RealtimeEvent.created_at < current - timedelta(days=1)))
         process_auto_review(db, current)
         process_due_campaign(db, current)
+        cleanup_markdown_assets(db, current)
         job = db.scalar(select(BackgroundJob).where(BackgroundJob.status == "PENDING", BackgroundJob.available_at <= current).with_for_update(skip_locked=True).limit(1))
         if not job:
             return
@@ -128,13 +173,17 @@ def run_once() -> None:
         job.attempts += 1
         job_id = job.id
         job_kind = job.kind
+        job_payload = job.payload or {}
         try:
-            file_id = UUID(job.payload["file_id"]) if job_kind == "FILE_PREVIEW" and job.payload.get("file_id") else None
+            file_id = UUID(job_payload["file_id"]) if job_kind == "FILE_PREVIEW" and job_payload.get("file_id") else None
         except (KeyError, TypeError, ValueError):
             file_id = None
+        delete_keys = [key for key in job_payload.get("keys", []) if isinstance(key, str)] if job_kind == "OSS_DELETE" else []
 
     if job_kind == "FILE_PREVIEW" and file_id:
         process_preview(job_id, file_id)
+    elif job_kind == "OSS_DELETE":
+        process_oss_delete(job_id, delete_keys)
     else:
         fail_preview(job_id, file_id, "当前任务类型没有可用处理器")
 
