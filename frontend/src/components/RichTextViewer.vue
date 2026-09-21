@@ -8,6 +8,9 @@ const root = ref(null)
 const highlights = ref([])
 const blockSelector = 'p,h1,h2,h3,h4,li,blockquote,pre,td,th'
 let mermaidRenderVersion = 0
+let highlightFrame = 0
+let resizeObserver
+let observedSize = ''
 
 async function renderMermaidBlocks() {
   const version = ++mermaidRenderVersion
@@ -84,6 +87,14 @@ function rebuildHighlights() {
   highlights.value = items
 }
 
+function scheduleHighlightRebuild() {
+  if (highlightFrame) return
+  highlightFrame = requestAnimationFrame(() => {
+    highlightFrame = 0
+    rebuildHighlights()
+  })
+}
+
 async function refresh() {
   await nextTick()
   applyMediaDimensions()
@@ -149,8 +160,25 @@ function selectExisting(id, event, openBubble = false) {
 watch(() => props.html, refresh)
 watch(() => props.annotations, refresh, { deep: true })
 watch(() => props.selectedAnnotationId, focusAnnotation)
-onMounted(() => { refresh(); window.addEventListener('resize', rebuildHighlights) })
-onBeforeUnmount(() => { mermaidRenderVersion += 1; cleanupMermaidArtifacts(); window.removeEventListener('resize', rebuildHighlights) })
+onMounted(() => {
+  refresh()
+  resizeObserver = new ResizeObserver(entries => {
+    const rect = entries[0]?.contentRect
+    const size = rect ? `${Math.round(rect.width * 10)}:${Math.round(rect.height * 10)}` : ''
+    if (!size || size === observedSize) return
+    observedSize = size
+    scheduleHighlightRebuild()
+  })
+  if (root.value) resizeObserver.observe(root.value)
+  window.addEventListener('resize', scheduleHighlightRebuild)
+})
+onBeforeUnmount(() => {
+  mermaidRenderVersion += 1
+  if (highlightFrame) cancelAnimationFrame(highlightFrame)
+  resizeObserver?.disconnect()
+  cleanupMermaidArtifacts()
+  window.removeEventListener('resize', scheduleHighlightRebuild)
+})
 </script>
 
 <template>

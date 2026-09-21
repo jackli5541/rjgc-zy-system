@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { DeleteOutlined, DownloadOutlined, EditOutlined, FileTextOutlined, KeyOutlined, ReloadOutlined, SaveOutlined, UserOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { api, exportArchive } from '../api'
+import { useResizableDrawer } from '../useHorizontalResize'
 
 const props = defineProps({ student: Object, classId: String, writable: Boolean })
 const emit = defineEmits(['close', 'saved', 'reset-password', 'remove', 'preview'])
@@ -13,6 +14,8 @@ const editing = ref(false)
 const name = ref('')
 const saving = ref(false)
 const exporting = ref(false)
+const DRAWER_DEFAULT_RATIO = .82
+const { width: drawerWidth, resizing: drawerResizing, startResize: startDrawerResize } = useResizableDrawer({ initialWidth: () => Math.max(420, window.innerWidth * DRAWER_DEFAULT_RATIO), minWidth: 420, storageKey: 'student-portfolio-drawer-width' })
 const activeAssignments = ref([])
 const assignmentFilter = ref('ALL')
 let generation = 0
@@ -65,8 +68,9 @@ async function exportStudent() {
 </script>
 
 <template>
-  <button v-if="student" type="button" class="portfolio-click-away" aria-label="关闭学生档案" @click="emit('close')"/>
-  <a-drawer :open="Boolean(student)" title="学生档案" :mask="false" :width="'min(720px, 100vw)'" :get-container="false" :root-style="{position:'fixed'}" :z-index="950" :push="false" root-class-name="student-portfolio-drawer" @close="emit('close')">
+  <button v-if="student" type="button" class="portfolio-click-away" :style="{right:`${drawerWidth}px`}" aria-label="关闭学生档案" @click="emit('close')"/>
+  <a-drawer :open="Boolean(student)" title="学生档案" :mask="false" :width="`${drawerWidth}px`" :get-container="false" :root-style="{position:'fixed','--drawer-width':`${drawerWidth}px`}" :z-index="950" :push="false" :root-class-name="drawerResizing?'student-portfolio-drawer resizing':'student-portfolio-drawer'" @close="emit('close')">
+    <span class="drawer-resize-handle" role="separator" aria-label="调整学生档案抽屉宽度" aria-orientation="vertical" @pointerdown="startDrawerResize($event)"/>
     <template #extra><a-space><a-tooltip title="刷新档案"><a-button type="text" shape="circle" :loading="loading" aria-label="刷新档案" @click="load"><ReloadOutlined/></a-button></a-tooltip><a-button :loading="exporting" @click="exportStudent"><DownloadOutlined/> 导出 ZIP</a-button></a-space></template>
     <a-alert v-if="error" type="error" :message="error" show-icon/><a-skeleton v-else-if="loading && !data" active/>
     <template v-if="data">

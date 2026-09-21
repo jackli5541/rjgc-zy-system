@@ -1,18 +1,19 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowDownOutlined, ArrowUpOutlined, BookOutlined, CaretRightOutlined, CloseOutlined, ColumnWidthOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, MinusOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { api, exportArchive, randomUUID } from '../api'
 import { loadMarkdownPreview } from '../markdownPreview'
 import PdfDocumentViewer from './PdfDocumentViewer.vue'
-import ReviewCriteriaPane from './ReviewCriteriaPane.vue'
 import RichTextEditor from './RichTextEditor.vue'
 import RichTextViewer from './RichTextViewer.vue'
+import { useResizableDrawer, useResizableRightPane } from '../useHorizontalResize'
 
 const props = defineProps({
   open: Boolean,
   files: { type: Array, default: () => [] },
   criteriaFiles: { type: Array, default: () => [] },
+  criteriaText: { type: String, default: '' },
   initialIndex: { type: Number, default: 0 },
   submissionVersionId: { type: String, default: '' },
   owner: { type: String, default: '' },
@@ -53,18 +54,38 @@ const criteriaButton = ref(null)
 const criteriaPanel = ref(null)
 const selectionMenu = reactive({ open: false, left: 0, top: 0 })
 const commentComposer = reactive({ open: false, visible: true, mode: 'new', annotationId: '', left: 0, top: 0, value: '' })
-const criteriaState = reactive({ visible: false, collapsed: false, index: 0, loading: false, error: '', html: '', left: 20, top: 20 })
+const criteriaState = reactive({ visible: false, collapsed: false, index: 0, loading: false, error: '', html: '', left: 20, top: 20, width: 420, height: 620 })
 const criteriaDrag = reactive({ active: false, pointerId: null, offsetX: 0, offsetY: 0 })
+const criteriaResize = reactive({ active: false, pointerId: null, direction: '', startX: 0, startY: 0, startLeft: 0, startTop: 0, startWidth: 0, startHeight: 0 })
+const criteriaResizeDirections = ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']
 let loadSequence = 0
 let criteriaLoadSequence = 0
 let positionFrame = 0
+let criteriaDragFrame = 0
+let criteriaResizeFrame = 0
+let criteriaDragBounds = null
+let criteriaResizeBounds = null
+let pendingCriteriaPosition = null
+let pendingCriteriaRect = null
 let feedbackBaseline = ''
 let drawerAnimationTimer
 const drawerAnimating = ref(false)
+const DRAWER_COLLAPSED_RATIO = .82
+const FILE_REVIEW_MIN_WIDTH = 1120
+const { width: drawerWidth, resizing: drawerResizing, startResize: startDrawerResize } = useResizableDrawer({ initialWidth: () => Math.max(FILE_REVIEW_MIN_WIDTH, window.innerWidth * DRAWER_COLLAPSED_RATIO), minWidth: FILE_REVIEW_MIN_WIDTH, storageKey: 'file-review-drawer-width' })
+const { width: feedbackWidth, resizing: feedbackResizing, resizeBy: resizeFeedbackBy, startResize: startFeedbackResize } = useResizableRightPane({ initialWidth: 400, minWidth: 300, maxWidth: 520, leftMinWidth: 328, storageKey: 'file-review-feedback-width' })
+if (props.expanded) drawerWidth.value = window.innerWidth
+const collapsedDrawerWidth = () => Math.min(window.innerWidth, Math.max(Math.min(FILE_REVIEW_MIN_WIDTH, window.innerWidth), window.innerWidth * DRAWER_COLLAPSED_RATIO))
 const toggleExpanded = () => {
   clearTimeout(drawerAnimationTimer)
   drawerAnimating.value = true
-  emit('update:expanded', !props.expanded)
+  if (props.expanded) {
+    drawerWidth.value = collapsedDrawerWidth()
+    emit('update:expanded', false)
+  } else {
+    drawerWidth.value = window.innerWidth
+    emit('update:expanded', true)
+  }
   drawerAnimationTimer = setTimeout(() => { drawerAnimating.value = false }, 220)
 }
 const feedback = reactive({ status: null, revision: 0, grade: undefined, comment: '', annotations: [], published_at: null, has_draft: false })
@@ -84,7 +105,12 @@ async function downloadActiveFile() {
   finally { downloading.value = false }
 }
 const activeCriteria = computed(() => props.criteriaFiles[criteriaState.index] || null)
-const criteriaPanelStyle = computed(() => ({ left: `${criteriaState.left}px`, top: `${criteriaState.top}px` }))
+const criteriaPanelStyle = computed(() => ({
+  left: `${criteriaState.left}px`,
+  top: `${criteriaState.top}px`,
+  width: `${criteriaState.width}px`,
+  height: criteriaState.collapsed ? 'auto' : `${criteriaState.height}px`
+}))
 const renderType = computed(() => activeFile.value?.render_type || (/\.pdf$/i.test(activeFile.value?.name || '') ? 'PDF' : /\.(md|html?)$/i.test(activeFile.value?.name || '') ? 'RICH_TEXT' : /\.(png|jpe?g|gif|webp)$/i.test(activeFile.value?.name || '') ? 'IMAGE' : 'DOWNLOAD_ONLY'))
 const activeAnnotations = computed(() => feedback.annotations.filter(item => item.file_id === activeFile.value?.id))
 const visiblePeerFeedbacks = computed(() => props.mode === 'TEACHER' ? props.peerFeedbacks : [])
@@ -95,6 +121,7 @@ const activePeerAnnotations = computed(() => visiblePeerFeedbacks.value.flatMap(
 const previewAnnotations = computed(() => [...activeAnnotations.value, ...activePeerAnnotations.value])
 const selectedAnnotation = computed(() => previewAnnotations.value.find(item => item.id === selectedAnnotationId.value) || null)
 const hasFeedbackPanel = computed(() => Boolean(props.submissionVersionId) && (props.editable || feedback.status || visiblePeerFeedbacks.value.length))
+const hasCriteria = computed(() => Boolean(props.criteriaText.trim()) || props.criteriaFiles.length > 0)
 const hasTargetNavigation = computed(() => props.mode === 'TEACHER' && props.targets.length > 1)
 const colors = [
   { value: 'YELLOW', label: '黄色' }, { value: 'GREEN', label: '绿色' },
@@ -190,6 +217,7 @@ function openCriteriaPanel() {
 function hideCriteriaPanel(restoreFocus = true) {
   criteriaState.visible = false
   criteriaDrag.active = false
+  criteriaResize.active = false
   if (restoreFocus) requestAnimationFrame(() => criteriaButton.value?.$el?.focus?.() || criteriaButton.value?.focus?.())
 }
 
@@ -202,24 +230,108 @@ function startCriteriaDrag(event) {
   if (window.innerWidth <= 760 || event.target.closest?.('button')) return
   const panel = criteriaPanel.value?.getBoundingClientRect()
   if (!panel) return
+  criteriaDragBounds = criteriaPanelBounds()
   Object.assign(criteriaDrag, { active: true, pointerId: event.pointerId, offsetX: event.clientX - panel.left, offsetY: event.clientY - panel.top })
+  criteriaDrag.width = panel.width
+  criteriaDrag.height = panel.height
   event.currentTarget.setPointerCapture?.(event.pointerId)
 }
 
+function applyCriteriaPosition() {
+  criteriaDragFrame = 0
+  if (!pendingCriteriaPosition || !criteriaPanel.value) return
+  criteriaPanel.value.style.left = `${pendingCriteriaPosition.left}px`
+  criteriaPanel.value.style.top = `${pendingCriteriaPosition.top}px`
+}
+
 function moveCriteriaPanel(event) {
-  if (!criteriaDrag.active || event.pointerId !== criteriaDrag.pointerId || !documentStage.value || !criteriaPanel.value) return
-  const bounds = criteriaPanelBounds()
-  const panel = criteriaPanel.value.getBoundingClientRect()
+  if (!criteriaDrag.active || event.pointerId !== criteriaDrag.pointerId || !criteriaDragBounds || !criteriaPanel.value) return
+  const bounds = criteriaDragBounds
   const minLeft = bounds.left + 10
   const minTop = bounds.top + 10
-  const maxLeft = Math.max(minLeft, bounds.right - panel.width - 10)
-  const maxTop = Math.max(minTop, bounds.bottom - panel.height - 10)
-  criteriaState.left = Math.max(minLeft, Math.min(maxLeft, event.clientX - criteriaDrag.offsetX))
-  criteriaState.top = Math.max(minTop, Math.min(maxTop, event.clientY - criteriaDrag.offsetY))
+  const maxLeft = Math.max(minLeft, bounds.right - criteriaDrag.width - 10)
+  const maxTop = Math.max(minTop, bounds.bottom - criteriaDrag.height - 10)
+  pendingCriteriaPosition = {
+    left: Math.max(minLeft, Math.min(maxLeft, event.clientX - criteriaDrag.offsetX)),
+    top: Math.max(minTop, Math.min(maxTop, event.clientY - criteriaDrag.offsetY))
+  }
+  if (!criteriaDragFrame) criteriaDragFrame = requestAnimationFrame(applyCriteriaPosition)
 }
 
 function stopCriteriaDrag(event) {
-  if (event.pointerId === criteriaDrag.pointerId) criteriaDrag.active = false
+  if (event.pointerId !== criteriaDrag.pointerId) return
+  moveCriteriaPanel(event)
+  if (criteriaDragFrame) cancelAnimationFrame(criteriaDragFrame)
+  applyCriteriaPosition()
+  if (pendingCriteriaPosition) Object.assign(criteriaState, pendingCriteriaPosition)
+  pendingCriteriaPosition = null
+  criteriaDragBounds = null
+  criteriaDrag.active = false
+}
+const resizeDrawer = event => {
+  const currentWidth = props.expanded ? window.innerWidth : drawerWidth.value
+  if (props.expanded) emit('update:expanded', false)
+  startDrawerResize(event, currentWidth)
+}
+const workspaceStyle = computed(() => hasFeedbackPanel.value ? { '--right-pane-width': `${feedbackWidth.value}px`, gridTemplateColumns: 'minmax(320px, 1fr) 8px var(--right-pane-width)' } : undefined)
+
+function handleFeedbackSeparatorKey(event) {
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return
+  event.preventDefault()
+  resizeFeedbackBy(event.key === 'ArrowLeft' ? 24 : -24, drawerRoot.value)
+}
+
+function startCriteriaResize(event, direction) {
+  if (window.innerWidth <= 760 || criteriaState.collapsed) return
+  const panel = criteriaPanel.value?.getBoundingClientRect()
+  if (!panel) return
+  event.stopPropagation()
+  criteriaResizeBounds = criteriaPanelBounds()
+  Object.assign(criteriaResize, { active: true, pointerId: event.pointerId, direction, startX: event.clientX, startY: event.clientY, startLeft: panel.left, startTop: panel.top, startWidth: panel.width, startHeight: panel.height })
+  event.currentTarget.setPointerCapture?.(event.pointerId)
+}
+
+function applyCriteriaRect() {
+  criteriaResizeFrame = 0
+  if (!pendingCriteriaRect || !criteriaPanel.value) return
+  const { left, top, width, height } = pendingCriteriaRect
+  Object.assign(criteriaPanel.value.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` })
+}
+
+function resizeCriteriaPanel(event) {
+  if (!criteriaResize.active || event.pointerId !== criteriaResize.pointerId || !criteriaResizeBounds || !criteriaPanel.value) return
+  const bounds = criteriaResizeBounds
+  const dx = event.clientX - criteriaResize.startX
+  const dy = event.clientY - criteriaResize.startY
+  const minLeft = bounds.left + 10
+  const minTop = bounds.top + 10
+  let left = criteriaResize.startLeft
+  let top = criteriaResize.startTop
+  let width = criteriaResize.startWidth
+  let height = criteriaResize.startHeight
+  if (criteriaResize.direction.includes('e')) width = Math.max(300, Math.min(bounds.right - criteriaResize.startLeft - 10, criteriaResize.startWidth + dx))
+  if (criteriaResize.direction.includes('s')) height = Math.max(180, Math.min(bounds.bottom - criteriaResize.startTop - 10, criteriaResize.startHeight + dy))
+  if (criteriaResize.direction.includes('w')) {
+    left = Math.max(minLeft, Math.min(criteriaResize.startLeft + criteriaResize.startWidth - 300, criteriaResize.startLeft + dx))
+    width = criteriaResize.startWidth + criteriaResize.startLeft - left
+  }
+  if (criteriaResize.direction.includes('n')) {
+    top = Math.max(minTop, Math.min(criteriaResize.startTop + criteriaResize.startHeight - 180, criteriaResize.startTop + dy))
+    height = criteriaResize.startHeight + criteriaResize.startTop - top
+  }
+  pendingCriteriaRect = { left, top, width, height }
+  if (!criteriaResizeFrame) criteriaResizeFrame = requestAnimationFrame(applyCriteriaRect)
+}
+
+function stopCriteriaResize(event) {
+  if (event.pointerId !== criteriaResize.pointerId) return
+  resizeCriteriaPanel(event)
+  if (criteriaResizeFrame) cancelAnimationFrame(criteriaResizeFrame)
+  applyCriteriaRect()
+  if (pendingCriteriaRect) Object.assign(criteriaState, pendingCriteriaRect)
+  pendingCriteriaRect = null
+  criteriaResizeBounds = null
+  criteriaResize.active = false
 }
 
 async function loadFeedback() {
@@ -411,11 +523,27 @@ function handleGlobalScroll() {
 }
 
 function handleResize() {
+  if (props.expanded) drawerWidth.value = window.innerWidth
   scheduleComposerPosition()
   if (criteriaState.visible) requestAnimationFrame(() => positionCriteriaPanel())
 }
 
 function handleGlobalKey(event) {
+  if (event.key === 'F1' && props.open && criteriaState.visible) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (!event.repeat) toggleCriteriaCollapsed()
+    return
+  }
+  if (event.key === 'F2' && props.open && hasCriteria.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (!event.repeat) {
+      if (criteriaState.visible) hideCriteriaPanel(false)
+      else openCriteriaPanel()
+    }
+    return
+  }
   if (event.key === 'Escape') {
     if (commentComposer.open) cancelComment()
     else if (criteriaState.visible) {
@@ -524,18 +652,40 @@ watch(() => props.submissionVersionId, () => {
   index.value = 0
   loadFeedback(); loadFile()
 })
+watch(() => props.expanded, value => {
+  if (value) {
+    drawerWidth.value = window.innerWidth
+  } else if (!drawerResizing.value && drawerWidth.value >= window.innerWidth - 1) {
+    drawerWidth.value = collapsedDrawerWidth()
+  }
+})
+watch([() => props.open, () => props.expanded, hasFeedbackPanel], async () => {
+  if (!props.open || !hasFeedbackPanel.value) return
+  await nextTick()
+  resizeFeedbackBy(0, drawerRoot.value)
+})
+watch(drawerResizing, async value => {
+  if (value || !props.open || !hasFeedbackPanel.value) return
+  await nextTick()
+  resizeFeedbackBy(0, drawerRoot.value)
+})
+watch(drawerWidth, () => {
+  if (commentComposer.open && commentComposer.mode === 'edit') scheduleComposerPosition()
+})
 onMounted(() => { document.addEventListener('pointerdown', handleGlobalPointer); document.addEventListener('scroll', handleGlobalScroll, true); document.addEventListener('keydown', handleGlobalKey); window.addEventListener('resize', handleResize) })
-onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawerAnimationTimer); document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
+onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawerAnimationTimer); document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); if (criteriaDragFrame) cancelAnimationFrame(criteriaDragFrame); if (criteriaResizeFrame) cancelAnimationFrame(criteriaResizeFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
 </script>
 
 <template>
-  <a-drawer :open="open" :width="expanded?'100vw':'min(100vw, 1440px)'" :z-index="1200" placement="right" :root-class-name="expanded?'review-workspace-drawer expanded':'review-workspace-drawer'" @close="emit('close')">
+  <a-drawer :open="open" :width="`${drawerWidth}px`" :z-index="1200" placement="right" :root-style="{'--drawer-width':`${drawerWidth}px`}" :root-class-name="['review-workspace-drawer',expanded?'expanded':'',drawerResizing?'resizing':''].filter(Boolean).join(' ')" @close="emit('close')">
     <template #title><div class="review-drawer-title"><span class="review-drawer-filename" :title="activeFile?.name||'文件预览'">{{activeFile?.name||'文件预览'}}</span><strong v-if="assignmentTitle" class="review-drawer-assignment" :title="assignmentTitle">{{assignmentTitle}}</strong><span/></div></template>
-    <a-tooltip :open="drawerAnimating?false:undefined" :title="expanded?'收回':'展开至全屏'" placement="right"><button type="button" class="review-drawer-expand-button" :aria-label="expanded?'收回作业批改':'将作业批改展开至全屏'" @click="toggleExpanded"><RightOutlined v-if="expanded"/><ExpandOutlined v-else/></button></a-tooltip>
-    <div v-if="mode!=='PEER'||!criteriaFiles.length" class="review-workspace-toolbar">
+    <span class="drawer-resize-handle with-center-control drawer-resize-handle-top" role="separator" aria-label="调整文件评审抽屉宽度" aria-orientation="vertical" @pointerdown="resizeDrawer"/>
+    <span class="drawer-resize-handle with-center-control drawer-resize-handle-bottom" role="separator" aria-label="调整文件评审抽屉宽度" aria-orientation="vertical" @pointerdown="resizeDrawer"/>
+    <a-tooltip :open="drawerAnimating?false:undefined" :title="expanded?'收回':'展开至全屏'" placement="right"><button type="button" class="review-drawer-expand-button" :aria-label="expanded?'收回作业批改':'将作业批改展开至全屏'" @pointerdown.stop @click="toggleExpanded"><RightOutlined v-if="expanded"/><ExpandOutlined v-else/></button></a-tooltip>
+    <div class="review-workspace-toolbar">
       <a-space>
-        <strong v-if="mode==='PEER'&&criteriaFiles.length" class="review-pane-label">学生作品</strong>
-        <span v-if="mode==='PEER'&&criteriaFiles.length" class="review-toolbar-divider"></span>
+        <strong v-if="mode==='PEER'" class="review-pane-label">学生作品</strong>
+        <span v-if="mode==='PEER'" class="review-toolbar-divider"></span>
         <template v-if="hasTargetNavigation">
           <a-tooltip title="上一位学生（↑）"><span><a-button shape="circle" :disabled="targetIndex<=0||saving" @click="requestTarget(-1)"><ArrowUpOutlined/></a-button></span></a-tooltip>
           <strong class="review-target-progress">{{owner}} · {{targetIndex+1}} / {{targets.length}}</strong>
@@ -560,29 +710,16 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <div v-if="feedback.grade" class="review-score-group teacher-score"><strong>教师评分</strong><a-tag :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
       </div>
       <div class="review-toolbar-actions">
-        <a-badge v-if="criteriaFiles.length" :count="criteriaFiles.length" :show-zero="false" size="small">
-          <a-button ref="criteriaButton" :type="criteriaState.visible?'primary':'default'" :aria-expanded="criteriaState.visible" aria-controls="review-criteria-panel" @click="criteriaState.visible?hideCriteriaPanel():openCriteriaPanel()"><BookOutlined/> 判定标准</a-button>
-        </a-badge>
+        <a-tooltip v-if="hasCriteria" :title="criteriaState.visible?'隐藏判定标准（F2）':'显示判定标准（F2）'">
+          <a-badge :count="criteriaFiles.length" :show-zero="false" size="small">
+            <a-button ref="criteriaButton" :type="criteriaState.visible?'primary':'default'" :aria-expanded="criteriaState.visible" aria-controls="review-criteria-panel" @click="criteriaState.visible?hideCriteriaPanel():openCriteriaPanel()"><BookOutlined/> 判定标准</a-button>
+          </a-badge>
+        </a-tooltip>
         <a-button v-if="activeFile&&allowDownload" :loading="downloading" @click="downloadActiveFile"><DownloadOutlined/> {{activeFileIsMarkdown?'下载离线包':'下载原文件'}}</a-button>
       </div>
     </div>
-    <div ref="drawerRoot" class="file-review-workspace" :class="{'with-feedback':hasFeedbackPanel,'peer-comparison':mode==='PEER'&&criteriaFiles.length}">
-      <ReviewCriteriaPane v-if="mode==='PEER'&&criteriaFiles.length" :files="criteriaFiles"/>
-      <section class="submission-preview-pane" :class="{standalone:mode!=='PEER'||!criteriaFiles.length}">
-        <header v-if="mode==='PEER'&&criteriaFiles.length" class="submission-preview-toolbar">
-          <strong>学生作品</strong>
-          <a-tooltip title="上一个作品文件"><span><a-button shape="circle" :disabled="index<=0" @click="index-=1"><LeftOutlined/></a-button></span></a-tooltip>
-          <span>{{files.length ? `${index+1} / ${files.length}` : '0 / 0'}}</span>
-          <a-tooltip title="下一个作品文件"><span><a-button shape="circle" :disabled="index>=files.length-1" @click="index+=1"><RightOutlined/></a-button></span></a-tooltip>
-          <a-select v-if="files.length>1" v-model:value="index" :options="files.map((item,fileIndex)=>({value:fileIndex,label:fileOptionLabel(item)}))"/>
-          <template v-if="renderType!=='PDF'">
-            <i></i>
-            <a-tooltip title="缩小作品"><a-button shape="circle" :disabled="contentZoom<=.6" @click="contentZoom=Math.max(.6,contentZoom-.1)"><ZoomOutOutlined/></a-button></a-tooltip>
-            <span>{{Math.round(contentZoom*100)}}%</span>
-            <a-tooltip title="放大作品"><a-button shape="circle" :disabled="contentZoom>=2" @click="contentZoom=Math.min(2,contentZoom+.1)"><ZoomInOutlined/></a-button></a-tooltip>
-            <a-tooltip title="恢复作品大小"><a-button shape="circle" @click="contentZoom=1"><ColumnWidthOutlined/></a-button></a-tooltip>
-          </template>
-        </header>
+    <div ref="drawerRoot" class="file-review-workspace" :class="{'with-feedback':hasFeedbackPanel,'resizing-feedback':feedbackResizing}" :style="workspaceStyle">
+      <section class="submission-preview-pane standalone">
         <main ref="documentStage" class="review-document-stage">
           <a-spin v-if="loading" size="large" tip="正在加载文件"/>
           <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile&&allowDownload" type="primary" :loading="downloading" @click="downloadActiveFile"><DownloadOutlined/> {{activeFileIsMarkdown?'下载离线包':'下载原文件'}}</a-button></template></a-result>
@@ -591,6 +728,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
           <div v-else-if="renderType==='IMAGE'&&binaryUrl" class="review-image-scroll"><img class="review-image" :style="{width:`${contentZoom*100}%`,maxWidth:'none'}" :src="binaryUrl" :alt="activeFile?.name" @error="error='图片加载失败'"/></div>
         </main>
       </section>
+      <span v-if="hasFeedbackPanel" class="review-split-handle" role="separator" tabindex="0" aria-label="调整文件区域和评审区域宽度" aria-orientation="vertical" @pointerdown="startFeedbackResize($event,drawerRoot)" @keydown="handleFeedbackSeparatorKey"/>
       <aside v-if="hasFeedbackPanel" class="feedback-sidebar">
         <a-alert v-if="externalWarning" type="warning" show-icon message="提交或评价数据已更新" description="当前未保存内容已保留。完成本次编辑后将自动同步最新数据。"/>
         <div class="feedback-heading"><div><strong>{{owner||'教师反馈'}}</strong><span v-if="feedback.status">{{feedback.status==='PUBLISHED'?'已发布':'草稿'}}<template v-if="feedback.has_draft"> · 有待发布修改</template></span></div><a-tag v-if="feedback.grade" :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
@@ -633,12 +771,12 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
     </div>
   </a-drawer>
   <Teleport to="body">
-    <section v-if="criteriaState.visible" id="review-criteria-panel" ref="criteriaPanel" class="review-criteria-panel" :class="{collapsed:criteriaState.collapsed,dragging:criteriaDrag.active}" :style="criteriaPanelStyle" role="dialog" aria-modal="false" aria-label="判定标准">
+    <section v-if="criteriaState.visible" id="review-criteria-panel" ref="criteriaPanel" class="review-criteria-panel" :class="{collapsed:criteriaState.collapsed,dragging:criteriaDrag.active,resizing:criteriaResize.active}" :style="criteriaPanelStyle" role="dialog" aria-modal="false" aria-label="判定标准">
       <header class="review-criteria-header" @pointerdown="startCriteriaDrag" @pointermove="moveCriteriaPanel" @pointerup="stopCriteriaDrag" @pointercancel="stopCriteriaDrag">
-        <div><BookOutlined/><strong>判定标准</strong><span v-if="criteriaFiles.length">{{ criteriaFiles.length }} 个文件</span></div>
+        <div><BookOutlined/><strong>判定标准</strong><span v-if="criteriaFiles.length">{{ criteriaFiles.length }} 个文件</span><span v-else-if="criteriaText.trim()">文字标准</span></div>
         <div class="review-criteria-window-actions">
-          <a-tooltip :z-index="1300" :title="criteriaState.collapsed?'展开':'折叠'"><a-button type="text" shape="circle" :aria-label="criteriaState.collapsed?'展开判定标准':'折叠判定标准'" @click="toggleCriteriaCollapsed"><ExpandOutlined v-if="criteriaState.collapsed"/><MinusOutlined v-else/></a-button></a-tooltip>
-          <a-tooltip :z-index="1300" title="隐藏"><a-button type="text" shape="circle" aria-label="隐藏判定标准" @click="hideCriteriaPanel()"><CloseOutlined/></a-button></a-tooltip>
+          <a-tooltip :z-index="1300" :title="criteriaState.collapsed?'展开（F1）':'折叠（F1）'"><a-button type="text" shape="circle" :aria-label="criteriaState.collapsed?'展开判定标准':'折叠判定标准'" @click="toggleCriteriaCollapsed"><ExpandOutlined v-if="criteriaState.collapsed"/><MinusOutlined v-else/></a-button></a-tooltip>
+          <a-tooltip :z-index="1300" title="隐藏（F2）"><a-button type="text" shape="circle" aria-label="隐藏判定标准" @click="hideCriteriaPanel()"><CloseOutlined/></a-button></a-tooltip>
         </div>
       </header>
       <template v-if="!criteriaState.collapsed">
@@ -646,12 +784,14 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
           <button v-for="(file,fileIndex) in criteriaFiles" :key="file.id" type="button" role="tab" :aria-selected="criteriaState.index===fileIndex" :class="{active:criteriaState.index===fileIndex}" @click="criteriaState.index=fileIndex">{{ file.name }}</button>
         </div>
         <div class="review-criteria-content" aria-live="polite">
-          <a-empty v-if="!criteriaFiles.length" :description="criteriaLocked?'完成自己的作业提交后可查看判定标准':'该作业尚未上传判定标准'"/>
-          <a-spin v-else-if="criteriaState.loading" tip="正在加载判定标准"/>
-          <a-result v-else-if="criteriaState.error" status="warning" title="无法在线预览" :sub-title="criteriaState.error"><template #extra><a-button :href="`/api/v1/files/${activeCriteria.id}`"><DownloadOutlined/> 下载文件</a-button></template></a-result>
-          <div v-else-if="criteriaState.html" class="review-criteria-document"><RichTextViewer :html="criteriaState.html"/></div>
+          <div v-if="criteriaText.trim()" class="review-criteria-text"><strong>评分要求</strong><p>{{criteriaText}}</p></div>
+          <a-empty v-if="!criteriaFiles.length&&!criteriaText.trim()" :description="criteriaLocked?'完成自己的作业提交后可查看判定标准':'该作业尚未上传判定标准'"/>
+          <a-spin v-else-if="criteriaFiles.length&&criteriaState.loading" tip="正在加载判定标准"/>
+          <a-result v-else-if="criteriaFiles.length&&criteriaState.error" status="warning" title="无法在线预览" :sub-title="criteriaState.error"><template #extra><a-button :href="`/api/v1/files/${activeCriteria.id}`"><DownloadOutlined/> 下载文件</a-button></template></a-result>
+          <div v-else-if="criteriaFiles.length&&criteriaState.html" class="review-criteria-document"><RichTextViewer :html="criteriaState.html"/></div>
         </div>
       </template>
+      <span v-for="direction in criteriaState.collapsed?[]:criteriaResizeDirections" :key="direction" class="review-criteria-resize-handle" :class="`direction-${direction}`" aria-hidden="true" @pointerdown="startCriteriaResize($event,direction)" @pointermove="resizeCriteriaPanel" @pointerup="stopCriteriaResize" @pointercancel="stopCriteriaResize"></span>
     </section>
     <div v-if="selectionMenu.open" class="selection-action-menu" :style="{left:`${selectionMenu.left}px`,top:`${selectionMenu.top}px`}" @pointerdown.prevent>
       <a-tooltip title="高亮"><a-button type="text" shape="circle" @click="applyMark('HIGHLIGHT')"><HighlightOutlined/></a-button></a-tooltip>
@@ -681,26 +821,30 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
 .review-workspace-toolbar{grid-template-columns:minmax(0,1fr) minmax(0,auto) minmax(0,1fr)}.review-workspace-toolbar>.ant-btn{justify-self:end}.review-score-summary{display:flex;min-width:0;max-width:min(50vw,760px);align-items:center;justify-content:center;gap:12px;padding:4px 12px}.review-score-group{display:flex;min-width:0;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap}.review-score-group strong{flex:0 0 auto;color:#33475b;font-size:13px}.review-score-group .ant-tag{margin:0;font-weight:600}.review-score-divider{width:1px;height:28px;background:#d9e1e8}@media(max-width:1100px){.review-workspace-toolbar{display:flex;flex-wrap:wrap}.review-score-summary{order:3;width:100%;max-width:none;border-top:1px solid #edf0f2;padding-top:10px}.review-workspace-toolbar>.ant-btn{margin-left:auto}}@media(max-width:600px){.review-score-summary{align-items:stretch;flex-direction:column}.review-score-divider{width:100%;height:1px}.review-score-group{justify-content:flex-start}}
 .annotation-meta{margin:4px 0 0 18px;color:#8a97a5;font-size:11px}.annotation-color{display:inline-block;width:10px;height:10px;margin-right:7px;border-radius:50%;background:var(--swatch)}.color-yellow{--swatch:#f6bd16}.color-green{--swatch:#52a339}.color-red{--swatch:#e24a4a}.color-blue{--swatch:#3182ce}.annotation-item-actions{display:grid;grid-template-columns:92px 1fr auto;align-items:center;gap:8px;margin-top:9px}.inline-color-options{display:flex;gap:5px}.color-swatch{width:18px;height:18px;padding:0;border:2px solid #fff;border-radius:50%;outline:1px solid #cbd5df;background:var(--swatch);cursor:pointer}.color-swatch.active{outline:2px solid #233f5d;outline-offset:1px}.selection-action-menu{position:fixed;z-index:1200;display:flex;align-items:center;gap:3px;padding:5px 7px;border:1px solid #d7dfe7;border-radius:6px;background:#fff;box-shadow:0 6px 20px rgba(25,43,62,.2)}.selection-menu-divider{width:1px;height:24px;margin:0 4px;background:#e0e6eb}.annotation-composer{position:fixed;z-index:1201;width:330px;padding:10px;border:1px solid #ccd7e1;border-radius:6px;background:#fff;box-shadow:0 8px 28px rgba(25,43,62,.24)}.annotation-composer-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;margin-top:8px}.annotation-composer-actions>span{margin-right:auto;color:#8a97a5;font-size:11px}.annotation-readonly{max-height:180px;overflow:auto;color:#3e5368;line-height:1.6}.annotation-readonly p{margin:0 0 7px}@media(max-width:600px){.annotation-composer{right:12px!important;left:12px!important;width:auto}.selection-action-menu{max-width:calc(100vw - 24px);overflow-x:auto}.annotation-item-actions{grid-template-columns:1fr}}
 .file-review-workspace,.feedback-sidebar,.feedback-sidebar>*{min-width:0;max-width:100%}.feedback-sidebar{overflow-x:hidden;overflow-y:auto}.feedback-sidebar>.feedback-actions{max-width:none}.annotation-section,.annotation-item,.annotation-item-heading,.annotation-comment{min-width:0;max-width:100%}.annotation-item-heading>span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.annotation-comment,.annotation-comment *,.published-overall,.published-overall *{max-width:100%;overflow-wrap:anywhere;word-break:break-word}.annotation-comment pre,.annotation-comment code,.published-overall pre,.published-overall code{white-space:pre-wrap}.annotation-comment img,.published-overall img{max-width:100%;height:auto}.annotation-item-actions{grid-template-columns:minmax(0,92px) minmax(0,1fr)}.annotation-item-actions>.ant-btn{grid-column:1/-1;width:100%}.feedback-actions{min-width:0}.feedback-action-buttons>.ant-btn{max-width:100%}
-.review-drawer-expand-button{position:fixed;top:50dvh;right:calc(min(100vw,1440px) - 22px);left:auto;width:44px;height:44px;border:0;border-radius:0;background:transparent;box-shadow:none;clip-path:inset(0);transition:right .22s ease,clip-path .22s ease}
+.review-drawer-expand-button{position:fixed;z-index:30;top:50dvh;right:calc(var(--drawer-width) - 22px);left:auto;width:44px;height:44px;border:0;border-radius:0;background:transparent;box-shadow:none;clip-path:inset(0);transition:right .22s ease,clip-path .22s ease}
 .review-drawer-expand-button::before{position:absolute;inset:6px;border:1px solid #d5dee7;border-radius:5px;background:#fff;box-shadow:0 3px 10px rgba(20,39,58,.14);transform:rotate(45deg);content:''}
 .review-drawer-expand-button>.anticon{position:relative;z-index:1}
-.review-workspace-drawer.expanded .review-drawer-expand-button{right:calc(100vw - 22px);left:auto;clip-path:inset(0 0 0 50%)}
-.review-workspace-drawer.expanded .review-drawer-expand-button>.anticon{transform:translateX(11px)}
+.review-workspace-drawer.expanded .review-drawer-expand-button{right:calc(100vw - 44px);left:auto;clip-path:none}
+.review-workspace-drawer.expanded .review-drawer-expand-button::before{transform:translateX(-22px) rotate(45deg)}
+.review-workspace-drawer.expanded .review-drawer-expand-button>.anticon{transform:translateX(-11px)}
 .review-drawer-expand-button:hover::before,.review-drawer-expand-button:focus-visible::before{border-color:#1677ff}
 .review-drawer-expand-button:focus-visible{outline:0}
 .review-drawer-expand-button:focus-visible::before{box-shadow:0 0 0 2px #91caff,0 3px 10px rgba(20,39,58,.14)}
+.review-split-handle{position:relative;z-index:5;display:block;width:8px;min-width:8px;background:#edf1f4;cursor:ew-resize;touch-action:none}.review-split-handle::after{position:absolute;top:0;bottom:0;left:3px;width:2px;background:#c7d1da;content:'';transition:background .15s,box-shadow .15s}.review-split-handle:hover::after,.review-split-handle:focus-visible::after,.resizing-feedback .review-split-handle::after{background:#1677ff;box-shadow:0 0 0 2px rgba(22,119,255,.12)}.review-split-handle:focus-visible{outline:0}
 .review-target-progress{max-width:220px;overflow:hidden;color:#31465a;text-overflow:ellipsis;white-space:nowrap}.review-toolbar-divider{width:1px;min-width:1px!important;height:28px;background:#d9e1e8}.annotation-composer{transition:opacity .14s ease,transform .14s ease}.annotation-composer.hidden{opacity:0;transform:translateY(4px);pointer-events:none}@media(prefers-reduced-motion:reduce){.annotation-composer{transition:none}}
 .peer-feedback-section{display:grid;gap:10px;padding-top:15px;border-top:1px solid #e4e9ee}.peer-feedback-heading,.peer-reviewer{display:flex;align-items:center;justify-content:space-between;gap:10px}.peer-feedback-heading>div{display:flex;align-items:baseline;gap:8px}.peer-feedback-heading span{color:#7b8998;font-size:12px}.peer-feedback-card{padding:11px;border:1px solid #e3d5f2;border-left:3px solid #8b5cf6;border-radius:6px;background:#fcfaff}.peer-reviewer>span{display:flex;align-items:center;min-width:0;gap:7px;color:#33475b}.peer-color-key{display:inline-block;width:10px;height:10px;flex:0 0 auto;border-radius:50%;background:#8b5cf6}.peer-overall{margin-top:8px;color:#596a7c;font-size:13px;line-height:1.55}.peer-overall p{margin:0 0 5px}.peer-annotation-list{display:grid;gap:5px;margin-top:8px}.peer-annotation-list button{display:flex;min-width:0;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:1px solid #eadff5;border-radius:4px;color:#58466d;background:#fff;text-align:left;cursor:pointer}.peer-annotation-list button.active{border-color:#8b5cf6;background:#f4effb}.peer-annotation-list button span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.peer-annotation-list button small{flex:0 0 auto;color:#8a789e}.peer-comment-author{display:flex;align-items:center;gap:7px;margin-bottom:8px;color:#6d4c8b;font-size:12px;font-weight:600}
 .collapsible-section-heading{width:100%;padding:4px 2px;border:0;border-radius:4px;background:transparent;color:#31465a;font:inherit;text-align:left;cursor:pointer}.collapsible-section-heading:hover{background:#f3f6f9}.collapsible-section-heading:focus-visible{outline:2px solid #91caff;outline-offset:2px}.collapsible-section-heading>span:first-child,.collapsible-section-heading>div{display:flex;align-items:center;gap:8px}.collapsible-section-heading .anticon{flex:0 0 auto;color:#8492a1;font-size:11px;transition:transform .18s}.collapsible-section-heading .anticon.expanded{transform:rotate(90deg)}.collapsible-section-heading .ant-tag{margin:0}
 .feedback-grade-options{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;min-width:0}.feedback-grade-options>button{height:32px;min-width:0;padding:0;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:#45586c;font:inherit;cursor:pointer}.feedback-grade-options>button:hover{border-color:#1677ff;color:#1677ff}.feedback-grade-options>button.selected{border-color:#1677ff;background:#1677ff;color:#fff}.feedback-grade-options>button:focus-visible{outline:2px solid #91caff;outline-offset:2px}
-.review-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px}.review-document-stage{position:relative}.review-criteria-panel{position:absolute;z-index:20;display:flex;width:min(420px,calc(100% - 24px));max-height:min(70vh,calc(100% - 28px));flex-direction:column;overflow:hidden;border:1px solid #cbd6df;border-radius:6px;background:#fff;box-shadow:0 12px 32px rgba(27,45,64,.24)}.review-criteria-panel.collapsed{width:min(320px,calc(100% - 24px))}.review-criteria-panel.dragging{box-shadow:0 16px 38px rgba(27,45,64,.3)}.review-criteria-header{display:flex;min-height:48px;flex:0 0 auto;align-items:center;justify-content:space-between;gap:12px;padding:6px 8px 6px 14px;border-bottom:1px solid #e1e7ec;background:#f7f9fb;cursor:move;touch-action:none;user-select:none}.review-criteria-panel.collapsed .review-criteria-header{border-bottom:0}.review-criteria-header>div{display:flex;min-width:0;align-items:center;gap:8px}.review-criteria-header>div:first-child>.anticon{color:#176b78}.review-criteria-header strong{color:#263b50;font-size:14px}.review-criteria-header span{overflow:hidden;color:#7b8998;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.review-criteria-window-actions{flex:0 0 auto}.review-criteria-file-tabs{display:flex;flex:0 0 auto;gap:4px;overflow-x:auto;padding:8px 10px;border-bottom:1px solid #e6ebef;background:#fff}.review-criteria-file-tabs button{max-width:210px;padding:5px 9px;overflow:hidden;border:1px solid transparent;border-radius:4px;background:transparent;color:#617285;font-size:12px;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.review-criteria-file-tabs button:hover{background:#f0f5f7;color:#176b78}.review-criteria-file-tabs button.active{border-color:#9bcbd1;background:#eaf6f7;color:#125d68;font-weight:600}.review-criteria-file-tabs button:focus-visible{outline:2px solid #69b1ff;outline-offset:1px}.review-criteria-content{display:grid;min-height:180px;overflow:auto;place-items:center}.review-criteria-content>.ant-spin,.review-criteria-content>.ant-empty{padding:34px 18px}.review-criteria-content>.ant-result{padding:24px 18px}.review-criteria-document{width:100%;min-width:0;padding:18px 22px;align-self:start;color:#33475b}.review-criteria-document img{max-width:100%;height:auto}.review-criteria-document pre{max-width:100%;overflow:auto;white-space:pre-wrap}.review-criteria-document table{display:block;max-width:100%;overflow:auto}.review-criteria-document :first-child{margin-top:0}.review-criteria-document :last-child{margin-bottom:0}
+.review-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px}.review-document-stage{position:relative}.review-criteria-panel{position:absolute;z-index:20;display:flex;min-width:300px;min-height:180px;max-width:calc(100% - 20px);max-height:calc(100% - 20px);flex-direction:column;overflow:hidden;border:1px solid #cbd6df;border-radius:6px;background:#fff;box-shadow:0 12px 32px rgba(27,45,64,.24)}.review-criteria-panel.collapsed{min-height:0}.review-criteria-panel.dragging,.review-criteria-panel.resizing{box-shadow:0 16px 38px rgba(27,45,64,.3);user-select:none}.review-criteria-header{display:flex;min-height:48px;flex:0 0 auto;align-items:center;justify-content:space-between;gap:12px;padding:6px 8px 6px 14px;border-bottom:1px solid #e1e7ec;background:#f7f9fb;cursor:move;touch-action:none;user-select:none}.review-criteria-panel.collapsed .review-criteria-header{border-bottom:0}.review-criteria-header>div{display:flex;min-width:0;align-items:center;gap:8px}.review-criteria-header>div:first-child>.anticon{color:#176b78}.review-criteria-header strong{color:#263b50;font-size:14px}.review-criteria-header span{overflow:hidden;color:#7b8998;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.review-criteria-window-actions{flex:0 0 auto}.review-criteria-file-tabs{display:flex;flex:0 0 auto;gap:4px;overflow-x:auto;padding:8px 10px;border-bottom:1px solid #e6ebef;background:#fff}.review-criteria-file-tabs button{max-width:210px;padding:5px 9px;overflow:hidden;border:1px solid transparent;border-radius:4px;background:transparent;color:#617285;font-size:12px;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.review-criteria-file-tabs button:hover{background:#f0f5f7;color:#176b78}.review-criteria-file-tabs button.active{border-color:#9bcbd1;background:#eaf6f7;color:#125d68;font-weight:600}.review-criteria-file-tabs button:focus-visible{outline:2px solid #69b1ff;outline-offset:1px}.review-criteria-content{display:grid;min-height:0;flex:1;overflow:auto;place-items:center}.review-criteria-content>.ant-spin,.review-criteria-content>.ant-empty{padding:34px 18px}.review-criteria-content>.ant-result{padding:24px 18px}.review-criteria-document{width:100%;min-width:0;padding:18px 22px;align-self:start;color:#33475b}.review-criteria-document img{max-width:100%;height:auto}.review-criteria-document pre{max-width:100%;overflow:auto;white-space:pre-wrap}.review-criteria-document table{display:block;max-width:100%;overflow:auto}.review-criteria-document :first-child{margin-top:0}.review-criteria-document :last-child{margin-bottom:0}.review-criteria-resize-handle{position:absolute;z-index:2;touch-action:none}.review-criteria-resize-handle.direction-n,.review-criteria-resize-handle.direction-s{right:10px;left:10px;height:8px;cursor:ns-resize}.review-criteria-resize-handle.direction-n{top:-1px}.review-criteria-resize-handle.direction-s{bottom:-1px}.review-criteria-resize-handle.direction-e,.review-criteria-resize-handle.direction-w{top:10px;bottom:10px;width:8px;cursor:ew-resize}.review-criteria-resize-handle.direction-e{right:-1px}.review-criteria-resize-handle.direction-w{left:-1px}.review-criteria-resize-handle.direction-ne,.review-criteria-resize-handle.direction-se,.review-criteria-resize-handle.direction-sw,.review-criteria-resize-handle.direction-nw{width:14px;height:14px}.review-criteria-resize-handle.direction-ne{top:-1px;right:-1px;cursor:nesw-resize}.review-criteria-resize-handle.direction-se{right:-1px;bottom:-1px;cursor:nwse-resize}.review-criteria-resize-handle.direction-sw{bottom:-1px;left:-1px;cursor:nesw-resize}.review-criteria-resize-handle.direction-nw{top:-1px;left:-1px;cursor:nwse-resize}.review-criteria-panel:not(.resizing) .review-criteria-resize-handle:hover{background:rgba(22,119,255,.12)}
 .review-criteria-document{padding:0}.review-criteria-document .rich-document{width:100%;min-height:0;margin:0;padding:20px 22px;box-shadow:none;font-size:14px;line-height:1.7}.review-criteria-document .rich-document h1{font-size:22px}.review-criteria-document .rich-document h2{font-size:18px}
+.review-criteria-text{width:100%;padding:18px 22px;border-bottom:1px solid #e6ebef;color:#405467;align-self:start}.review-criteria-text strong{display:block;margin-bottom:8px;color:#263b50;font-size:13px}.review-criteria-text p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}
 .review-criteria-panel{position:fixed;z-index:1220}
 @media(max-width:1100px){.review-toolbar-actions{margin-left:auto}}
-@media(max-width:760px){.review-toolbar-actions{width:100%;margin:0}.review-toolbar-actions>.ant-badge,.review-toolbar-actions>.ant-btn{flex:1}.review-toolbar-actions .ant-btn{width:100%}.review-criteria-panel,.review-criteria-panel.collapsed{right:0!important;bottom:0;left:0!important;top:auto!important;width:100%;max-height:72%;border-right:0;border-bottom:0;border-left:0;border-radius:6px 6px 0 0}.review-criteria-header{cursor:default}.review-criteria-content{min-height:160px}.review-criteria-document{padding:16px}}
+@media(max-width:760px){.review-toolbar-actions{width:100%;margin:0}.review-toolbar-actions>.ant-badge,.review-toolbar-actions>.ant-btn{flex:1}.review-toolbar-actions .ant-btn{width:100%}.review-criteria-panel,.review-criteria-panel.collapsed{right:0!important;bottom:0;left:0!important;top:auto!important;width:100%!important;height:72%!important;min-width:0;max-height:72%;border-right:0;border-bottom:0;border-left:0;border-radius:6px 6px 0 0}.review-criteria-panel.collapsed{height:auto!important}.review-criteria-header{cursor:default}.review-criteria-content{min-height:160px}.review-criteria-document{padding:16px}.review-criteria-resize-handle{display:none}}
 @media(max-width:760px){.review-criteria-document{padding:0}.review-criteria-document .rich-document{padding:18px}}
 .peer-feedback-heading>div{min-width:0}.peer-feedback-summary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .file-review-workspace.peer-comparison.with-feedback{grid-template-columns:minmax(320px,.8fr) minmax(380px,1.2fr) 320px}.submission-preview-pane{display:flex;min-width:0;min-height:0;flex-direction:column}.submission-preview-pane.standalone{display:contents}.submission-preview-toolbar{display:flex;min-height:52px;align-items:center;gap:7px;padding:7px 10px;border-bottom:1px solid #d9e1e8;background:#fff}.submission-preview-toolbar strong{margin-right:auto;color:#31465a;font-size:13px}.submission-preview-toolbar>span{min-width:36px;color:#526579;text-align:center}.submission-preview-toolbar>.ant-select{width:180px}.submission-preview-toolbar>i{width:1px;height:26px;background:#d9e1e8}.review-pane-label{color:#31465a;font-size:13px}.review-scaled-content{min-width:0;transform-origin:top left}.review-image-scroll{width:100%;height:100%;overflow:auto;padding:18px}.review-image-scroll .review-image{height:auto;margin:auto}.peer-comparison .feedback-sidebar{padding-inline:14px}.peer-comparison .feedback-actions{margin-inline:-14px;padding-inline:14px}
 @media(max-width:1180px){.file-review-workspace.peer-comparison.with-feedback{grid-template-columns:minmax(340px,1fr) minmax(300px,1fr);grid-template-rows:minmax(420px,60vh) auto}.peer-comparison>.feedback-sidebar{grid-column:1/-1;max-height:460px;border-top:1px solid #d7dfe7;border-left:0}}
 @media(max-width:760px){.file-review-workspace.peer-comparison.with-feedback{grid-template-columns:1fr;grid-template-rows:minmax(420px,55vh) minmax(420px,55vh) auto}.peer-comparison>.feedback-sidebar{grid-column:auto}.submission-preview-toolbar{flex-wrap:wrap}.submission-preview-toolbar>.ant-select{width:100%}.review-image-scroll{padding:12px}}
+@media(max-width:900px){.file-review-workspace.with-feedback{grid-template-columns:1fr!important}.review-split-handle{display:none}}
 </style>

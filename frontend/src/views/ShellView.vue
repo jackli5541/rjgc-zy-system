@@ -25,6 +25,7 @@ import TeachingMaterialsPage from './shell/TeachingMaterialsPage.vue'
 import TeamsPage from './shell/TeamsPage.vue'
 import { useSessionStore } from '../stores/session'
 import { shellContextKey } from '../shellContext'
+import { useResizableDrawer } from '../useHorizontalResize'
 
 const session = useSessionStore()
 const route = useRoute()
@@ -80,15 +81,35 @@ const boardTeamFilter = ref('ALL')
 const submissionBoardPane = ref(null)
 const assignmentDetailTab = ref('details')
 const DRAWER_EXPANDED_STORAGE_KEY = 'assignment-drawers-expanded'
+const DRAWER_COLLAPSED_RATIO = .82
 const assignmentDrawerExpanded = ref(localStorage.getItem(DRAWER_EXPANDED_STORAGE_KEY) === 'true')
 const peerReviewExpanded = ref(true)
+const fileReviewExpanded = ref(false)
+const { width: assignmentDrawerWidth, resizing: assignmentDrawerResizing, startResize: startAssignmentDrawerResize } = useResizableDrawer({ initialWidth: () => Math.max(720, window.innerWidth * DRAWER_COLLAPSED_RATIO), minWidth: 720, storageKey: 'assignment-detail-drawer-width' })
+const { width: teamDrawerWidth, resizing: teamDrawerResizing, startResize: startTeamDrawerResize } = useResizableDrawer({ initialWidth: () => Math.max(420, window.innerWidth * DRAWER_COLLAPSED_RATIO), minWidth: 420, storageKey: 'team-portfolio-drawer-width' })
+if (assignmentDrawerExpanded.value) assignmentDrawerWidth.value = window.innerWidth
+const assignmentDrawerCollapsedWidth = () => Math.min(window.innerWidth, Math.max(Math.min(720, window.innerWidth), window.innerWidth * DRAWER_COLLAPSED_RATIO))
 const assignmentDrawerAnimating = ref(false)
 let assignmentDrawerAnimationTimer
 const toggleAssignmentDrawerExpanded = () => {
   clearTimeout(assignmentDrawerAnimationTimer)
   assignmentDrawerAnimating.value = true
-  assignmentDrawerExpanded.value = !assignmentDrawerExpanded.value
+  if (assignmentDrawerExpanded.value) {
+    assignmentDrawerWidth.value = assignmentDrawerCollapsedWidth()
+    assignmentDrawerExpanded.value = false
+  } else {
+    assignmentDrawerWidth.value = window.innerWidth
+    assignmentDrawerExpanded.value = true
+  }
   assignmentDrawerAnimationTimer = setTimeout(() => { assignmentDrawerAnimating.value = false }, 220)
+}
+const resizeAssignmentDrawer = event => {
+  const currentWidth = assignmentDrawerExpanded.value ? window.innerWidth : assignmentDrawerWidth.value
+  assignmentDrawerExpanded.value = false
+  startAssignmentDrawerResize(event, currentWidth)
+}
+const syncAssignmentDrawerToViewport = () => {
+  if (assignmentDrawerExpanded.value) assignmentDrawerWidth.value = window.innerWidth
 }
 const noticesOpen = ref(false)
 const modals = reactive({ class: false, import: false, member: false, team: false, assignment: false, password: false, topicDecision: false })
@@ -102,7 +123,7 @@ const topicDecisionForm = reactive({ id: '', reason: '' })
 const passwordForm = reactive({ current_password: '', new_password: '' })
 const inviteTarget = ref('')
 const importState = reactive({ file: null, preview: null, result: null, step: 0, loading: false })
-const filePreview = reactive({ open: false, files: [], criteriaFiles: [], index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false, readonly: false, assignmentTitle: '' })
+const filePreview = reactive({ open: false, files: [], criteriaFiles: [], criteriaText: '', index: 0, mode: 'PREVIEW', targets: [], targetIndex: 0, initialFeedback: null, pendingOnly: false, readonly: false, assignmentTitle: '' })
 const currentTime = ref(Date.now())
 let gateTimer
 let clockTimer
@@ -897,13 +918,15 @@ function openPeerReviewDrawer(candidate, file = candidate?.files?.[0]) {
   peerReviewExpanded.value = true
   const lockedByOther = Boolean(candidate.review && candidate.can_review === false)
   const submission = { ...candidate, owner: lockedByOther ? candidate.review.evaluator_name : candidate.name }
-  openAssessmentDrawer(submission, { mode: 'PEER', file, initialFeedback: lockedByOther ? candidate.review : null, readonly: lockedByOther, criteriaFiles: reviewTask.value?.criteria_files || [] })
+  const criteriaFiles = [...(reviewTask.value?.review_criteria || []), ...(reviewTask.value?.criteria_files || [])]
+    .filter((item, index, files) => files.findIndex(file => file.id === item.id) === index)
+  openAssessmentDrawer(submission, { mode: 'PEER', file, initialFeedback: lockedByOther ? candidate.review : null, readonly: lockedByOther, criteriaFiles, criteriaText: reviewTask.value?.assignment?.auto_review_criteria_text || '' })
 }
 function updateFileReviewExpanded(value) {
   if (filePreview.mode === 'PEER') peerReviewExpanded.value = value
-  else assignmentDrawerExpanded.value = value
+  else fileReviewExpanded.value = value
 }
-function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false, readonly = false, criteriaFiles = [] } = {}) {
+function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, initialFeedback = null, file = record.files?.[0], pendingOnly = false, readonly = false, criteriaFiles = [], criteriaText = '' } = {}) {
   selectedSubmission.value = record
   filePreview.mode = mode
   filePreview.targets = targets
@@ -914,6 +937,7 @@ function openAssessmentDrawer(record, { mode, targets = [], targetIndex = 0, ini
   filePreview.assignmentTitle = ''
   filePreview.files = [...(record.files || [])]
   filePreview.criteriaFiles = [...criteriaFiles]
+  filePreview.criteriaText = criteriaText
   filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file?.id))
   filePreview.open = true
 }
@@ -1063,6 +1087,7 @@ function openPortfolioFilePreview(file, files, assignment) {
 }
 function closeFilePreview() {
   filePreview.open = false
+  if (filePreview.mode !== 'PEER') fileReviewExpanded.value = false
   selectedSubmission.value = null
 }
 function navigate(target) { return router.push(target) }
@@ -1172,6 +1197,7 @@ onMounted(async () => {
   if (session.teamGate) gateTimer = setInterval(pollGate, 10000)
   clockTimer = setInterval(() => { currentTime.value = Date.now() }, 30000)
   window.addEventListener('focus', pollGate)
+  window.addEventListener('resize', syncAssignmentDrawerToViewport)
   document.addEventListener('visibilitychange', handleVisibilitySync)
   connectRealtime(); startSafetyRefresh()
 })
@@ -1179,6 +1205,7 @@ onBeforeUnmount(() => {
   clearInterval(gateTimer); clearInterval(clockTimer); clearInterval(safetyTimer); clearTimeout(realtimeTimer); clearTimeout(assignmentDrawerAnimationTimer)
   realtimeSource?.close()
   window.removeEventListener('focus', pollGate)
+  window.removeEventListener('resize', syncAssignmentDrawerToViewport)
   document.removeEventListener('visibilitychange', handleVisibilitySync)
   closeFilePreview()
 })
@@ -1220,8 +1247,10 @@ provide(shellContextKey, {
           <Transition name="drawer-fade" appear><div class="assignment-drawer-mask" @click="closeAssignmentDrawer"></div></Transition>
         </template>
         <Transition :name="role==='TEACHER'?'drawer-slide':'detail-fade'" appear>
-        <div :class="{'assignment-detail-drawer':role==='TEACHER','expanded':role==='TEACHER'&&assignmentDrawerExpanded}">
-         <a-tooltip v-if="role==='TEACHER'" :open="assignmentDrawerAnimating?false:undefined" :title="assignmentDrawerExpanded?'收回':'展开至全屏'" placement="right"><button type="button" class="assignment-drawer-expand-button" :aria-label="assignmentDrawerExpanded?'收回作业详情':'将作业详情展开至全屏'" @click="toggleAssignmentDrawerExpanded"><RightOutlined v-if="assignmentDrawerExpanded"/><ExpandOutlined v-else/></button></a-tooltip>
+        <div :class="{'assignment-detail-drawer':role==='TEACHER','expanded':role==='TEACHER'&&assignmentDrawerExpanded,'resizing':assignmentDrawerResizing}" :style="role==='TEACHER'?{'--drawer-width':`${assignmentDrawerWidth}px`,width:`${assignmentDrawerWidth}px`}:undefined">
+         <span v-if="role==='TEACHER'" class="drawer-resize-handle with-center-control drawer-resize-handle-top" role="separator" aria-label="调整作业详情抽屉宽度" aria-orientation="vertical" @pointerdown="resizeAssignmentDrawer"/>
+         <span v-if="role==='TEACHER'" class="drawer-resize-handle with-center-control drawer-resize-handle-bottom" role="separator" aria-label="调整作业详情抽屉宽度" aria-orientation="vertical" @pointerdown="resizeAssignmentDrawer"/>
+         <a-tooltip v-if="role==='TEACHER'" :open="assignmentDrawerAnimating?false:undefined" :title="assignmentDrawerExpanded?'收回':'展开至全屏'" placement="right"><button type="button" class="assignment-drawer-expand-button" :aria-label="assignmentDrawerExpanded?'收回作业详情':'将作业详情展开至全屏'" @pointerdown.stop @click="toggleAssignmentDrawerExpanded"><RightOutlined v-if="assignmentDrawerExpanded"/><ExpandOutlined v-else/></button></a-tooltip>
          <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag color="blue">{{selectedAssignment.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="closeAssignmentDrawer"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
          <section class="assignment-workspace">
            <template v-if="role==='STUDENT'">
@@ -1303,6 +1332,7 @@ provide(shellContextKey, {
       :owner="selectedSubmission?.owner||''"
       :assignment-title="filePreview.assignmentTitle||selectedAssignment?.title||selectedCampaign?.assignment_title||reviewTask?.assignment?.title||''"
       :criteria-files="filePreview.mode==='PEER' ? filePreview.criteriaFiles : filePreview.mode==='TEACHER' ? gradingCriteriaFiles : []"
+      :criteria-text="filePreview.mode==='PEER' ? filePreview.criteriaText : ''"
       :criteria-locked="filePreview.mode==='PEER'&&Boolean(reviewTask?.review_criteria_locked)"
       :editable="!filePreview.readonly&&(filePreview.mode==='TEACHER'&&role==='TEACHER'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
       :mode="filePreview.mode"
@@ -1313,7 +1343,7 @@ provide(shellContextKey, {
       :peer-grade="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
       :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
       allow-download
-      :expanded="filePreview.mode==='PEER'?peerReviewExpanded:assignmentDrawerExpanded"
+      :expanded="filePreview.mode==='PEER'?peerReviewExpanded:fileReviewExpanded"
       :grade-cap="selectedSubmission?.grade_cap||''"
       @close="closeFilePreview"
       @update:expanded="updateFileReviewExpanded"
@@ -1330,8 +1360,9 @@ provide(shellContextKey, {
     <a-modal v-model:open="modals.member" :title="memberForm.id?'编辑成员':'添加成员'" :confirm-loading="memberSaving" ok-text="保存" @ok="saveMember"><a-form layout="vertical"><a-form-item label="学号" required><a-input v-model:value="memberForm.student_no" :disabled="Boolean(memberForm.id)" maxlength="32"/></a-form-item><a-form-item label="姓名" required><a-input v-model:value="memberForm.name" maxlength="80"/></a-form-item></a-form></a-modal>
     <StudentPortfolioDrawer :student="memberDetail" :class-id="classId" :writable="session.context?.current_class?.status==='ACTIVE'" @close="memberDetail=null" @saved="loadView" @reset-password="resetMemberPassword" @remove="removeClassMember" @preview="openPortfolioFilePreview"/>
     <a-modal v-model:open="modals.team" title="创建小组" @ok="createTeam"><a-form layout="vertical"><a-form-item label="小组名称" required><a-input v-model:value="teamForm.name"/></a-form-item><a-checkbox v-model:checked="teamForm.open_recruitment">允许其他成员申请加入</a-checkbox></a-form></a-modal>
-    <button v-if="selectedTeam" type="button" class="team-portfolio-click-away" aria-label="关闭小组档案" @click="closeTeamDrawer"/>
-    <a-drawer :open="Boolean(selectedTeam)" title="小组档案" :mask="false" :width="'min(720px, 100vw)'" :get-container="false" :root-style="{position:'fixed'}" :z-index="950" :push="false" root-class-name="team-portfolio-drawer" placement="right" @close="closeTeamDrawer">
+    <button v-if="selectedTeam" type="button" class="team-portfolio-click-away" :style="{right:`${teamDrawerWidth}px`}" aria-label="关闭小组档案" @click="closeTeamDrawer"/>
+    <a-drawer :open="Boolean(selectedTeam)" title="小组档案" :mask="false" :width="`${teamDrawerWidth}px`" :get-container="false" :root-style="{position:'fixed','--drawer-width':`${teamDrawerWidth}px`}" :z-index="950" :push="false" :root-class-name="teamDrawerResizing?'team-portfolio-drawer resizing':'team-portfolio-drawer'" placement="right" @close="closeTeamDrawer">
+      <span class="drawer-resize-handle" role="separator" aria-label="调整小组档案抽屉宽度" aria-orientation="vertical" @pointerdown="startTeamDrawerResize($event)"/>
       <template #extra><a-button class="team-export-button" v-if="role==='TEACHER'&&selectedTeam" :loading="exportingTeamIds.has(selectedTeam.id)" @click="downloadTeamCoursework(selectedTeam)"><DownloadOutlined/> 导出 ZIP</a-button></template>
       <template v-if="selectedTeam">
         <section class="team-portfolio-section team-portfolio-identity">

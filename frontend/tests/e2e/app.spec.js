@@ -343,7 +343,7 @@ test('expired session switches from the protected view to login', async ({ page 
 test('student selects submitted teammates and grades their latest work from A to E', async ({ page }) => {
   const reviewPayloads = []
   const assignment = { assignment_id: 'assignment-direct', assignment_title: '需求分析报告', title: '需求分析报告', due_at: '2099-01-01T00:00:00Z', available_count: 2, reviewed_count: 0, pending_count: 2 }
-  const task = { assignment, team: { id: 'team-1', name: '第一小组' }, candidates: [
+  const task = { assignment: { ...assignment, auto_review_criteria_text: '重点检查需求完整性和模型一致性。' }, review_criteria: [{ id: 'criteria-1', name: '评分标准.md', previewable: false, download_only: true }], criteria_files: [], team: { id: 'team-1', name: '第一小组' }, candidates: [
     { user_id: 'student-2', name: '李同学', student_no: '20260002', submission_version_id: 'version-2', submitted_at: '2026-09-14T08:00:00Z', files: [{ id: 'file-1', name: 'report.pdf', previewable: true }], review: null },
     { user_id: 'student-3', name: '王同学', student_no: '20260003', submission_version_id: 'version-3', submitted_at: '2026-09-15T08:00:00Z', files: [{ id: 'file-2', name: 'prototype.pdf', previewable: true }], review: null }
   ] }
@@ -379,6 +379,19 @@ test('student selects submitted teammates and grades their latest work from A to
   await expect(detail).toContainText('20260002')
   await detail.getByRole('button', { name: '开始评价' }).click()
   const reviewDrawer = page.locator('.review-workspace-drawer')
+  await reviewDrawer.getByRole('button', { name: '判定标准' }).click()
+  const criteriaPanel = page.locator('.review-criteria-panel')
+  await expect(criteriaPanel).toContainText('重点检查需求完整性和模型一致性。')
+  await expect(criteriaPanel.locator('.review-criteria-resize-handle')).toHaveCount(8)
+  await page.keyboard.press('F1')
+  await expect(criteriaPanel).toHaveClass(/collapsed/)
+  await expect(criteriaPanel.locator('.review-criteria-resize-handle')).toHaveCount(0)
+  await page.keyboard.press('F1')
+  await expect(criteriaPanel.locator('.review-criteria-resize-handle')).toHaveCount(8)
+  await page.keyboard.press('F2')
+  await expect(criteriaPanel).toHaveCount(0)
+  await page.keyboard.press('F2')
+  await expect(criteriaPanel).toBeVisible()
   await reviewDrawer.locator('.feedback-action-grade .ant-select').click()
   await page.locator('.ant-select-dropdown:visible .ant-select-item-option').filter({ hasText: /^B$/ }).click()
   await reviewDrawer.locator('.feedback-field .tiptap').fill('结构完整，论证清晰。')
