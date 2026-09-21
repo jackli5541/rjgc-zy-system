@@ -2,13 +2,13 @@
 import { ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { ArrowLeftOutlined, DownloadOutlined, EyeOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
-import { downloadArchive } from '../../api'
+import { exportArchive } from '../../api'
 import { useShellContext } from '../../shellContext'
 const { session, classId, memberQuery, filteredMembers, modals, closeClassDetail, openMemberCreate, openMemberDetail, statusLabel } = useShellContext()
 const exporting = ref(false)
 async function exportClass() {
   exporting.value = true
-  try { await downloadArchive(`/classes/${classId.value}/portfolio.zip`) }
+  try { await exportArchive(`/classes/${classId.value}/portfolio.zip`) }
   catch (e) { message.error(e.message) }
   finally { exporting.value = false }
 }

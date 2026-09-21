@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 
 UTC = timezone.utc
 from io import BytesIO
-from urllib.parse import unquote
 from uuid import UUID
 from zipfile import ZipFile
 
@@ -12,12 +11,13 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import Assignment, AuditLog, FileObject, Submission, SubmissionAssessment, SubmissionVersion
+from app.models import Assignment, BackgroundJob, FileObject, Submission, SubmissionAssessment, SubmissionVersion
 from app.student_portfolio import safe_name
+from app.worker import process_archive_export
 from test_api import login
 
 
-def test_student_portfolio_and_archives():
+def test_student_portfolio_and_archives(isolated_object_storage):
     teacher, headers = login("teacher", "123456", "teacher")
     course = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2039 秋季", "name": "档案导出班"}).json()
     cid = course["id"]
@@ -33,6 +33,14 @@ def test_student_portfolio_and_archives():
         response = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("report.pdf", content, "application/pdf")})
         assert response.status_code == 201, response.text
         files.append(response.json())
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    markdown = student.post(
+        f"/api/v1/assignments/{assignment['id']}/files",
+        headers=student_headers,
+        files={"file": ("report.md", f"# Report\n\n![pixel](data:image/png;base64,{png})".encode(), "text/markdown")},
+    )
+    assert markdown.status_code == 201, markdown.text
+    files.append(markdown.json())
     assert student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "portfolio-current"}, json={}).status_code == 201
     teacher.post(f"/api/v1/assignments/{assignment['id']}/submissions/{member['id']}/grade", headers=headers, json={"grade": "C", "comment": "<p><strong>完整</strong><br>继续保持</p>"})
     with SessionLocal() as db:
@@ -48,16 +56,27 @@ def test_student_portfolio_and_archives():
     assert len(submitted["received_reviews"]) == 1
     assert next(item for item in data["assignments"] if item["status"] != "SUBMITTED")["grade_source"] == "SYSTEM"
     assert student.get(base).status_code == 403
-    assert student.get(base + ".zip").status_code == 403
+    assert student.post(base + ".zip", headers=student_headers).status_code == 403
     assert TestClient(app).get(base).status_code == 401
     another = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2039 秋季", "name": "另一班"}).json()
     assert teacher.get(f"/api/v1/classes/{another['id']}/members/{member['id']}/portfolio").status_code == 404
-    response = teacher.get(base + ".zip")
-    assert response.status_code == 200, response.text
-    assert "20390001_=SUM(1,2).zip" in unquote(response.headers["content-disposition"])
-    with ZipFile(BytesIO(response.content)) as archive:
-        assert len(archive.namelist()) == 3
-        assert len(set(archive.namelist())) == 3
+    def completed_archive(response):
+        assert response.status_code == 202, response.text
+        with SessionLocal() as db:
+            job = db.get(BackgroundJob, UUID(response.json()["id"]))
+            payload = job.payload
+        process_archive_export(job.id, payload)
+        key = next(key for key in isolated_object_storage if key.startswith(f"exports/{job.id}/"))
+        return isolated_object_storage[key]
+
+    response = teacher.post(base + ".zip", headers=headers)
+    assert response.json()["filename"] == "20390001_=SUM(1,2).zip"
+    with ZipFile(BytesIO(completed_archive(response))) as archive:
+        assert len(set(archive.namelist())) == len(archive.namelist())
+        markdown_name = next(name for name in archive.namelist() if name.endswith("report.md"))
+        exported_markdown = archive.read(markdown_name).decode("utf-8")
+        assert "images/" in exported_markdown and "/api/v1/markdown-assets/" not in exported_markdown
+        assert any(name.endswith(".png") and "/images/" in name for name in archive.namelist())
         workbook = load_workbook(BytesIO(archive.read("学生档案.xlsx")))
         assert workbook.sheetnames == ["基本信息", "作业记录", "收到的互评"]
         assert workbook["基本信息"]["B2"].data_type == "s"
@@ -72,13 +91,13 @@ def test_student_portfolio_and_archives():
         assert workbook["收到的互评"]["D2"].value == "结构清晰"
         assert all("<" not in str(cell.value or "") for sheet in workbook for row in sheet for cell in row)
     assert teacher.delete(f"/api/v1/classes/{cid}/members/{removed['id']}", headers=headers).status_code == 204
-    response = teacher.get(f"/api/v1/classes/{cid}/portfolio.zip")
-    assert response.status_code == 200, response.text
-    with ZipFile(BytesIO(response.content)) as archive:
+    response = teacher.post(f"/api/v1/classes/{cid}/portfolio.zip", headers=headers)
+    with ZipFile(BytesIO(completed_archive(response))) as archive:
         assert all(name.startswith("20390001_=SUM(1,2)/") for name in archive.namelist())
         assert not any(str(member["id"]) in name for name in archive.namelist())
         assert sum(name.endswith("/report.pdf") or "/report (" in name for name in archive.namelist()) == 2
         assert any(name.endswith("/学生档案.xlsx") for name in archive.namelist())
+        assert any(name.endswith(".png") and "/images/" in name for name in archive.namelist())
     for file in files:
         assert student.delete(f"/api/v1/files/{file['id']}", headers=student_headers).status_code == 204
     replacement = student.post(f"/api/v1/assignments/{assignment['id']}/files", headers=student_headers, files={"file": ("updated.pdf", b"updated", "application/pdf")}).json()
@@ -88,15 +107,19 @@ def test_student_portfolio_and_archives():
     assert current["version_no"] == 2 and current["final_grade"] == "C"
     assert current["grade_carried_forward"] is True and current["grading_status"] == "PENDING_REASSESSMENT"
     assert current["received_reviews"][0]["grade"] == "A"
-    with ZipFile(BytesIO(teacher.get(base + ".zip").content)) as archive:
+    with ZipFile(BytesIO(completed_archive(teacher.post(base + ".zip", headers=headers)))) as archive:
         assert len(archive.namelist()) == 2
         assert any(name.endswith("/updated.pdf") for name in archive.namelist())
     with SessionLocal() as db:
-        assert db.scalar(select(AuditLog).where(AuditLog.action == "STUDENT_PORTFOLIOS_EXPORTED"))
         db.get(FileObject, UUID(replacement["id"])).storage_path = "missing-portfolio.pdf"
         db.commit()
-    failed = teacher.get(base + ".zip")
-    assert failed.status_code == 404 and failed.json()["code"] == "FILE_MISSING"
+    failed = teacher.post(base + ".zip", headers=headers)
+    with SessionLocal() as db:
+        job = db.get(BackgroundJob, UUID(failed.json()["id"]))
+        payload = job.payload
+    process_archive_export(job.id, payload)
+    with SessionLocal() as db:
+        assert db.get(BackgroundJob, job.id).status == "FAILED"
 
 
 def test_portfolio_filename_safety():

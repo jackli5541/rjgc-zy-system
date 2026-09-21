@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { DeleteOutlined, DownloadOutlined, EditOutlined, FileTextOutlined, KeyOutlined, ReloadOutlined, SaveOutlined, UserOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import { api, downloadArchive } from '../api'
+import { api, exportArchive } from '../api'
 
 const props = defineProps({ student: Object, classId: String, writable: Boolean })
 const emit = defineEmits(['close', 'saved', 'reset-password', 'remove', 'preview'])
@@ -58,7 +58,7 @@ async function save() {
 }
 async function exportStudent() {
   exporting.value = true
-  try { await downloadArchive(`/classes/${props.classId}/members/${props.student.id}/portfolio.zip`) }
+  try { await exportArchive(`/classes/${props.classId}/members/${props.student.id}/portfolio.zip`) }
   catch (e) { message.error(e.message) }
   finally { exporting.value = false }
 }

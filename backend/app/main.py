@@ -21,10 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 import bleach
-import zipfile
 from oss2.exceptions import NoSuchKey, OssError
 import tempfile
-from tempfile import TemporaryFile
 from openpyxl import Workbook, load_workbook
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field
@@ -116,7 +114,11 @@ def content_disposition(filename: str, disposition: str = "attachment") -> str:
 
 
 def decode_text_file(payload: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "gb18030"):
+    encodings = ["utf-8-sig"]
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings.append("utf-16")
+    encodings.append("gb18030")
+    for encoding in encodings:
         try: return payload.decode(encoding)
         except UnicodeDecodeError: continue
     raise UnicodeDecodeError("unknown", payload, 0, len(payload), "unsupported text encoding")
@@ -880,19 +882,26 @@ def student_portfolio(cid: UUID, uid: UUID, user: CurrentUser, db: Db):
     return portfolio(db, cid, uid)
 
 
-@app.get("/api/v1/classes/{cid}/members/{uid}/portfolio.zip")
-def export_student_portfolio(cid: UUID, uid: UUID, user: CurrentUser, db: Db):
-    from app.student_portfolio import export_portfolios
-    teacher(user); course = require_class(db, user, cid)
-    member_detail(db, cid, uid)
-    return export_portfolios(db, course, user, uid)
+@app.post("/api/v1/classes/{cid}/members/{uid}/portfolio.zip", status_code=202)
+def export_student_portfolio(cid: UUID, uid: UUID, user: CsrfUser, db: Db):
+    from app.student_portfolio import safe_name
+
+    teacher(user); require_class(db, user, cid)
+    member = member_detail(db, cid, uid)[2]
+    filename = f"{safe_name(member['student_no'])}_{safe_name(member['name'])}.zip"
+    return enqueue_archive_export(
+        db, user, "PORTFOLIO", {"class_id": str(cid), "student_id": str(uid)}, filename,
+    )
 
 
-@app.get("/api/v1/classes/{cid}/portfolio.zip")
-def export_class_portfolio(cid: UUID, user: CurrentUser, db: Db):
-    from app.student_portfolio import export_portfolios
+@app.post("/api/v1/classes/{cid}/portfolio.zip", status_code=202)
+def export_class_portfolio(cid: UUID, user: CsrfUser, db: Db):
+    from app.student_portfolio import safe_name
+
     teacher(user); course = require_class(db, user, cid)
-    return export_portfolios(db, course, user)
+    return enqueue_archive_export(
+        db, user, "PORTFOLIO", {"class_id": str(cid)}, f"{safe_name(course.name)}-班级档案.zip",
+    )
 
 
 @app.delete("/api/v1/classes/{cid}/members/{uid}", status_code=204)
@@ -2027,12 +2036,15 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
                 encoded = source.encode("utf-8")
                 if len(encoded) > settings.markdown_max_bytes:
                     raise ApiError(413, "MARKDOWN_TOO_LARGE", "移除图片后的 Markdown 正文不能超过 5 MB")
-                temporary.write_bytes(encoded)
-                size = len(encoded)
                 for prepared in prepared_assets:
                     asset_key = f"markdown-assets/{aid}/files/{fid}/{prepared.id.hex}{prepared.suffix}"
                     storage.put_bytes(asset_key, prepared.payload)
                     uploaded_asset_keys.append(asset_key)
+            encoded = source.encode("utf-8")
+            if len(encoded) > settings.markdown_max_bytes:
+                raise ApiError(413, "MARKDOWN_TOO_LARGE", "Markdown 正文不能超过 5 MB")
+            temporary.write_bytes(encoded)
+            size = len(encoded)
         storage.put_object(relative, temporary)
     except Exception:
         for asset_key in uploaded_asset_keys:
@@ -2099,53 +2111,74 @@ def assignment_files(aid: UUID, user: CurrentUser, db: Db):
     return {"attachments": [item(x) for x in materials], "review_criteria": [item(x) for x in criteria], "drafts": [item(x) for x in drafts]}
 
 
-@app.get("/api/v1/assignments/{aid}/materials.zip")
-def download_assignment_materials(aid: UUID, user: CurrentUser, db: Db, file_ids: list[UUID] = Query(min_length=1, max_length=200)):
+def enqueue_archive_export(db: Session, user: User, kind: str, payload: dict, filename: str) -> dict:
+    job = BackgroundJob(
+        kind="ARCHIVE_EXPORT",
+        payload={**payload, "archive_kind": kind, "requester_id": str(user.id), "filename": filename},
+        status="ARCHIVE_PENDING",
+        available_at=now(),
+    )
+    db.add(job)
+    db.commit()
+    return {"id": str(job.id), "status": "PENDING", "filename": filename}
+
+
+@app.post("/api/v1/files/{fid}/archive", status_code=202)
+def queue_file_archive(fid: UUID, user: CsrfUser, db: Db):
+    file = require_file_access(db, user, fid)
+    if Path(file.original_name).suffix.lower() != ".md":
+        raise ApiError(422, "FILE_ARCHIVE_TYPE_INVALID", "仅 Markdown 文件需要生成离线资源包")
+    filename = f"{Path(file.original_name).stem}.zip"
+    return enqueue_archive_export(db, user, "MATERIALS", {"assignment_id": str(file.assignment_id), "file_ids": [str(fid)]}, filename)
+
+
+@app.post("/api/v1/assignments/{aid}/workspace/documents/{document_id}/archive", status_code=202)
+def queue_workspace_document_archive(aid: UUID, document_id: UUID, user: CsrfUser, db: Db):
+    _, _, document, _ = require_workspace_document(db, aid, document_id, user)
+    filename = f"{Path(document.name).stem}.zip"
+    return enqueue_archive_export(
+        db, user, "WORKSPACE_DOCUMENT",
+        {"assignment_id": str(aid), "document_id": str(document.id)}, filename,
+    )
+
+
+@app.post("/api/v1/assignments/{aid}/materials.zip", status_code=202)
+def queue_assignment_materials(aid: UUID, user: CsrfUser, db: Db, file_ids: list[UUID] = Query(min_length=1, max_length=200)):
     assignment = db.get(Assignment, aid)
     if not assignment: raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     require_class(db, user, assignment.class_id)
     if user.role == "STUDENT" and assignment.status not in {"PUBLISHED", "CLOSED"}:
         raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "可查看的作业不存在")
-    files = db.scalars(select(FileObject).where(
-        FileObject.assignment_id == aid, FileObject.id.in_(file_ids),
-        FileObject.purpose == "ATTACHMENT", FileObject.active == True,  # noqa: E712
-    ).order_by(FileObject.created_at)).all()
+    files = db.scalars(select(FileObject).where(FileObject.assignment_id == aid, FileObject.id.in_(file_ids), FileObject.purpose == "ATTACHMENT", FileObject.active == True)).all()  # noqa: E712
     if len(files) != len(set(file_ids)):
         raise ApiError(422, "MATERIAL_FILE_INVALID", "部分文件不存在或不属于该作业资料")
     if user.role == "STUDENT" and any(file.material_type == "CRITERIA" for file in files):
         submission, _ = own_submission(db, assignment, user)
         if not submission or submission.status != "SUBMITTED":
             raise ApiError(403, "CRITERIA_REQUIRES_SUBMISSION", "提交作业后才能查看判定标准")
-    archive = TemporaryFile()
-    try:
-        used_names = set()
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
-            for file in files:
-                original = Path(file.original_name).name
-                name, index = original, 1
-                while name.casefold() in used_names:
-                    name = f"{Path(original).stem} ({index}){Path(original).suffix}"
-                    index += 1
-                used_names.add(name.casefold())
-                try:
-                    with bundle.open(name, "w") as dest:
-                        for chunk in storage.get_object_stream(file.storage_path):
-                            dest.write(chunk)
-                except NoSuchKey:
-                    raise ApiError(404, "FILE_MISSING", "文件存储不可用")
-        archive.seek(0)
-    except Exception:
-        archive.close()
-        raise
+    return enqueue_archive_export(db, user, "MATERIALS", {"assignment_id": str(aid), "file_ids": [str(item) for item in file_ids]}, "assignment-materials.zip")
 
-    def chunks():
-        try:
-            while chunk := archive.read(1024 * 1024):
-                yield chunk
-        finally:
-            archive.close()
 
-    return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="assignment-materials.zip"'})
+@app.get("/api/v1/export-jobs/{job_id}")
+def export_job_status(job_id: UUID, user: CurrentUser, db: Db):
+    job = db.get(BackgroundJob, job_id)
+    if not job or job.kind != "ARCHIVE_EXPORT" or job.payload.get("requester_id") != str(user.id):
+        raise ApiError(404, "EXPORT_JOB_NOT_FOUND", "导出任务不存在")
+    status = "PENDING" if job.status == "ARCHIVE_PENDING" else job.status
+    return {"id": str(job.id), "status": status, "filename": job.payload.get("filename"), "error": job.last_error if job.status == "FAILED" else None}
+
+
+@app.get("/api/v1/export-jobs/{job_id}/download")
+def download_export_job(job_id: UUID, user: CurrentUser, db: Db):
+    job = db.get(BackgroundJob, job_id)
+    if not job or job.kind != "ARCHIVE_EXPORT" or job.payload.get("requester_id") != str(user.id):
+        raise ApiError(404, "EXPORT_JOB_NOT_FOUND", "导出任务不存在")
+    if job.status != "COMPLETED" or not job.result_path:
+        raise ApiError(409, "EXPORT_NOT_READY", "导出文件尚未生成")
+    if not storage.object_exists(job.result_path):
+        raise ApiError(404, "EXPORT_FILE_MISSING", "导出文件已过期")
+    expires = max(60, min(settings.oss_preview_url_ttl_seconds, 900))
+    return RedirectResponse(storage.sign_get_url(job.result_path, expires), status_code=302, headers={"Cache-Control": "private, no-store"})
 
 
 @app.delete("/api/v1/files/{fid}", status_code=204)
@@ -2450,7 +2483,11 @@ def peer_review_assignments(user: CurrentUser, db: Db, class_id: UUID = Query())
         ).all()
         if not versions: continue
         version_ids = [row.id for row in versions]
-        reviewed_version_ids = set(db.scalars(select(SubmissionAssessment.submission_version_id).where(SubmissionAssessment.submission_version_id.in_(version_ids), SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "PEER")).all())
+        reviewed_version_ids = set(db.scalars(select(SubmissionAssessment.submission_version_id).where(
+            SubmissionAssessment.submission_version_id.in_(version_ids),
+            SubmissionAssessment.kind == "PEER",
+            SubmissionAssessment.status == "PUBLISHED",
+        )).all())
         candidates = [
             {
                 "user_id": str(row.owner_user_id), "name": row.display_name, "student_no": row.login_name,
@@ -2482,7 +2519,7 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
         .where(
             FileObject.assignment_id == aid,
             FileObject.active == True,  # noqa: E712
-            or_(FileObject.purpose == "REVIEW_CRITERIA", and_(FileObject.purpose == "ATTACHMENT", FileObject.material_type == "CRITERIA")),
+            FileObject.purpose == "REVIEW_CRITERIA",
         )
         .order_by(FileObject.created_at)
     ).all()
@@ -2721,8 +2758,7 @@ def publish_peer_submission_feedback(version_id: UUID, data: SubmissionFeedbackI
         raise ApiError(409, "PEER_REVIEW_TAKEN", f"该作品已由{evaluator.display_name}评价，不能重复评价或修改")
     current_revision = item.version if item else 0
     if data.revision != current_revision: raise ApiError(409, "FEEDBACK_VERSION_CONFLICT", "反馈已在其他页面更新，请刷新后重试")
-    was_peer_reviewed = bool(db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.kind == "PEER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
-    if data.grade == "A" and (version.grade_cap == "B" or was_peer_reviewed):
+    if data.grade == "A" and version.grade_cap == "B":
         raise ApiError(409, "GRADE_CAP_EXCEEDED", "该作业已被互评，后续学生互评最高成绩为 B")
     annotations = validate_feedback_annotations(db, version.id, data.annotations)
     comment = clean_html(data.comment)
@@ -2865,11 +2901,10 @@ def markdown_asset_content(asset_id: UUID, user: CurrentUser, db: Db):
 @app.get("/api/v1/files/{fid}")
 def download(fid: UUID, user: CurrentUser, db: Db):
     f = require_file_access(db, user, fid)
-    try:
-        stream = storage.get_object_stream(f.storage_path)
-    except NoSuchKey:
+    if not storage.object_exists(f.storage_path):
         raise ApiError(404, "FILE_MISSING", "文件存储不可用")
-    return StreamingResponse(stream, media_type=f.detected_mime, headers={"Content-Disposition": content_disposition(f.original_name)})
+    expires = max(60, min(settings.oss_preview_url_ttl_seconds, 900))
+    return RedirectResponse(storage.sign_get_url(f.storage_path, expires), status_code=302, headers={"Cache-Control": "private, no-store"})
 
 
 @app.post("/api/v1/review-campaigns", status_code=201)
@@ -3604,9 +3639,11 @@ def preview_file(fid: UUID, user: CurrentUser, db: Db):
         except UnicodeDecodeError: raise ApiError(422, "MARKDOWN_ENCODING_INVALID", "Markdown 文件编码无法识别")
         return PlainTextResponse(source, media_type="text/markdown; charset=utf-8")
     if suffix in {".docx", ".pptx", ".xlsx"}:
-        # Preview endpoints must render in the browser; the download endpoint keeps
-        # the original filename and attachment disposition.
-        return download(fid, user, db)
+        try:
+            stream = storage.get_object_stream(file.storage_path)
+        except NoSuchKey:
+            raise ApiError(404, "FILE_MISSING", "文件存储不可用")
+        return StreamingResponse(stream, media_type=file.detected_mime, headers={"Content-Disposition": "inline"})
     try:
         stream = storage.get_object_stream(file.storage_path)
     except NoSuchKey:
@@ -3630,165 +3667,24 @@ def render_file(fid: UUID, user: CurrentUser, db: Db):
     raise ApiError(410, "FILE_RENDER_REMOVED", "Markdown 文件请使用前端预览")
 
 
-def export_markdown_with_assets(db: Session, bundle: zipfile.ZipFile, owner_name: str, file: FileObject, written_assets: set[tuple[str, UUID]]) -> bytes:
-    source = decode_text_file(storage.get_object_bytes(file.storage_path))
-    asset_ids = set(db.scalars(select(FileObjectAsset.asset_id).where(FileObjectAsset.file_id == file.id)).all())
-    assets = {item.id: item for item in db.scalars(select(MarkdownAsset).where(MarkdownAsset.id.in_(asset_ids))).all()} if asset_ids else {}
-
-    def replace(match: re.Match) -> str:
-        try:
-            asset_id = UUID(match.group(1))
-        except ValueError:
-            return match.group(0)
-        asset = assets.get(asset_id)
-        if not asset:
-            return match.group(0)
-        suffix = Path(asset.storage_path).suffix.lower()
-        archive_name = f"{owner_name}/images/{asset.id}{suffix}"
-        marker = (owner_name, asset.id)
-        if marker not in written_assets:
-            bundle.writestr(archive_name, storage.get_object_bytes(asset.storage_path))
-            written_assets.add(marker)
-        return f"images/{asset.id}{suffix}"
-
-    return MARKDOWN_ASSET_URL_PATTERN.sub(replace, source).encode("utf-8")
-
-
-@app.get("/api/v1/assignments/{aid}/download.zip")
-def download_submissions(aid: UUID, user: CurrentUser, db: Db):
+@app.post("/api/v1/assignments/{aid}/download.zip", status_code=202)
+def queue_submission_export(aid: UUID, user: CsrfUser, db: Db):
     teacher(user); assignment = db.get(Assignment, aid)
-    if not assignment or not user_class(db, user, assignment.class_id): raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-    rows = db.execute(
-        select(Submission, SubmissionVersion)
-        .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
-        .where(Submission.assignment_id == aid, Submission.status == "SUBMITTED")
-    ).all()
-    version_ids = [version.id for _, version in rows]
-    files_by_version: dict[UUID, list[FileObject]] = {}
-    if version_ids:
-        for version_id, file in db.execute(select(VersionFile.version_id, FileObject).join(FileObject, FileObject.id == VersionFile.file_id).where(VersionFile.version_id.in_(version_ids))):
-            files_by_version.setdefault(version_id, []).append(file)
-    user_ids = {submission.owner_user_id for submission, _ in rows if submission.owner_user_id}
-    team_ids = {submission.owner_team_id for submission, _ in rows if submission.owner_team_id}
-    users = {item.id: item for item in db.scalars(select(User).where(User.id.in_(user_ids))).all()} if user_ids else {}
-    teams = {item.id: item for item in db.scalars(select(Team).where(Team.id.in_(team_ids))).all()} if team_ids else {}
-    archive = TemporaryFile()
-    try:
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
-            written_assets: set[tuple[str, UUID]] = set()
-            for submission, version in rows:
-                owner = users.get(submission.owner_user_id) if submission.owner_user_id else teams.get(submission.owner_team_id)
-                owner_name = owner.login_name if isinstance(owner, User) else owner.name
-                for file in files_by_version.get(version.id, []):
-                    if Path(file.original_name).suffix.lower() == ".md":
-                        bundle.writestr(f"{owner_name}/{file.original_name}", export_markdown_with_assets(db, bundle, owner_name, file, written_assets))
-                        continue
-                    with bundle.open(f"{owner_name}/{file.original_name}", "w") as dest:
-                        for chunk in storage.get_object_stream(file.storage_path):
-                            dest.write(chunk)
-        archive.seek(0)
-    except Exception:
-        archive.close()
-        raise
-    audit(db, user, "SUBMISSIONS_EXPORTED", "assignment", str(aid)); db.commit()
-
-    def chunks():
-        try:
-            while chunk := archive.read(1024 * 1024):
-                yield chunk
-        finally:
-            archive.close()
-
-    return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": content_disposition(f"{assignment.title}.zip")})
+    if not assignment or not user_class(db, user, assignment.class_id):
+        raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    return enqueue_archive_export(db, user, "ASSIGNMENT", {"assignment_id": str(aid)}, "assignment-submissions.zip")
 
 
-@app.get("/api/v1/teams/{tid}/coursework.zip")
-def download_team_coursework(tid: UUID, user: CurrentUser, db: Db):
+@app.post("/api/v1/teams/{tid}/coursework.zip", status_code=202)
+def queue_team_coursework(tid: UUID, user: CsrfUser, db: Db):
     teacher(user)
     team_item = db.get(Team, tid)
     if not team_item or team_item.status != "ACTIVE" or not user_class(db, user, team_item.class_id):
         raise ApiError(404, "TEAM_NOT_FOUND", "小组不存在")
-
-    assignments = db.scalars(select(Assignment).where(
-        Assignment.class_id == team_item.class_id,
-        Assignment.submitter_type == "TEAM",
-        Assignment.status.in_(["PUBLISHED", "CLOSED"]),
-    ).order_by(Assignment.due_at.desc())).all()
-    if not assignments:
+    has_assignments = db.scalar(select(Assignment.id).where(Assignment.class_id == team_item.class_id, Assignment.submitter_type == "TEAM", Assignment.status.in_(["PUBLISHED", "CLOSED"])).limit(1))
+    if not has_assignments:
         raise ApiError(409, "NO_COURSEWORK_TO_EXPORT", "暂无作业可导出")
-
-    assignment_ids = [assignment.id for assignment in assignments]
-    submissions = {
-        submission.assignment_id: submission
-        for submission in db.scalars(select(Submission).where(Submission.assignment_id.in_(assignment_ids), Submission.owner_team_id == tid)).all()
-    }
-    submitted = [submission for submission in submissions.values() if submission.status == "SUBMITTED"]
-    current_versions = {submission.id: submission.current_version_no for submission in submitted}
-    versions = {
-        version.submission_id: version
-        for version in db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id.in_(current_versions))).all()
-        if version.version_no == current_versions[version.submission_id]
-    } if submitted else {}
-    files_by_version: dict[UUID, list[FileObject]] = {}
-    if versions:
-        for version_id, file in db.execute(
-            select(VersionFile.version_id, FileObject)
-            .join(FileObject, FileObject.id == VersionFile.file_id)
-            .where(VersionFile.version_id.in_([version.id for version in versions.values()]))
-        ):
-            files_by_version.setdefault(version_id, []).append(file)
-
-    def csv_bytes(rows):
-        output = io.StringIO()
-        csv.writer(output).writerows([[export_cell(value) for value in row] for row in rows])
-        return ("\ufeff" + output.getvalue()).encode("utf-8")
-
-    homework_rows = [["作业", "截止时间", "提交状态", "提交时间", "是否迟交", "附件数"]]
-    archive_file = TemporaryFile()
-    try:
-        with zipfile.ZipFile(archive_file, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
-            written_assets: set[tuple[str, UUID]] = set()
-            for assignment in assignments:
-                submission = submissions.get(assignment.id)
-                version = versions.get(submission.id) if submission else None
-                files = files_by_version.get(version.id, []) if version else []
-                homework_rows.append([assignment.title, assignment.due_at, "已提交" if version else "未提交", version.submitted_at if version else None, "是" if version and version.is_late else "否", len(files)])
-                for file in files:
-                    folder = f"小组作业/{assignment.id}"
-                    archive_name = f"{folder}/{file.id}-{Path(file.original_name).name}"
-                    if Path(file.original_name).suffix.lower() == ".md":
-                        archive.writestr(archive_name, export_markdown_with_assets(db, archive, folder, file, written_assets))
-                        continue
-                    with archive.open(archive_name, "w") as dest:
-                        for chunk in storage.get_object_stream(file.storage_path):
-                            dest.write(chunk)
-            archive.writestr("小组作业提交记录.csv", csv_bytes(homework_rows))
-
-            grade_rows = [["作业", "提交状态", "学生互评等级", "教师等级", "最终等级", "成绩来源", "评分状态"]]
-            for assignment in assignments:
-                submission = submissions.get(assignment.id)
-                version = versions.get(submission.id) if submission else None
-                result = displayed_submission_grade_result(db, version) if version else missing_submission_grade_result(assignment)
-                source = result["grade_source"]
-                grade_rows.append([
-                    assignment.title, "已提交" if version else "未提交", result["peer_grade"],
-                    result["teacher_grade"]["grade"] if result["teacher_grade"] else None,
-                    result["final_grade"], {"TEACHER": "教师评分", "PEER": "学生互评", "SYSTEM": "系统判定"}.get(source, ""),
-                    "已评分" if result["final_grade"] else "待评分",
-                ])
-            archive.writestr("小组作业成绩表.csv", csv_bytes(grade_rows))
-
-        archive_file.seek(0)
-        def stream():
-            try:
-                while chunk := archive_file.read(1024 * 1024):
-                    yield chunk
-            finally:
-                archive_file.close()
-        return StreamingResponse(stream(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="team-{tid}-coursework.zip"'})
-    except Exception:
-        archive_file.close()
-        raise
+    return enqueue_archive_export(db, user, "TEAM", {"team_id": str(tid)}, "team-coursework.zip")
 
 
 @app.get("/api/v1/review-campaigns/{cid}/stats")

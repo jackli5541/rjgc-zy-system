@@ -1,10 +1,11 @@
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 UTC = timezone.utc
 from uuid import UUID
 
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, or_, select
 
 from app.database import SessionLocal
 from app.grading import finalize_campaign
@@ -53,6 +54,51 @@ def process_oss_delete(job_id: UUID, keys: list[str]) -> None:
         else:
             job.status = "COMPLETED"
             job.last_error = None
+
+
+def process_archive_export(job_id: UUID, payload: dict) -> None:
+    from app.archive_exports import build_assignment_archive, build_materials_archive, build_portfolio_archive, build_team_archive, build_workspace_document_archive
+
+    target = None
+    requested_filename = Path(str(payload.get("filename", ""))).name
+    filename = requested_filename if requested_filename.lower().endswith(".zip") else "archive.zip"
+    result_path = f"exports/{job_id}/{filename}"
+    try:
+        with SessionLocal() as db:
+            kind = payload.get("archive_kind")
+            if kind == "ASSIGNMENT":
+                target = build_assignment_archive(db, UUID(payload["assignment_id"]))
+            elif kind == "TEAM":
+                target = build_team_archive(db, UUID(payload["team_id"]))
+            elif kind == "MATERIALS":
+                target = build_materials_archive(db, [UUID(item) for item in payload.get("file_ids", [])])
+            elif kind == "WORKSPACE_DOCUMENT":
+                target = build_workspace_document_archive(db, UUID(payload["document_id"]))
+            elif kind == "PORTFOLIO":
+                student_id = UUID(payload["student_id"]) if payload.get("student_id") else None
+                target = build_portfolio_archive(db, UUID(payload["class_id"]), student_id)
+            else:
+                raise ValueError("未知的归档类型")
+        storage.put_object(result_path, target)
+        with SessionLocal.begin() as db:
+            job = db.get(BackgroundJob, job_id)
+            if job:
+                job.status = "COMPLETED"
+                job.result_path = result_path
+                job.last_error = None
+    except Exception as error:
+        with SessionLocal.begin() as db:
+            job = db.get(BackgroundJob, job_id)
+            if job:
+                job.status = "FAILED"
+                job.last_error = str(error)[:500]
+        try:
+            storage.delete_object(result_path)
+        except Exception:
+            pass
+    finally:
+        if target:
+            target.unlink(missing_ok=True)
 
 
 def process_auto_review(db, current: datetime) -> None:
@@ -156,6 +202,24 @@ def cleanup_markdown_assets(db, current: datetime) -> None:
         db.delete(asset)
 
 
+def cleanup_archive_exports(db, current: datetime) -> None:
+    jobs = db.scalars(
+        select(BackgroundJob)
+        .where(
+            BackgroundJob.kind == "ARCHIVE_EXPORT",
+            BackgroundJob.status.in_(["COMPLETED", "FAILED"]),
+            BackgroundJob.available_at < current - timedelta(hours=settings.export_archive_hours),
+        )
+        .order_by(BackgroundJob.available_at)
+        .with_for_update(skip_locked=True)
+        .limit(20)
+    ).all()
+    for job in jobs:
+        if job.result_path:
+            storage.delete_object(job.result_path)
+        db.delete(job)
+
+
 def run_once() -> None:
     with SessionLocal.begin() as db:
         current = datetime.now(UTC)
@@ -165,7 +229,28 @@ def run_once() -> None:
         process_auto_review(db, current)
         process_due_campaign(db, current)
         cleanup_markdown_assets(db, current)
-        job = db.scalar(select(BackgroundJob).where(BackgroundJob.status == "PENDING", BackgroundJob.available_at <= current).with_for_update(skip_locked=True).limit(1))
+        cleanup_archive_exports(db, current)
+        # Old immediate archive jobs used SQL Server's local CURRENT_TIMESTAMP,
+        # which could be stored eight hours ahead while this worker compares UTC.
+        legacy_archive_cutoff = current + timedelta(hours=9)
+        job = db.scalar(
+            select(BackgroundJob)
+            .where(
+                or_(
+                    and_(BackgroundJob.status == "ARCHIVE_PENDING", BackgroundJob.available_at <= current),
+                    and_(BackgroundJob.status == "PENDING", BackgroundJob.available_at <= current),
+                    and_(
+                        BackgroundJob.status == "PENDING",
+                        BackgroundJob.kind == "ARCHIVE_EXPORT",
+                        BackgroundJob.attempts == 0,
+                        BackgroundJob.available_at <= legacy_archive_cutoff,
+                    ),
+                ),
+            )
+            .order_by(BackgroundJob.available_at)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
         if not job:
             return
         job.status = "RUNNING"
@@ -180,8 +265,11 @@ def run_once() -> None:
             file_id = None
         delete_keys = [key for key in job_payload.get("keys", []) if isinstance(key, str)] if job_kind == "OSS_DELETE" else []
 
+    print(f"worker claimed job id={job_id} kind={job_kind!r}", flush=True)
     if job_kind == "FILE_PREVIEW" and file_id:
         process_preview(job_id, file_id)
+    elif job_kind == "ARCHIVE_EXPORT":
+        process_archive_export(job_id, job_payload)
     elif job_kind == "OSS_DELETE":
         process_oss_delete(job_id, delete_keys)
     else:

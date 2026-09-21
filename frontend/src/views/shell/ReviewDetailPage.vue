@@ -38,7 +38,7 @@ const pendingCount = computed(() => candidates.value.length - reviewedCount.valu
       </button>
       <transition name="detail-fade">
         <div v-if="showReference" class="peer-review-reference-body">
-          <AssignmentMaterials :files="reviewTask.attachments" :assignment-id="reviewTask.assignment.id" @preview="openFilePreview" />
+          <AssignmentMaterials :files="reviewTask.attachments" :assignment-id="reviewTask.assignment.id" can-download @preview="openFilePreview" />
         </div>
       </transition>
     </section>

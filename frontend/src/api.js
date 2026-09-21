@@ -9,22 +9,23 @@ sessionStorage.setItem('coursework-client-id', apiClientId)
 
 export function setCsrfToken(value) { csrfToken = value || '' }
 
-export async function downloadArchive(path) {
-  const response = await fetch(`/api/v1${path}`, { credentials: 'include' })
-  if (!response.ok) {
-    if (response.status === 401) window.dispatchEvent(new CustomEvent('auth-expired'))
-    const data = await response.json().catch(() => null)
-    throw new Error(data?.message || `导出失败（${response.status}）`)
+export async function exportArchive(path) {
+  const job = await api(path, { method: 'POST' })
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const status = await api(`/export-jobs/${job.id}`)
+    if (status.status === 'COMPLETED') {
+      const link = document.createElement('a')
+      link.href = `/api/v1/export-jobs/${job.id}/download`
+      link.download = status.filename || 'archive.zip'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      return status
+    }
+    if (status.status === 'FAILED') throw new Error(status.error || '导出任务失败')
+    await new Promise(resolve => setTimeout(resolve, 1000))
   }
-  const blob = await response.blob()
-  const disposition = response.headers.get('content-disposition') || ''
-  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = encoded ? decodeURIComponent(encoded) : '学生档案.zip'
-  link.click()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  throw new Error('导出任务超时，请稍后重试')
 }
 
 export async function api(path, options = {}) {

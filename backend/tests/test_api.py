@@ -19,7 +19,7 @@ from app.main import app, parse_roster
 from app.grading import final_score
 from app.markdown_assets import extract_assets
 from app.models import Assignment, AuditLog, BackgroundJob, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, Team, TeamMember, TeamRequest, User
-from app.worker import process_auto_review, process_due_campaign, process_oss_delete
+from app.worker import cleanup_archive_exports, process_archive_export, process_auto_review, process_due_campaign, process_oss_delete
 
 
 def login(account: str, password: str, role: str):
@@ -228,6 +228,26 @@ def test_workspace_images_are_stored_separately_authorized_and_frozen_in_submiss
     saved = first.put(f"/api/v1/assignments/{assignment['id']}/workspace/documents/{document['id']}", headers=first_headers, json={"revision": document["revision"], "markdown_content": f"# Work\n\n![pixel]({asset['url']})\n"})
     assert saved.status_code == 200, saved.text
 
+    workspace_archive = first.post(
+        f"/api/v1/assignments/{assignment['id']}/workspace/documents/{document['id']}/archive",
+        headers=first_headers,
+    )
+    assert workspace_archive.status_code == 202, workspace_archive.text
+    assert second.post(
+        f"/api/v1/assignments/{assignment['id']}/workspace/documents/{document['id']}/archive",
+        headers=second_headers,
+    ).status_code == 404
+    with SessionLocal() as db:
+        workspace_job = db.get(BackgroundJob, UUID(workspace_archive.json()["id"]))
+        workspace_payload = workspace_job.payload
+        assert workspace_job.status == "ARCHIVE_PENDING"
+    process_archive_export(workspace_job.id, workspace_payload)
+    workspace_key = next(key for key in isolated_object_storage if key.startswith(f"exports/{workspace_job.id}/"))
+    with ZipFile(BytesIO(isolated_object_storage[workspace_key])) as archive:
+        assert archive.read("task.md").decode("utf-8").startswith("# Work")
+        assert "images/" in archive.read("task.md").decode("utf-8")
+        assert any(name.startswith("images/") and name.endswith(".png") for name in archive.namelist())
+
     signed_images = []
     monkeypatch.setattr("app.storage.sign_get_url", lambda key, expires, params=None: signed_images.append((key, expires, params)) or f"https://storage.test/{key}")
     own_image = first.get(asset["url"], follow_redirects=False)
@@ -251,9 +271,23 @@ def test_workspace_images_are_stored_separately_authorized_and_frozen_in_submiss
         assert db.scalar(select(SubmissionDocumentAsset).where(SubmissionDocumentAsset.asset_id == asset_row.id))
         assert db.scalar(select(FileObjectAsset).where(FileObjectAsset.asset_id == asset_row.id))
 
-    downloaded = teacher.get(f"/api/v1/assignments/{assignment['id']}/download.zip")
-    assert downloaded.status_code == 200, downloaded.text
-    with ZipFile(BytesIO(downloaded.content)) as archive:
+    queued = teacher.post(f"/api/v1/assignments/{assignment['id']}/download.zip", headers=teacher_headers)
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["status"] == "PENDING"
+    with SessionLocal() as db:
+        export_job = db.get(BackgroundJob, UUID(queued.json()["id"]))
+        export_payload = export_job.payload
+        assert export_job.available_at <= datetime.now(UTC) + timedelta(seconds=5)
+        assert export_job.status == "ARCHIVE_PENDING"
+    assert second.get(f"/api/v1/export-jobs/{export_job.id}").status_code == 404
+    assert second.get(f"/api/v1/export-jobs/{export_job.id}/download").status_code == 404
+    process_archive_export(export_job.id, export_payload)
+    status = teacher.get(f"/api/v1/export-jobs/{export_job.id}")
+    assert status.json()["status"] == "COMPLETED"
+    exported = teacher.get(f"/api/v1/export-jobs/{export_job.id}/download", follow_redirects=False)
+    assert exported.status_code == 302 and signed_images[-1][2] is None
+    export_key = next(key for key in isolated_object_storage if key.startswith(f"exports/{export_job.id}/"))
+    with ZipFile(BytesIO(isolated_object_storage[export_key])) as archive:
         names = archive.namelist()
         markdown_name = next(name for name in names if name.endswith("task.md"))
         markdown = archive.read(markdown_name).decode("utf-8")
@@ -274,6 +308,22 @@ def test_workspace_images_are_stored_separately_authorized_and_frozen_in_submiss
     with SessionLocal() as db:
         cleanup_job = db.get(BackgroundJob, cleanup_job_id)
         assert cleanup_job.status == "COMPLETED" and cleanup_job.payload["keys"] == []
+
+
+def test_archive_export_failure_and_expiration_cleanup(monkeypatch, isolated_object_storage):
+    with SessionLocal.begin() as db:
+        failed = BackgroundJob(kind="ARCHIVE_EXPORT", payload={"archive_kind": "ASSIGNMENT", "assignment_id": str(UUID(int=1)), "requester_id": str(UUID(int=2)), "filename": "assignment-submissions.zip"}, available_at=datetime.now(UTC))
+        expired = BackgroundJob(kind="ARCHIVE_EXPORT", status="COMPLETED", payload={"requester_id": str(UUID(int=2))}, result_path="exports/expired/archive.zip", available_at=datetime.now(UTC) - timedelta(hours=25))
+        db.add_all([failed, expired])
+        db.flush()
+        failed_id = failed.id
+    isolated_object_storage["exports/expired/archive.zip"] = b"zip"
+    monkeypatch.setattr("app.archive_exports.build_assignment_archive", lambda *_args: (_ for _ in ()).throw(RuntimeError("archive failed")))
+    process_archive_export(failed_id, {"archive_kind": "ASSIGNMENT", "assignment_id": str(UUID(int=1)), "filename": "assignment-submissions.zip"})
+    with SessionLocal.begin() as db:
+        assert db.get(BackgroundJob, failed_id).status == "FAILED"
+        cleanup_archive_exports(db, datetime.now(UTC))
+    assert "exports/expired/archive.zip" not in isolated_object_storage
 
 
 def test_submission_board_query_count_does_not_scale_with_class_size():
@@ -598,7 +648,7 @@ def test_audit_log_search_and_operator_ip():
     assert deleted.status_code == 204, deleted.text
 
 
-def test_formal_course_workflow():
+def test_formal_course_workflow(isolated_object_storage):
     teacher, teacher_headers = login("teacher", "123456", "teacher")
     assert teacher.get("/api/v1/classes").json()["total"] == 0
     course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "2026 秋季", "name": "软件工程 1 班", "max_team_members": 5}).json()
@@ -622,7 +672,7 @@ def test_formal_course_workflow():
     assert team.status_code == 201, team.text
     other_team = other_leader.post("/api/v1/teams", headers=other_leader_headers, json={"class_id": class_id, "name": "第二小组", "open_recruitment": True})
     assert other_team.status_code == 201, other_team.text
-    empty_export = teacher.get(f"/api/v1/teams/{team.json()['id']}/coursework.zip")
+    empty_export = teacher.post(f"/api/v1/teams/{team.json()['id']}/coursework.zip", headers=teacher_headers)
     assert empty_export.status_code == 409 and empty_export.json()["code"] == "NO_COURSEWORK_TO_EXPORT"
     assert [item["id"] for item in leader.get(f"/api/v1/teams?class_id={class_id}").json()["items"]] == [team.json()["id"]]
     assert [item["id"] for item in other_leader.get(f"/api/v1/teams?class_id={class_id}").json()["items"]] == [other_team.json()["id"]]
@@ -648,7 +698,13 @@ def test_formal_course_workflow():
     assert removed_file.status_code == 204
     assert applicant.get(f"/api/v1/assignments/{team_assignment_id}/files").json()["attachments"] == []
     assert applicant.get(f"/api/v1/files/{teacher_file.json()['id']}").status_code == 404
-    teammate_file = applicant.post(f"/api/v1/assignments/{team_assignment_id}/files", headers=applicant_headers, files={"file": ("design.pdf", b"team draft", "application/pdf")}).json()
+    team_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    teammate_upload = applicant.post(
+        f"/api/v1/assignments/{team_assignment_id}/files", headers=applicant_headers,
+        files={"file": ("design.md", f"# Team draft\n\n![pixel](data:image/png;base64,{team_png})".encode(), "text/markdown")},
+    )
+    assert teammate_upload.status_code == 201, teammate_upload.text
+    teammate_file = teammate_upload.json()
     leader_drafts = leader.get(f"/api/v1/assignments/{team_assignment_id}/files").json()["drafts"]
     assert leader_drafts[0]["owner_name"] == "李同学"
     teammate_submit = applicant.post(f"/api/v1/assignments/{team_assignment_id}/submission", headers={**applicant_headers, "Idempotency-Key": "teammate-submit"}, json={})
@@ -666,14 +722,22 @@ def test_formal_course_workflow():
     assert cleared_team.status_code == 200 and cleared_team.json()["teacher_grade"] is None
     regraded_team = teacher.post(f"/api/v1/submission-versions/{team_version_id}/feedback/publish", headers=teacher_headers, json={"revision": 0, "grade": "A", "comment": "<p>归档成绩</p>", "annotations": []})
     assert regraded_team.status_code == 200, regraded_team.text
-    assert leader.get(f"/api/v1/teams/{team.json()['id']}/coursework.zip").status_code == 403
-    assert teacher.get(f"/api/v1/teams/{other_team.json()['id']}/coursework.zip").status_code == 200
-    team_export = teacher.get(f"/api/v1/teams/{team.json()['id']}/coursework.zip")
-    assert team_export.status_code == 200
-    with ZipFile(BytesIO(team_export.content)) as archive:
+    assert leader.post(f"/api/v1/teams/{team.json()['id']}/coursework.zip", headers=leader_headers).status_code == 403
+    assert teacher.post(f"/api/v1/teams/{other_team.json()['id']}/coursework.zip", headers=teacher_headers).status_code == 202
+    team_export = teacher.post(f"/api/v1/teams/{team.json()['id']}/coursework.zip", headers=teacher_headers)
+    assert team_export.status_code == 202
+    with SessionLocal() as db:
+        export_job = db.get(BackgroundJob, UUID(team_export.json()["id"]))
+        export_payload = export_job.payload
+    process_archive_export(export_job.id, export_payload)
+    export_key = next(key for key in isolated_object_storage if key.startswith(f"exports/{export_job.id}/"))
+    with ZipFile(BytesIO(isolated_object_storage[export_key])) as archive:
         names = archive.namelist()
         assert "小组作业提交记录.csv" in names and "小组作业成绩表.csv" in names
-        assert any(name.endswith("design.pdf") for name in names)
+        markdown_name = next(name for name in names if name.endswith("design.md"))
+        markdown = archive.read(markdown_name).decode("utf-8")
+        assert "images/" in markdown and "/api/v1/markdown-assets/" not in markdown
+        assert any(name.endswith(".png") and "/images/" in name for name in names)
         assert "小组设计稿" in archive.read("小组作业提交记录.csv").decode("utf-8-sig")
         grade_sheet = archive.read("小组作业成绩表.csv").decode("utf-8-sig")
         assert "学生互评等级,教师等级,最终等级,成绩来源" in grade_sheet
@@ -690,7 +754,7 @@ def test_formal_course_workflow():
         submitted = student.post(f"/api/v1/assignments/{assignment_id}/submission", headers={**headers, "Idempotency-Key": f"submit-{content.decode()}"}, json={"file_ids": [upload.json()["id"]]})
         assert submitted.status_code == 201, submitted.text
 
-    assert leader.get(f"/api/v1/files/{personal_files[1]}").status_code == 200
+    assert leader.get(f"/api/v1/files/{personal_files[1]}", follow_redirects=False).status_code == 302
 
     assert teacher.post(f"/api/v1/assignments/{assignment_id}/close", headers=teacher_headers).status_code == 200
     campaign = teacher.post("/api/v1/review-campaigns", headers=teacher_headers, json={"assignment_id": assignment_id, "mode": "TEAM", "criteria_text": "按作品完整性和表达清晰度评分。", "due_at": "2027-12-10T12:00:00+08:00"})
@@ -701,7 +765,7 @@ def test_formal_course_workflow():
     review = leader.post(f"/api/v1/review-campaigns/{campaign_id}/reviews", headers=leader_headers, json={"score": 86, "comment": "作品结构完整，表达清楚。"})
     assert review.status_code == 201, review.text
     assert review.json()["total_score"] == 86
-    assert leader.get(f"/api/v1/files/{personal_files[1]}").status_code == 200
+    assert leader.get(f"/api/v1/files/{personal_files[1]}", follow_redirects=False).status_code == 302
     teacher_reviews = teacher.get(f"/api/v1/review-campaigns/{campaign_id}/reviews").json()["items"]
     assert teacher_reviews[0]["reviewee_name"] == "李同学"
 
@@ -720,20 +784,22 @@ def test_formal_course_workflow():
     assert saved.status_code == 200, saved.text
     published = teacher.post(f"/api/v1/grades/assignments/{assignment_id}/publish", headers=teacher_headers, json={"reason": ""})
     assert published.status_code == 200 and published.json()["published"] == 1 and published.json()["pending"] == 1
-    student_grade = applicant.get(f"/api/v1/grades?class_id={class_id}").json()["items"][0]
+    student_grade = next(item for item in applicant.get(f"/api/v1/grades?class_id={class_id}").json()["items"] if item["assignment_id"] == assignment_id)
     assert float(student_grade["peer_score"]) == 86 and float(student_grade["score"]) == 86
 
     refreshed = teacher.get(f"/api/v1/grades/assignments/{assignment_id}").json()
     coefficient = refreshed["groups"][0]
     teacher.patch(f"/api/v1/grades/assignments/{assignment_id}/teams/{team.json()['id']}/coefficient", headers=teacher_headers, json={"coefficient": 0.95, "version": coefficient["version"]})
-    assert float(applicant.get(f"/api/v1/grades?class_id={class_id}").json()["items"][0]["score"]) == 86
+    unchanged_grade = next(item for item in applicant.get(f"/api/v1/grades?class_id={class_id}").json()["items"] if item["assignment_id"] == assignment_id)
+    assert float(unchanged_grade["score"]) == 86
     no_reason = teacher.post(f"/api/v1/grades/assignments/{assignment_id}/publish", headers=teacher_headers, json={"reason": ""})
     assert no_reason.status_code == 422
     changed = teacher.post(f"/api/v1/grades/assignments/{assignment_id}/publish", headers=teacher_headers, json={"reason": "复核后调整小组系数"})
     assert changed.status_code == 200 and changed.json()["changed"] == 1
     grade_id = next(item["id"] for item in teacher.get(f"/api/v1/grades/assignments/{assignment_id}").json()["items"] if item["student_name"] == "李同学")
     assert len(teacher.get(f"/api/v1/grades/{grade_id}/revisions").json()["items"]) == 1
-    assert float(applicant.get(f"/api/v1/grades?class_id={class_id}").json()["items"][0]["score"]) == 81.7
+    adjusted_grade = next(item for item in applicant.get(f"/api/v1/grades?class_id={class_id}").json()["items"] if item["assignment_id"] == assignment_id)
+    assert float(adjusted_grade["score"]) == 81.7
     missing_assignment = teacher.get(f"/api/v1/exports/grades.csv?class_id={class_id}")
     assert missing_assignment.status_code == 422 and missing_assignment.json()["code"] == "ASSIGNMENT_REQUIRED"
     exported_grades = teacher.get(f"/api/v1/exports/grades.csv?class_id={class_id}&assignment_id={assignment_id}")
@@ -746,39 +812,55 @@ def test_formal_course_workflow():
     assert blocked.status_code == 409 and blocked.json()["code"] == "CLASS_ARCHIVED"
 
 
-def test_student_bulk_download_assignment_materials():
+def test_student_bulk_download_assignment_materials(isolated_object_storage):
     teacher, headers = login("teacher", "123456", "teacher")
     course = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2036 秋季", "name": "资料批量下载测试班"}).json()
     teacher.post(f"/api/v1/classes/{course['id']}/members", headers=headers, json={"student_no": "20369901", "name": "资料下载学生"})
     student, student_headers = login("20369901", "20369901", "student")
     assignment = teacher.post("/api/v1/assignments", headers=headers, json={"class_id": course["id"], "title": "批量下载资料", "description": "下载资料", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": False}).json()
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     files = []
-    for content in (b"first", b"second"):
+    for content in (f"# first\n\n![pixel](data:image/png;base64,{png})".encode(), "# 第二份资料".encode("gb18030")):
         uploaded = teacher.post(f"/api/v1/assignments/{assignment['id']}/files", headers=headers, files={"file": ("guide.md", content, "text/markdown")})
         assert uploaded.status_code == 201, uploaded.text
         files.append(uploaded.json()["id"])
     endpoint = f"/api/v1/assignments/{assignment['id']}/materials.zip"
     params = [("file_ids", fid) for fid in files]
-    assert student.get(endpoint, params=params).status_code == 404
+    assert student.post(endpoint, params=params, headers=student_headers).status_code == 404
     assert teacher.post(f"/api/v1/assignments/{assignment['id']}/publish", headers=headers).status_code == 200
-    downloaded = student.get(endpoint, params=params)
-    assert downloaded.status_code == 200 and downloaded.headers["content-type"] == "application/zip"
-    with ZipFile(BytesIO(downloaded.content)) as archive:
-        assert archive.namelist() == ["guide.md", "guide (1).md"]
-        assert archive.read("guide.md") == b"first" and archive.read("guide (1).md") == b"second"
-    with ZipFile(BytesIO(student.get(endpoint, params={"file_ids": files[0]}).content)) as archive:
-        assert archive.namelist() == ["guide.md"]
+    downloaded = student.post(endpoint, params=params, headers=student_headers)
+    assert downloaded.status_code == 202
+    with SessionLocal() as db:
+        export_job = db.get(BackgroundJob, UUID(downloaded.json()["id"]))
+        export_payload = export_job.payload
+    process_archive_export(export_job.id, export_payload)
+    export_key = next(key for key in isolated_object_storage if key.startswith(f"exports/{export_job.id}/"))
+    with ZipFile(BytesIO(isolated_object_storage[export_key])) as archive:
+        assert "guide.md" in archive.namelist() and "guide (1).md" in archive.namelist()
+        assert b"data:image" not in archive.read("guide.md") and b"images/" in archive.read("guide.md")
+        assert any(name.startswith("images/") and name.endswith(".png") for name in archive.namelist())
+        assert archive.read("guide (1).md").decode("utf-8") == "# 第二份资料"
+    single = student.post(f"/api/v1/files/{files[0]}/archive", headers=student_headers)
+    assert single.status_code == 202 and single.json()["filename"] == "guide.zip"
+    with SessionLocal() as db:
+        single_job = db.get(BackgroundJob, UUID(single.json()["id"]))
+        single_payload = single_job.payload
+    process_archive_export(single_job.id, single_payload)
+    single_key = next(key for key in isolated_object_storage if key.startswith(f"exports/{single_job.id}/"))
+    with ZipFile(BytesIO(isolated_object_storage[single_key])) as archive:
+        assert b"images/" in archive.read("guide.md")
+        assert any(name.startswith("images/") for name in archive.namelist())
     criteria = teacher.post(f"/api/v1/assignments/{assignment['id']}/files?purpose=REVIEW_CRITERIA", headers=headers, files={"file": ("criteria.md", b"criteria", "text/markdown")}).json()
-    assert student.get(endpoint, params={"file_ids": criteria["id"]}).status_code == 422
+    assert student.post(endpoint, params={"file_ids": criteria["id"]}, headers=student_headers).status_code == 422
     other_assignment = teacher.post("/api/v1/assignments", headers=headers, json={"class_id": course["id"], "title": "另一份作业", "description": "不能混用附件", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
-    assert student.get(f"/api/v1/assignments/{other_assignment['id']}/materials.zip", params=params).status_code == 422
-    assert student.get(endpoint).status_code == 422
-    assert TestClient(app).get(endpoint, params=params).status_code == 401
+    assert student.post(f"/api/v1/assignments/{other_assignment['id']}/materials.zip", params=params, headers=student_headers).status_code == 422
+    assert student.post(endpoint, headers=student_headers).status_code == 422
+    assert TestClient(app).post(endpoint, params=params).status_code == 401
     outsider_class = teacher.post("/api/v1/classes", headers=headers, json={"semester": "2036 秋季", "name": "无权资料班"}).json()
     outsider_assignment = teacher.post("/api/v1/assignments", headers=headers, json={"class_id": outsider_class["id"], "title": "无权访问作业", "description": "权限检查", "submitter_type": "INDIVIDUAL", "due_at": "2099-01-01T00:00:00+08:00", "publish": True}).json()
-    assert student.get(f"/api/v1/assignments/{outsider_assignment['id']}/materials.zip", params=params).status_code == 404
+    assert student.post(f"/api/v1/assignments/{outsider_assignment['id']}/materials.zip", params=params, headers=student_headers).status_code == 404
     assert teacher.delete(f"/api/v1/files/{files[0]}", headers=headers).status_code == 204
-    assert student.get(endpoint, params=params).status_code == 422
+    assert student.post(endpoint, params=params, headers=student_headers).status_code == 422
 
 
 def test_role_mismatch_and_unauthenticated():
@@ -835,12 +917,12 @@ def test_assignment_time_window_update_and_review_visibility():
     current = student.get(f"/api/v1/assignments/{assignment['id']}/submission").json()
     assert {file["name"] for file in current["files"]} == {"work.pdf", "notes.md"}
     updated = student.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**student_headers, "Idempotency-Key": "time-window-update"}, json={"file_ids": [uploaded.json()["id"]]})
-    assert updated.status_code == 201
+    assert updated.status_code == 409 and updated.json()["code"] == "SUBMISSION_UPDATE_LOCKED"
     assert student.post(f"/api/v1/assignments/{assignment['id']}/submission/retract", headers=student_headers).status_code == 404
     board = teacher.get(f"/api/v1/assignments/{assignment['id']}/submissions", headers=teacher_headers).json()["items"]
     assert board[0]["status"] == "SUBMITTED" and board[0]["student_no"] == "20300001"
     assert board[0]["team_name"] == "时间测试小组"
-    assert {file["name"] for file in board[0]["files"]} == {"work.pdf"}
+    assert {file["name"] for file in board[0]["files"]} == {"work.pdf", "notes.md"}
     assert "versions" not in board[0] and "version_no" not in board[0]
     with SessionLocal() as db:
         stored = db.scalar(select(Submission).where(Submission.assignment_id == UUID(assignment["id"])))
@@ -1104,7 +1186,7 @@ def test_one_to_one_class_review_freezes_assignment_and_validates_score():
     office = teacher.post(f"/api/v1/assignments/{assignment['id']}/files", headers=teacher_headers, files={"file": ("reference.docx", b"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
     assert office.status_code == 201 and office.json()["download_only"] is True and office.json()["preview_status"] == "NOT_AVAILABLE"
     office_preview = teacher.get(f"/api/v1/files/{office.json()['id']}/preview")
-    assert office_preview.status_code == 200 and "attachment" in office_preview.headers["content-disposition"]
+    assert office_preview.status_code == 200 and "inline" in office_preview.headers["content-disposition"]
     blocked_office = students[0][0].post(f"/api/v1/assignments/{assignment['id']}/files", headers=students[0][1], files={"file": ("work.docx", b"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
     assert blocked_office.status_code == 422 and blocked_office.json()["code"] == "FILE_TYPE_INVALID"
     assert "学生提交仅支持" in blocked_office.json()["message"]
@@ -1119,7 +1201,8 @@ def test_one_to_one_class_review_freezes_assignment_and_validates_score():
     assert [task["submission"]["files"][0]["name"] for task in tasks] == [original_files[1], original_files[2], original_files[0]]
 
     replacement = students[1][0].post(f"/api/v1/assignments/{assignment['id']}/files", headers=students[1][1], files={"file": ("replacement.pdf", b"new", "application/pdf")}).json()
-    assert students[1][0].post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**students[1][1], "Idempotency-Key": "replacement-version"}, json={"file_ids": [replacement["id"]]}).status_code == 201
+    locked_update = students[1][0].post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**students[1][1], "Idempotency-Key": "replacement-version"}, json={"file_ids": [replacement["id"]]})
+    assert locked_update.status_code == 409 and locked_update.json()["code"] == "SUBMISSION_UPDATE_LOCKED"
     assert students[0][0].get(f"/api/v1/review-campaigns/{campaign_id}/assignment").json()["submission"]["files"][0]["name"] == original_files[1]
 
     blank = students[0][0].post(f"/api/v1/review-campaigns/{campaign_id}/reviews", headers=students[0][1], json={"score": 88, "comment": "   "})
@@ -1270,21 +1353,22 @@ def test_peer_review_requires_reviewer_submission_and_submitted_work_is_immediat
     assert available[0]["candidates"] == [{"user_id": first_student_id, "name": "即时互评学生0", "student_no": "20349990", "reviewed": False}]
     detail = reviewer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()
     assert [item["name"] for item in detail["attachments"]] == ["grading-guide.pdf"]
-    assert detail["review_criteria"] == [] and detail["review_criteria_locked"] is True
-    assert reviewer.get(f"/api/v1/files/{detail['attachments'][0]['id']}").status_code == 200
-    assert reviewer.get(f"/api/v1/files/{criteria.json()['id']}").status_code == 403
-    reviewer_file = reviewer.post(f"/api/v1/assignments/{assignment['id']}/files", headers=reviewer_headers, files={"file": ("reviewer.pdf", b"reviewer", "application/pdf")}).json()
-    assert reviewer.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**reviewer_headers, "Idempotency-Key": "direct-reviewer"}, json={"file_ids": [reviewer_file["id"]]}).status_code == 201
-    detail = reviewer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()
     assert [item["name"] for item in detail["review_criteria"]] == ["review-criteria.md"] and detail["review_criteria_locked"] is False
-    assert reviewer.get(f"/api/v1/files/{detail['review_criteria'][0]['id']}").status_code == 200
+    assert reviewer.get(f"/api/v1/files/{detail['attachments'][0]['id']}", follow_redirects=False).status_code == 302
+    assert reviewer.get(f"/api/v1/files/{criteria.json()['id']}", follow_redirects=False).status_code == 302
+    assert reviewer.get(f"/api/v1/files/{detail['review_criteria'][0]['id']}", follow_redirects=False).status_code == 302
     with SessionLocal.begin() as db:
         reviewer_user = db.scalar(select(User).where(User.login_name == "20349991"))
+        reviewer_user_id = reviewer_user.id
         reviewer_submission = db.scalar(select(Submission).where(Submission.assignment_id == UUID(assignment["id"]), Submission.owner_user_id == reviewer_user.id))
         reviewer_submission.status = "DRAFT"
     assert [item["name"] for item in detail["criteria_files"]] == ["peer-criteria.md"]
-    assert reviewer.get(f"/api/v1/files/{detail['attachments'][0]['id']}").status_code == 200
-    assert reviewer.get(f"/api/v1/files/{detail['criteria_files'][0]['id']}").status_code == 200
+    assert reviewer.get(f"/api/v1/files/{detail['attachments'][0]['id']}", follow_redirects=False).status_code == 302
+    assert reviewer.get(f"/api/v1/files/{detail['review_criteria'][0]['id']}", follow_redirects=False).status_code == 403
+    assert reviewer.get(f"/api/v1/files/{detail['criteria_files'][0]['id']}", follow_redirects=False).status_code == 403
+    with SessionLocal.begin() as db:
+        reviewer_submission = db.scalar(select(Submission).where(Submission.assignment_id == UUID(assignment["id"]), Submission.owner_user_id == reviewer_user_id))
+        reviewer_submission.status = "SUBMITTED"
     assert [item["student_no"] for item in detail["candidates"]] == ["20349990"]
     version_id = detail["candidates"][0]["submission_version_id"]
     empty_feedback = reviewer.get(f"/api/v1/submission-versions/{version_id}/peer-feedback").json()
@@ -1296,6 +1380,8 @@ def test_peer_review_requires_reviewer_submission_and_submitted_work_is_immediat
     assert refreshed_available[0]["pending_count"] == 0 and refreshed_available[0]["candidates"][0]["reviewed"] is True
     stale = reviewer.post(f"/api/v1/submission-versions/{version_id}/peer-feedback/publish", headers=reviewer_headers, json={"revision": 0, "grade": "B", "comment": "", "annotations": []})
     assert stale.status_code == 409 and stale.json()["code"] == "FEEDBACK_VERSION_CONFLICT"
+    observer_file = observer.post(f"/api/v1/assignments/{assignment['id']}/files", headers=observer_headers, files={"file": ("observer.pdf", b"observer", "application/pdf")}).json()
+    assert observer.post(f"/api/v1/assignments/{assignment['id']}/submission", headers={**observer_headers, "Idempotency-Key": "direct-observer"}, json={"file_ids": [observer_file["id"]]}).status_code == 201
     observer_detail = observer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()
     locked_candidate = next(item for item in observer_detail["candidates"] if item["student_no"] == "20349990")
     assert locked_candidate["review"]["grade"] == "A"
@@ -1303,13 +1389,17 @@ def test_peer_review_requires_reviewer_submission_and_submitted_work_is_immediat
     assert locked_candidate["review"]["is_current_evaluator"] is False
     assert locked_candidate["can_review"] is False and locked_candidate["can_edit"] is False
     observer_available = observer.get(f"/api/v1/peer-review-assignments?class_id={class_id}").json()["items"]
-    assert observer_available[0]["reviewed_count"] == 1 and observer_available[0]["pending_count"] == 0
+    assert observer_available[0]["reviewed_count"] == 1 and observer_available[0]["pending_count"] == 1
     occupied = observer.get(f"/api/v1/submission-versions/{version_id}/peer-feedback")
     assert occupied.status_code == 409 and occupied.json()["code"] == "PEER_REVIEW_TAKEN"
     occupied = observer.post(f"/api/v1/submission-versions/{version_id}/peer-feedback/publish", headers=observer_headers, json={"revision": 0, "grade": "B", "comment": "", "annotations": []})
     assert occupied.status_code == 409 and occupied.json()["code"] == "PEER_REVIEW_TAKEN"
     occupied = observer.post(f"/api/v1/assignments/{assignment['id']}/peer-reviews", headers=observer_headers, json={"reviewee_id": locked_candidate["user_id"], "grade": "B", "comment": ""})
     assert occupied.status_code == 409 and occupied.json()["code"] == "PEER_REVIEW_TAKEN"
+    with SessionLocal.begin() as db:
+        observer_user = db.scalar(select(User).where(User.login_name == "20349992"))
+        observer_submission = db.scalar(select(Submission).where(Submission.assignment_id == UUID(assignment["id"]), Submission.owner_user_id == observer_user.id))
+        observer_submission.status = "DRAFT"
     updated = reviewer.post(f"/api/v1/submission-versions/{version_id}/peer-feedback/publish", headers=reviewer_headers, json={"revision": reviewed.json()["revision"], "grade": "A", "comment": "<p>修改后的评价</p>", "annotations": [annotation]})
     assert updated.status_code == 200 and updated.json()["updated"] is True and updated.json()["grade"] == "A"
     owner_detail = reviewer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()["candidates"][0]
@@ -1339,7 +1429,7 @@ def test_peer_review_requires_reviewer_submission_and_submitted_work_is_immediat
     assert student_grade["peer_feedbacks"][0]["evaluator_name"] == "即时互评学生1"
     assert student_grade["peer_feedbacks"][0]["annotations"][0]["comment"] == "<p>这里需要补充</p>"
     exportable = teacher.get(f"/api/v1/grades/assignments?class_id={class_id}").json()["items"]
-    assert exportable[0]["id"] == assignment["id"] and exportable[0]["graded"] == 2 and exportable[0]["total"] == 2
+    assert exportable[0]["id"] == assignment["id"] and exportable[0]["graded"] == 2 and exportable[0]["total"] == 3
     current_grades = teacher.get(f"/api/v1/exports/grades.csv?class_id={class_id}&assignment_id={assignment['id']}")
     assert current_grades.status_code == 200 and "学生互评等级" in current_grades.text and "成绩来源" in current_grades.text
     assert teacher.post(f"/api/v1/assignments/{assignment['id']}/close", headers=teacher_headers).status_code == 200

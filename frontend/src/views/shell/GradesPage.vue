@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { DatabaseOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, TeamOutlined, TrophyOutlined, UserOutlined } from '@ant-design/icons-vue'
-import { downloadArchive } from '../../api'
+import { exportArchive } from '../../api'
 import { useShellContext } from '../../shellContext'
 
 const { role, classId, grades, gradeAssignments, selectedGradeAssignmentId, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback } = useShellContext()
@@ -18,7 +18,7 @@ async function downloadClassArchive() {
   if (!classId.value || archivingClass.value) return
   archivingClass.value = true
   try {
-    await downloadArchive(`/classes/${classId.value}/portfolio.zip`)
+    await exportArchive(`/classes/${classId.value}/portfolio.zip`)
     message.success('全班学生档案已开始下载')
   } catch (error) {
     message.error(error.message || '档案导出失败')
@@ -27,8 +27,14 @@ async function downloadClassArchive() {
   }
 }
 
-function downloadAssignmentFiles() {
-  if (selectedGradeAssignmentId.value) window.location.href = `/api/v1/assignments/${selectedGradeAssignmentId.value}/download.zip`
+async function downloadAssignmentFiles() {
+  if (!selectedGradeAssignmentId.value) return
+  try {
+    await exportArchive(`/assignments/${selectedGradeAssignmentId.value}/download.zip`)
+    message.success('导出文件已生成')
+  } catch (error) {
+    message.error(error.message || '作业导出失败')
+  }
 }
 </script>
 

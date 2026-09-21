@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CheckCircleFilled, CloudSyncOutlined, CodeOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import { api } from '../api'
+import { api, exportArchive } from '../api'
 import { loadMarkdownPreview, renderMarkdown } from '../markdownPreview'
 import RichTextEditor from './RichTextEditor.vue'
 import RichTextViewer from './RichTextViewer.vue'
@@ -287,13 +287,7 @@ async function downloadCurrent() {
       if (!await save(true)) return
     } else if (state.value === 'saving' && !await savePromise) return
     if (state.value !== 'saved' || activeId.value !== documentId) return message.warning('请先保存当前修改再下载')
-    const document = await api(`/assignments/${props.assignmentId}/workspace/documents/${documentId}`)
-    const url = URL.createObjectURL(new Blob([document.markdown_content], { type: 'text/markdown;charset=utf-8' }))
-    const link = window.document.createElement('a')
-    link.href = url
-    link.download = document.name
-    link.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    await exportArchive(`/assignments/${props.assignmentId}/workspace/documents/${documentId}/archive`)
   } catch (error) { message.error(error.message) }
   finally { downloading.value = false }
 }

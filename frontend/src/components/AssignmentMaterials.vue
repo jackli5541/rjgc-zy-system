@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { DeleteOutlined, DownloadOutlined, DownOutlined, FileTextOutlined, UpOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
+import { exportArchive } from '../api'
 
 const props = defineProps({ files: { type: Array, default: () => [] }, assignmentId: String, canDelete: Boolean, canDownload: Boolean, deleting: Boolean })
 const emit = defineEmits(['preview', 'delete', 'delete-selected', 'retype'])
@@ -19,23 +20,25 @@ function retype(file, type) {
 const expanded = ref(false)
 const selectedIds = ref([])
 const downloading = ref(false)
+const downloadingFileId = ref('')
+async function downloadFile(file) {
+  if (!file.name.toLowerCase().endsWith('.md')) {
+    window.location.assign(`/api/v1/files/${file.id}`)
+    return
+  }
+  if (downloadingFileId.value) return
+  downloadingFileId.value = file.id
+  try { await exportArchive(`/files/${file.id}/archive`) }
+  catch (error) { message.error(error.message) }
+  finally { downloadingFileId.value = '' }
+}
 async function downloadSelected() {
   if (!selectedFiles.value.length || downloading.value) return
   downloading.value = true
   try {
     const query = new URLSearchParams()
     selectedFiles.value.forEach(file => query.append('file_ids',file.id))
-    const response = await fetch(`/api/v1/assignments/${props.assignmentId}/materials.zip?${query}`, { credentials: 'include' })
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.message || '批量下载失败')
-    }
-    const url = URL.createObjectURL(await response.blob())
-    const link = document.createElement('a')
-    link.href = url
-    link.download = 'assignment-materials.zip'
-    link.click()
-    setTimeout(() => URL.revokeObjectURL(url),60000)
+    await exportArchive(`/assignments/${props.assignmentId}/materials.zip?${query}`)
   } catch (error) { message.error(error.message) }
   finally { downloading.value = false }
 }
@@ -76,7 +79,7 @@ watch(() => props.files.map(file => file.id).join(','), () => {
             </template>
           </a-dropdown>
           <a-tag v-else-if="file.material_type" :color="materialTypeMeta(file.material_type)?.color">{{materialTypeMeta(file.material_type)?.label}}</a-tag>
-          <a-tooltip v-if="canDownload" title="下载原文件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`"><DownloadOutlined/></a-button></a-tooltip>
+          <a-tooltip v-if="canDownload" :title="file.name.toLowerCase().endsWith('.md')?'下载离线包（含图片）':'下载原文件'"><a-button type="text" shape="circle" :loading="downloadingFileId===file.id" @click="downloadFile(file)"><DownloadOutlined/></a-button></a-tooltip>
           <a-tooltip v-if="canDelete" title="删除附件"><a-button danger type="text" shape="circle" :disabled="deleting" @click="emit('delete',file)"><DeleteOutlined/></a-button></a-tooltip>
         </a-space>
       </div>

@@ -5,7 +5,7 @@ import { message, Modal } from 'ant-design-vue'
 import { ApartmentOutlined, ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, ControlOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
-import { api, apiClientId, randomUUID } from '../api'
+import { api, apiClientId, exportArchive, randomUUID } from '../api'
 import FileReviewDrawer from '../components/FileReviewDrawer.vue'
 import AssignmentMaterials from '../components/AssignmentMaterials.vue'
 import OnlineMarkdownWorkspace from '../components/OnlineMarkdownWorkspace.vue'
@@ -58,6 +58,7 @@ const selectedTeam = ref(null)
 const selectedTeamAssignments = ref([])
 const teamDrawerLoading = ref(false)
 const exportingTeamIds = reactive(new Set())
+const exportingAssignment = ref(false)
 let teamRequestGeneration = 0
 const selectedAssignment = ref(null)
 const selectedSubmission = ref(null)
@@ -997,24 +998,23 @@ function downloadExport(kind, format = 'xlsx') {
   const assignment = kind === 'grades' && selectedGradeAssignmentId.value ? `&assignment_id=${selectedGradeAssignmentId.value}` : ''
   window.location.href = `/api/v1/exports/${kind}.${format}?class_id=${classId.value}${assignment}`
 }
+async function downloadAssignmentSubmissions() {
+  if (!selectedAssignment.value || exportingAssignment.value) return
+  exportingAssignment.value = true
+  try {
+    await exportArchive(`/assignments/${selectedAssignment.value.id}/download.zip`)
+    message.success('导出文件已生成')
+  } catch (error) {
+    message.error(error.message || '作业导出失败')
+  } finally {
+    exportingAssignment.value = false
+  }
+}
 async function downloadTeamCoursework(item) {
   if (!item || exportingTeamIds.has(item.id)) return
   exportingTeamIds.add(item.id)
   try {
-    const response = await fetch(`/api/v1/teams/${item.id}/coursework.zip`, { credentials: 'include', headers: { 'X-Client-ID': apiClientId } })
-    if (!response.ok) {
-      const data = await response.json().catch(() => null)
-      throw new Error(data?.message || data?.detail?.message || '当前无法导出，请稍后重试')
-    }
-    const blob = await response.blob()
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `${item.name}-全部作业与成绩.zip`
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    URL.revokeObjectURL(url)
+    await exportArchive(`/teams/${item.id}/coursework.zip`)
     message.success('导出文件已生成')
   } catch (error) {
     message.warning(error.message || '当前无法导出，请稍后重试')
@@ -1234,7 +1234,7 @@ provide(shellContextKey, {
               <section class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-segmented v-if="role==='TEACHER'" v-model:value="uploadMaterialType" size="small" :options="materialTypeOptions"/><a-upload v-if="role==='TEACHER'" :custom-request="uploadMaterialFile" :show-upload-list="false" :accept="uploadMaterialType==='CRITERIA'?'.md':undefined" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
                 <a-empty v-if="!assignmentAttachments.length" class="detail-empty" description="暂无作业资料"/>
-                <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" :can-download="role==='TEACHER'" :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials" @retype="retypeMaterial"/>
+                <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" can-download :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials" @retype="retypeMaterial"/>
               </section>
               <section v-if="role==='TEACHER'" class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业操作</h2></div>
@@ -1244,7 +1244,7 @@ provide(shellContextKey, {
             <a-tab-pane key="submission" :tab="role==='TEACHER'?'提交情况':'提交作业'">
               <template v-if="role==='TEACHER'">
                 <section class="assignment-pane teacher-submission-pane">
-                  <div class="assignment-pane-heading"><h2>提交概览</h2><a-space wrap><a-button :href="`/api/v1/assignments/${selectedAssignment.id}/download.zip`"><DownloadOutlined/> 下载全部学生作业</a-button><a-button v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" :href="`/api/v1/exports/grades.xlsx?class_id=${classId}&assignment_id=${selectedAssignment.id}`"><DownloadOutlined/> 导出所有学生成绩</a-button></a-space></div>
+                  <div class="assignment-pane-heading"><h2>提交概览</h2><a-space wrap><a-button :loading="exportingAssignment" @click="downloadAssignmentSubmissions"><DownloadOutlined/> 下载全部学生作业</a-button><a-button v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" :href="`/api/v1/exports/grades.xlsx?class_id=${classId}&assignment_id=${selectedAssignment.id}`"><DownloadOutlined/> 导出所有学生成绩</a-button></a-space></div>
                   <div class="detail-metrics"><div><span>应提交</span><strong>{{teacherSubmissionSummary.total}}</strong></div><div><span>已提交</span><strong>{{teacherSubmissionSummary.submitted}}</strong></div><div><span>未提交</span><strong>{{teacherSubmissionSummary.pending}}</strong></div><div><span>迟交</span><strong>{{teacherSubmissionSummary.late}}</strong></div></div>
                 </section>
                 <section class="assignment-pane">
@@ -1298,7 +1298,7 @@ provide(shellContextKey, {
       :peer-feedback-enabled="filePreview.mode==='TEACHER'&&Boolean(selectedSubmission?.peer_feedbacks?.length)"
       :peer-grade="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_grade||'' : ''"
       :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
-      :allow-download="role==='TEACHER'"
+      allow-download
       :expanded="filePreview.mode==='PEER'?peerReviewExpanded:assignmentDrawerExpanded"
       :grade-cap="selectedSubmission?.grade_cap||''"
       @close="closeFilePreview"

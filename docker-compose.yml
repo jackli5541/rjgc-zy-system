@@ -69,6 +69,7 @@ services:
       OSS_ACCESS_KEY_SECRET: "${OSS_ACCESS_KEY_SECRET}"
       OSS_KEY_PREFIX: "${OSS_KEY_PREFIX:-}"
       MARKDOWN_ASSET_ORPHAN_HOURS: "${MARKDOWN_ASSET_ORPHAN_HOURS:-24}"
+      EXPORT_ARCHIVE_HOURS: "${EXPORT_ARCHIVE_HOURS:-24}"
     depends_on:
       migrate:
         condition: service_completed_successfully

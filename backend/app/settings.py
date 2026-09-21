@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     markdown_image_max_bytes: int = 10 * 1024 * 1024
     markdown_image_max_pixels: int = 40_000_000
     markdown_asset_orphan_hours: int = 24
+    export_archive_hours: int = 24
     frontend_dist: Path = PROJECT_ROOT / "frontend" / "dist"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

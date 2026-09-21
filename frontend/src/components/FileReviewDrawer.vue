@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowDownOutlined, ArrowUpOutlined, BookOutlined, CaretRightOutlined, CloseOutlined, ColumnWidthOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, MinusOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import { api, randomUUID } from '../api'
+import { api, exportArchive, randomUUID } from '../api'
 import { loadMarkdownPreview } from '../markdownPreview'
 import PdfDocumentViewer from './PdfDocumentViewer.vue'
 import ReviewCriteriaPane from './ReviewCriteriaPane.vue'
@@ -35,6 +35,7 @@ const index = ref(0)
 const contentZoom = ref(1)
 const loading = ref(false)
 const saving = ref(false)
+const downloading = ref(false)
 const error = ref('')
 const richHtml = ref('')
 const binaryUrl = ref('')
@@ -70,6 +71,18 @@ const feedback = reactive({ status: null, revision: 0, grade: undefined, comment
 const externalWarning = ref(false)
 
 const activeFile = computed(() => props.files[index.value] || null)
+const activeFileIsMarkdown = computed(() => /\.md$/i.test(activeFile.value?.name || ''))
+async function downloadActiveFile() {
+  if (!activeFile.value || downloading.value) return
+  if (!activeFileIsMarkdown.value) {
+    window.location.assign(`/api/v1/files/${activeFile.value.id}`)
+    return
+  }
+  downloading.value = true
+  try { await exportArchive(`/files/${activeFile.value.id}/archive`) }
+  catch (downloadError) { message.error(downloadError.message) }
+  finally { downloading.value = false }
+}
 const activeCriteria = computed(() => props.criteriaFiles[criteriaState.index] || null)
 const criteriaPanelStyle = computed(() => ({ left: `${criteriaState.left}px`, top: `${criteriaState.top}px` }))
 const renderType = computed(() => activeFile.value?.render_type || (/\.pdf$/i.test(activeFile.value?.name || '') ? 'PDF' : /\.(md|html?)$/i.test(activeFile.value?.name || '') ? 'RICH_TEXT' : /\.(png|jpe?g|gif|webp)$/i.test(activeFile.value?.name || '') ? 'IMAGE' : 'DOWNLOAD_ONLY'))
@@ -550,7 +563,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <a-badge v-if="criteriaFiles.length" :count="criteriaFiles.length" :show-zero="false" size="small">
           <a-button ref="criteriaButton" :type="criteriaState.visible?'primary':'default'" :aria-expanded="criteriaState.visible" aria-controls="review-criteria-panel" @click="criteriaState.visible?hideCriteriaPanel():openCriteriaPanel()"><BookOutlined/> 判定标准</a-button>
         </a-badge>
-        <a-button v-if="activeFile&&allowDownload" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button>
+        <a-button v-if="activeFile&&allowDownload" :loading="downloading" @click="downloadActiveFile"><DownloadOutlined/> {{activeFileIsMarkdown?'下载离线包':'下载原文件'}}</a-button>
       </div>
     </div>
     <div ref="drawerRoot" class="file-review-workspace" :class="{'with-feedback':hasFeedbackPanel,'peer-comparison':mode==='PEER'&&criteriaFiles.length}">
@@ -572,7 +585,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         </header>
         <main ref="documentStage" class="review-document-stage">
           <a-spin v-if="loading" size="large" tip="正在加载文件"/>
-          <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile&&allowDownload" type="primary" :href="`/api/v1/files/${activeFile.id}`"><DownloadOutlined/> 下载原文件</a-button></template></a-result>
+          <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile&&allowDownload" type="primary" :loading="downloading" @click="downloadActiveFile"><DownloadOutlined/> {{activeFileIsMarkdown?'下载离线包':'下载原文件'}}</a-button></template></a-result>
           <PdfDocumentViewer v-else-if="renderType==='PDF'&&binaryUrl" ref="documentViewer" :url="binaryUrl" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation" @layout="scheduleComposerPosition" @error="error=$event"/>
           <div v-else-if="renderType==='RICH_TEXT'&&richHtml" class="rich-document-scroll"><div class="review-scaled-content" :style="{zoom:`${contentZoom*100}%`}"><RichTextViewer ref="documentViewer" :html="richHtml" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation"/></div></div>
           <div v-else-if="renderType==='IMAGE'&&binaryUrl" class="review-image-scroll"><img class="review-image" :style="{width:`${contentZoom*100}%`,maxWidth:'none'}" :src="binaryUrl" :alt="activeFile?.name" @error="error='图片加载失败'"/></div>

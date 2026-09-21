@@ -1,19 +1,14 @@
 import io
 import re
-import zipfile
 from datetime import datetime
 from html import unescape
 from pathlib import Path
-from tempfile import TemporaryFile
-from urllib.parse import quote
 from uuid import UUID
 
-from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from sqlalchemy import select
 
-from app import storage
 from app.models import Assignment, ClassMember, FileObject, Grade, PeerReview, ReviewCampaign, SubmissionAssessment, User, VersionFile
 
 
@@ -98,52 +93,19 @@ def workbook_bytes(data):
 
 
 def write_student_archive(bundle, db, data, root=""):
-    from app.main import ApiError
+    from app.archive_exports import _write_file
+
     bundle.writestr(root + "学生档案.xlsx", workbook_bytes(data))
+    written_assets = set()
     for index, item in enumerate(data["assignments"], 1):
         directory = root + f"{index:03d}_{safe_name(item['title'])}/"
         used = set()
         for file_info in item["files"]:
             file = db.get(FileObject, UUID(file_info["id"]))
-            if not storage.object_exists(file.storage_path):
-                raise ApiError(404, "FILE_MISSING", "附件存储不可用，导出已取消")
             original = safe_name(file.original_name)
             name, suffix = original, 1
             while name.casefold() in used:
                 name = f"{Path(original).stem} ({suffix}){Path(original).suffix}"
                 suffix += 1
             used.add(name.casefold())
-            with bundle.open(directory + name, "w") as dest:
-                for chunk in storage.get_object_stream(file.storage_path):
-                    dest.write(chunk)
-
-
-def export_portfolios(db, course, user, uid=None):
-    from app.main import ApiError, audit
-    ids = [uid] if uid else db.scalars(select(ClassMember.user_id).where(ClassMember.class_id == course.id, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT").order_by(ClassMember.user_id)).all()
-    archive = TemporaryFile()
-    exported_member = None
-    try:
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
-            for student_id in ids:
-                data = portfolio(db, course.id, student_id)
-                member = data["member"]
-                exported_member = member if uid is not None else exported_member
-                root = f"{safe_name(member['student_no'])}_{safe_name(member['name'])}/" if uid is None else ""
-                write_student_archive(bundle, db, data, root)
-        archive.seek(0)
-        audit(db, user, "STUDENT_PORTFOLIOS_EXPORTED", "class", str(course.id), {"student_id": str(uid) if uid else None, "student_count": len(ids)})
-        db.commit()
-    except Exception:
-        archive.close()
-        raise
-
-    def chunks():
-        try:
-            while chunk := archive.read(1024 * 1024):
-                yield chunk
-        finally:
-            archive.close()
-
-    filename = f"{safe_name(exported_member['student_no'])}_{safe_name(exported_member['name'])}.zip" if exported_member else f"{safe_name(course.name)}-班级档案.zip"
-    return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=portfolio.zip; filename*=UTF-8''{quote(filename)}"})
+            _write_file(db, bundle, directory + name, directory.rstrip("/"), file, written_assets)
