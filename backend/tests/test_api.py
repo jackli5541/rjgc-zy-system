@@ -1,4 +1,5 @@
 import base64
+import re
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -12,13 +13,13 @@ from zipfile import ZipFile
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 
 from app.database import SessionLocal, engine
 from app.main import app, parse_roster
 from app.grading import final_score
 from app.markdown_assets import extract_assets
-from app.models import Assignment, AuditLog, BackgroundJob, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, Team, TeamMember, TeamRequest, User
+from app.models import Assignment, AuditLog, BackgroundJob, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, Team, TeamMember, TeamRequest, TeachingMaterialAsset, User
 from app.worker import cleanup_archive_exports, process_archive_export, process_auto_review, process_due_campaign, process_oss_delete
 
 
@@ -154,6 +155,141 @@ def test_teaching_materials_teacher_management_and_student_read_only():
     for item in uploaded:
         assert teacher.delete(f"/api/v1/teaching-materials/files/{item['id']}", headers=teacher_headers).status_code == 204
     assert teacher.delete(f"/api/v1/teaching-materials/folders/{folder_id}", headers=teacher_headers).status_code == 204
+
+
+def test_teaching_materials_rename_move_and_download():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post(
+        "/api/v1/classes",
+        headers=teacher_headers,
+        json={"semester": "教学资料排序测试", "name": "教学资料排序测试班"},
+    ).json()
+    member = teacher.post(
+        f"/api/v1/classes/{course['id']}/members",
+        headers=teacher_headers,
+        json={"student_no": "20990219", "name": "排序测试学生"},
+    ).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+
+    folder_a = teacher.post(
+        "/api/v1/teaching-materials/folders",
+        headers=teacher_headers,
+        json={"class_id": course["id"], "parent_id": None, "name": "文件夹A"},
+    ).json()
+    folder_b = teacher.post(
+        "/api/v1/teaching-materials/folders",
+        headers=teacher_headers,
+        json={"class_id": course["id"], "parent_id": None, "name": "文件夹B"},
+    ).json()
+
+    uploaded = []
+    for name in ["a.md", "b.md", "c.md"]:
+        response = teacher.post(
+            f"/api/v1/teaching-materials/files?class_id={course['id']}",
+            headers=teacher_headers,
+            files={"file": (name, b"# content", "text/markdown")},
+        )
+        assert response.status_code == 201, response.text
+        uploaded.append(response.json())
+
+    tree = teacher.get(f"/api/v1/teaching-materials?class_id={course['id']}").json()
+    assert [item["name"] for item in tree["folders"]] == ["文件夹A", "文件夹B"]
+    assert [item["name"] for item in tree["files"]] == ["a.md", "b.md", "c.md"]
+
+    move_down = teacher.post(f"/api/v1/teaching-materials/files/{uploaded[0]['id']}/move", headers=teacher_headers, json={"direction": "down"})
+    assert move_down.status_code == 200, move_down.text
+    tree = teacher.get(f"/api/v1/teaching-materials?class_id={course['id']}").json()
+    assert [item["name"] for item in tree["files"]] == ["b.md", "a.md", "c.md"]
+
+    boundary = teacher.post(f"/api/v1/teaching-materials/folders/{folder_a['id']}/move", headers=teacher_headers, json={"direction": "up"})
+    assert boundary.status_code == 200, boundary.text
+    tree = teacher.get(f"/api/v1/teaching-materials?class_id={course['id']}").json()
+    assert [item["name"] for item in tree["folders"]] == ["文件夹A", "文件夹B"]
+
+    assert student.post(f"/api/v1/teaching-materials/files/{uploaded[1]['id']}/move", headers=student_headers, json={"direction": "up"}).status_code == 403
+
+    rename = teacher.patch(f"/api/v1/teaching-materials/files/{uploaded[1]['id']}", headers=teacher_headers, json={"name": "renamed"})
+    assert rename.status_code == 200, rename.text
+    assert rename.json()["name"] == "renamed.md"
+    conflict = teacher.patch(f"/api/v1/teaching-materials/files/{uploaded[2]['id']}", headers=teacher_headers, json={"name": "renamed"})
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "MATERIAL_FILE_EXISTS"
+    assert student.patch(f"/api/v1/teaching-materials/files/{uploaded[2]['id']}", headers=student_headers, json={"name": "hacked"}).status_code == 403
+
+    rename_folder = teacher.patch(f"/api/v1/teaching-materials/folders/{folder_b['id']}", headers=teacher_headers, json={"name": "文件夹A"})
+    assert rename_folder.status_code == 409
+    assert rename_folder.json()["code"] == "MATERIAL_FOLDER_EXISTS"
+
+    inline = teacher.get(uploaded[2]["content_url"])
+    assert inline.status_code == 200
+    assert inline.headers["content-disposition"].startswith("inline")
+    attachment = teacher.get(f"{uploaded[2]['content_url']}?download=1")
+    assert attachment.status_code == 200
+    assert attachment.headers["content-disposition"].startswith("attachment")
+
+
+def test_teaching_material_markdown_extracts_embedded_images_including_svg(monkeypatch):
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post(
+        "/api/v1/classes",
+        headers=teacher_headers,
+        json={"semester": "教学资料图片测试", "name": "教学资料图片测试班"},
+    ).json()
+
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    svg_source = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80"><rect width="120" height="80" fill="#fff"/></svg>'
+    svg = base64.b64encode(svg_source.encode()).decode()
+    markdown = f"# 图\n\n![png](data:image/png;base64,{png})\n\n![svg](data:image/svg+xml;base64,{svg})\n"
+    uploaded = teacher.post(
+        f"/api/v1/teaching-materials/files?class_id={course['id']}",
+        headers=teacher_headers,
+        files={"file": ("diagram.md", markdown.encode(), "text/markdown")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    material_id = uploaded.json()["id"]
+
+    content = teacher.get(uploaded.json()["content_url"])
+    assert content.status_code == 200
+    body = content.text
+    assert "data:image" not in body
+    assert body.count("/api/v1/teaching-material-assets/") == 2
+
+    asset_ids = re.findall(r"/api/v1/teaching-material-assets/([0-9a-fA-F-]{36})/content", body)
+    assert len(asset_ids) == 2
+
+    signed = {}
+    def fake_sign_get_url(key, expires, params=None):
+        signed.setdefault(key, params)
+        return f"https://storage.test/{key}"
+    monkeypatch.setattr("app.storage.sign_get_url", fake_sign_get_url)
+    for asset_id in asset_ids:
+        response = teacher.get(f"/api/v1/teaching-material-assets/{asset_id}/content", follow_redirects=False)
+        assert response.status_code == 302, response.text
+    svg_params = [params for params in signed.values() if params]
+    assert len(svg_params) == 1
+    assert svg_params[0]["response-content-disposition"].startswith("attachment")
+    assert svg_params[0]["response-content-disposition"].endswith('.svg"')
+
+    evil_svg = base64.b64encode(b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>alert(1)</script></svg>').decode()
+    rejected_script = teacher.post(
+        f"/api/v1/teaching-materials/files?class_id={course['id']}",
+        headers=teacher_headers,
+        files={"file": ("evil.md", f"![x](data:image/svg+xml;base64,{evil_svg})".encode(), "text/markdown")},
+    )
+    assert rejected_script.status_code == 422
+    assert rejected_script.json()["code"] == "MATERIAL_IMAGE_INVALID"
+
+    rejected_format = teacher.post(
+        f"/api/v1/teaching-materials/files?class_id={course['id']}",
+        headers=teacher_headers,
+        files={"file": ("unsupported.md", f"![x](data:image/bmp;base64,{png})".encode(), "text/markdown")},
+    )
+    assert rejected_format.status_code == 422
+
+    assert teacher.delete(f"/api/v1/teaching-materials/files/{material_id}", headers=teacher_headers).status_code == 204
+    with SessionLocal.begin() as db:
+        remaining = db.scalar(select(func.count()).select_from(TeachingMaterialAsset))
+        assert remaining == 0
 
 
 def test_student_workspace_initializes_idempotently():

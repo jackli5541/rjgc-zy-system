@@ -1,7 +1,7 @@
 <script setup>
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message, Modal, Input } from 'ant-design-vue'
-import { DeleteOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, MoreOutlined, UploadOutlined, VideoCameraOutlined } from '@ant-design/icons-vue'
+import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, MoreOutlined, UploadOutlined, VideoCameraOutlined } from '@ant-design/icons-vue'
 import { api } from '../../api'
 import { loadMarkdownPreview } from '../../markdownPreview'
 import RichTextViewer from '../../components/RichTextViewer.vue'
@@ -29,8 +29,9 @@ const canManage = computed(() => role.value === 'TEACHER')
 
 const folderMap = computed(() => new Map(folders.value.map(item => [item.id, item])))
 const fileMap = computed(() => new Map(files.value.map(item => [item.id, item])))
-const childrenFolders = folderId => folders.value.filter(item => item.parent_id === folderId).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
-const childrenFiles = folderId => files.value.filter(item => item.folder_id === folderId).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+const bySortOrder = (a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name, 'zh-CN')
+const childrenFolders = folderId => folders.value.filter(item => item.parent_id === folderId).sort(bySortOrder)
+const childrenFiles = folderId => files.value.filter(item => item.folder_id === folderId).sort(bySortOrder)
 const visibleNodes = computed(() => {
   const nodes = []
   function append(folderId, depth) {
@@ -86,7 +87,7 @@ function clearContext() { context.value = null }
 function openContext(event, node = null) {
   if (!canManage.value) return
   event.preventDefault(); event.stopPropagation()
-  const width = 196; const height = node?.nodeType === 'file' ? 48 : node ? 144 : 96
+  const width = 196; const height = node?.nodeType === 'file' ? 240 : node ? 288 : 96
   context.value = { node, x: Math.min(event.clientX, window.innerWidth - width - 8), y: Math.min(event.clientY, window.innerHeight - height - 8) }
 }
 
@@ -104,6 +105,38 @@ function createFolder(parentId) {
       message.success('文件夹已创建'); await loadTree()
     }
   })
+}
+
+function renameNode(node) {
+  clearContext()
+  const isFile = node.nodeType === 'file'
+  const suffix = isFile ? node.name.slice(node.name.lastIndexOf('.')) : ''
+  let value = isFile ? node.name.slice(0, node.name.length - suffix.length) : node.name
+  Modal.confirm({
+    title: isFile ? '重命名文件' : '重命名文件夹',
+    content: h(Input, { defaultValue: value, placeholder: '请输入名称', maxlength: 120, onInput: event => { value = event.target.value } }),
+    okText: '保存', cancelText: '取消',
+    onOk: async () => {
+      const name = value.trim()
+      if (!name) { message.warning('请输入名称'); return Promise.reject() }
+      await api(isFile ? `/teaching-materials/files/${node.id}` : `/teaching-materials/folders/${node.id}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+      message.success('已重命名'); await loadTree()
+    }
+  })
+}
+
+async function moveNode(node, direction) {
+  clearContext()
+  const isFile = node.nodeType === 'file'
+  try {
+    await api(isFile ? `/teaching-materials/files/${node.id}/move` : `/teaching-materials/folders/${node.id}/move`, { method: 'POST', body: JSON.stringify({ direction }) })
+    await loadTree()
+  } catch (err) { message.error(err.message || '调整顺序失败') }
+}
+
+function downloadFile(node) {
+  clearContext()
+  window.location.assign(`${node.content_url}?download=1`)
 }
 
 function triggerUpload(folderId) {
@@ -194,8 +227,23 @@ onBeforeUnmount(() => htmlResizeObserver?.disconnect())
       </main>
     </div>
     <div v-if="context" class="teaching-material-context-menu" :style="{left:`${context.x}px`,top:`${context.y}px`}" @click.stop>
-      <template v-if="context.node?.nodeType === 'file'"><button type="button" @click="deleteNode(context.node)"><DeleteOutlined/> 删除文件</button></template>
-      <template v-else><button type="button" @click="createFolder(context.node?.id || null)"><FolderOutlined/> 新建文件夹</button><button type="button" @click="triggerUpload(context.node?.id || null)"><UploadOutlined/> 上传文件到此目录</button><button v-if="context.node" type="button" class="danger" @click="deleteNode(context.node)"><DeleteOutlined/> 删除文件夹</button></template>
+      <template v-if="context.node?.nodeType === 'file'">
+        <button type="button" @click="renameNode(context.node)"><EditOutlined/> 重命名</button>
+        <button type="button" @click="moveNode(context.node,'up')"><ArrowUpOutlined/> 上移</button>
+        <button type="button" @click="moveNode(context.node,'down')"><ArrowDownOutlined/> 下移</button>
+        <button type="button" @click="downloadFile(context.node)"><DownloadOutlined/> 下载文件</button>
+        <button type="button" class="danger" @click="deleteNode(context.node)"><DeleteOutlined/> 删除文件</button>
+      </template>
+      <template v-else>
+        <button type="button" @click="createFolder(context.node?.id || null)"><FolderOutlined/> 新建文件夹</button>
+        <button type="button" @click="triggerUpload(context.node?.id || null)"><UploadOutlined/> 上传文件到此目录</button>
+        <template v-if="context.node">
+          <button type="button" @click="renameNode(context.node)"><EditOutlined/> 重命名</button>
+          <button type="button" @click="moveNode(context.node,'up')"><ArrowUpOutlined/> 上移</button>
+          <button type="button" @click="moveNode(context.node,'down')"><ArrowDownOutlined/> 下移</button>
+          <button type="button" class="danger" @click="deleteNode(context.node)"><DeleteOutlined/> 删除文件夹</button>
+        </template>
+      </template>
     </div>
   </section>
 </template>

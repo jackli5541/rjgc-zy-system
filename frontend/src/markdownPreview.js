@@ -2,7 +2,7 @@ import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 
 const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024
-const MANAGED_IMAGE_URL = /^\/api\/v1\/markdown-assets\/[0-9a-f-]{36}\/content$/i
+const MANAGED_IMAGE_URL = /^\/api\/v1\/(?:markdown-assets|teaching-material-assets)\/[0-9a-f-]{36}\/content$/i
 const markdown = new MarkdownIt({ html: true, linkify: true, typographer: false })
 
 function prepareTaskItems(source) {
