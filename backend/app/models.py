@@ -218,6 +218,7 @@ class Assignment(Base):
     title: Mapped[str] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(Text)
     submitter_type: Mapped[str] = mapped_column(String(16))
+    kind: Mapped[str] = mapped_column(String(16), default="ASSIGNMENT")
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     allow_late: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -620,6 +621,18 @@ class CapstoneStageGrade(Base):
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     __table_args__ = (UniqueConstraint("class_id", "student_user_id", "stage", name="uq_capstone_grade"),)
+
+
+class AttendanceScoreManual(Base):
+    """Stopgap manual entry for the 10% attendance component until a real attendance module exists."""
+    __tablename__ = "attendance_scores_manual"
+    id: Mapped[UUID] = uuid_pk()
+    class_id: Mapped[UUID] = mapped_column(ForeignKey("teaching_classes.id", ondelete="CASCADE"), index=True)
+    student_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    score: Mapped[Decimal] = mapped_column(Numeric(4, 1))
+    graded_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    __table_args__ = (UniqueConstraint("class_id", "student_user_id", name="uq_attendance_manual"),)
 
 
 class CapstoneModuleAssignment(Base):

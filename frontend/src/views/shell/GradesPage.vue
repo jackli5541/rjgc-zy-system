@@ -1,11 +1,44 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { DatabaseOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, TeamOutlined, TrophyOutlined, UserOutlined } from '@ant-design/icons-vue'
-import { exportArchive } from '../../api'
+import { api, exportArchive } from '../../api'
 import { useShellContext } from '../../shellContext'
 
-const { role, classId, grades, gradeAssignments, selectedGradeAssignmentId, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback } = useShellContext()
+const { role, classId, activeClasses, grades, gradeAssignments, selectedGradeAssignmentId, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback } = useShellContext()
+const className = computed(() => activeClasses.value.find(item => item.id === classId.value)?.name || '')
+const gradesTab = ref('overview')
+const overviewItems = ref([])
+const overviewLoading = ref(false)
+async function loadGradeOverview() {
+  if (!classId.value) { overviewItems.value = []; return }
+  overviewLoading.value = true
+  try {
+    const data = await api(`/classes/${classId.value}/grade-overview`)
+    overviewItems.value = data.items
+  } catch (error) {
+    message.error(error.message || '成绩总览加载失败')
+  } finally {
+    overviewLoading.value = false
+  }
+}
+onMounted(loadGradeOverview)
+watch(classId, loadGradeOverview)
+async function saveAttendance(record, value) {
+  try {
+    await api(`/classes/${classId.value}/students/${record.student_id}/attendance-score`, { method: 'PUT', body: JSON.stringify({ score: value ?? null }) })
+    await loadGradeOverview()
+  } catch (error) {
+    message.error(error.message || '考勤分保存失败')
+  }
+}
+function gradeTagColor(grade) {
+  if (grade === 'A' || grade === 'B') return 'green'
+  if (grade === 'C') return 'blue'
+  if (grade === 'D') return 'orange'
+  if (grade === 'E') return 'red'
+  return 'default'
+}
 const gradingStatusColor = status => status === 'PENDING_REASSESSMENT' ? 'blue' : status === 'PENDING_ASSESSMENT' ? 'orange' : 'default'
 const archivingClass = ref(false)
 const archiveSummary = computed(() => ({
@@ -47,26 +80,55 @@ async function downloadAssignmentFiles() {
       <a-button type="primary" size="large" :loading="archivingClass" @click="downloadClassArchive"><InboxOutlined/> 导出全班档案 ZIP</a-button>
     </section>
 
-    <section class="grade-export-section">
-      <div class="export-section-heading"><div><h2>单次作业导出</h2></div><a-select v-model:value="selectedGradeAssignmentId" allow-clear placeholder="选择个人作业" :options="gradeAssignments.map(item=>({value:item.id,label:item.title}))"/></div>
-      <div v-if="selectedGradeAssignmentId" class="assignment-export-actions">
-        <div class="assignment-export-status"><FileTextOutlined/><div><strong>{{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.title}}</strong><span>已提交 {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.submitted || 0}} / {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.total || 0}} · 已评分 {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.graded || 0}}</span></div></div>
-        <a-space wrap><a-button @click="downloadExport('grades')"><TrophyOutlined/> 成绩明细 XLSX</a-button><a-button @click="downloadExport('grades','csv')"><DownloadOutlined/> CSV</a-button><a-button type="primary" ghost @click="downloadAssignmentFiles"><InboxOutlined/> 学生作业原文件 ZIP</a-button></a-space>
-      </div>
-      <a-empty v-else description="请先选择需要导出的个人作业"/>
-      <div v-if="gradeAssignments.length" class="grade-coverage-list">
-        <div class="coverage-head"><span>作业</span><span>提交</span><span>评分</span><span>待处理</span></div>
-        <button v-for="item in gradeAssignments" :key="item.id" type="button" :class="{active:selectedGradeAssignmentId===item.id}" @click="selectedGradeAssignmentId=item.id"><span><strong>{{item.title}}</strong><small>截止 {{new Date(item.due_at).toLocaleString('zh-CN',{hour12:false})}}</small></span><span>{{item.submitted}} / {{item.total}}</span><span>{{item.graded}} / {{item.total}}</span><a-tag :color="item.pending?'gold':'green'">{{item.pending ? `${item.pending} 人` : '已完成'}}</a-tag></button>
-      </div>
-    </section>
+    <section class="grade-export-section grades-tabs-card">
+      <a-tabs v-model:activeKey="gradesTab" class="grades-tabs" :animated="{inkBar:true,tabPane:true}">
+        <a-tab-pane key="overview">
+          <template #tab><span><TrophyOutlined/> 成绩总览</span></template>
+          <p class="overview-hint">按导入名单顺序排列；平时成绩20%=平时作业10%+考勤10%（考勤为手动录入，直接在下面输入框里填写）；实验成绩30%；期末成绩50%来自大作业5个阶段评分。任一分项暂无数据时显示"—"。</p>
+          <a-table :data-source="overviewItems" :loading="overviewLoading" row-key="student_id" size="small" :pagination="false">
+            <a-table-column title="学号" data-index="student_no" :width="130"/>
+            <a-table-column title="姓名" data-index="name" :width="100"/>
+            <a-table-column title="班级" :width="110"><template #default>{{className}}</template></a-table-column>
+            <a-table-column title="组名"><template #default="{record}">{{record.team_name || '未分组'}}</template></a-table-column>
+            <a-table-column title="平时成绩(20%)" :width="190">
+              <template #default="{record}">
+                <div class="routine-score-cell">
+                  <strong>{{record.routine_score ?? '—'}}</strong>
+                  <span class="routine-score-sub">作业 {{record.homework_component ?? '—'}}</span>
+                  <a-input-number class="attendance-input" size="small" :min="0" :max="10" :step="0.5" :precision="1" :value="record.attendance_component" placeholder="考勤" @change="value => saveAttendance(record, value)"/>
+                </div>
+              </template>
+            </a-table-column>
+            <a-table-column title="实验成绩(30%)"><template #default="{record}">{{record.lab_score ?? '—'}}</template></a-table-column>
+            <a-table-column title="期末成绩(50%)"><template #default="{record}">{{record.capstone_score ?? '—'}}</template></a-table-column>
+            <a-table-column title="综合成绩"><template #default="{record}"><strong>{{record.composite_score ?? '—'}}</strong></template></a-table-column>
+            <a-table-column title="等级"><template #default="{record}"><a-tag v-if="record.grade" :color="gradeTagColor(record.grade)">{{record.grade}}</a-tag><span v-else>—</span></template></a-table-column>
+          </a-table>
+        </a-tab-pane>
 
-    <section class="grade-export-section compact">
-      <div class="export-section-heading"><div><h2>基础数据与评价记录</h2></div></div>
-      <div class="data-export-list">
-        <div class="data-export-row"><span class="data-export-icon blue"><UserOutlined/></span><div><strong>成员名单</strong></div><a-space><a-button @click="downloadExport('members')">XLSX</a-button><a-button type="text" @click="downloadExport('members','csv')">CSV</a-button></a-space></div>
-        <div class="data-export-row"><span class="data-export-icon purple"><TeamOutlined/></span><div><strong>小组名单</strong></div><a-space><a-button @click="downloadExport('teams')">XLSX</a-button><a-button type="text" @click="downloadExport('teams','csv')">CSV</a-button></a-space></div>
-        <div class="data-export-row"><span class="data-export-icon cyan"><FormOutlined/></span><div><strong>互评记录</strong></div><a-space><a-button @click="downloadExport('reviews')">XLSX</a-button><a-button type="text" @click="downloadExport('reviews','csv')">CSV</a-button></a-space></div>
-      </div>
+        <a-tab-pane key="export">
+          <template #tab><span><DownloadOutlined/> 单次作业导出</span></template>
+          <div class="export-toolbar"><a-select v-model:value="selectedGradeAssignmentId" allow-clear placeholder="选择个人作业" :options="gradeAssignments.map(item=>({value:item.id,label:item.title}))"/></div>
+          <div v-if="selectedGradeAssignmentId" class="assignment-export-actions">
+            <div class="assignment-export-status"><FileTextOutlined/><div><strong>{{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.title}}</strong><span>已提交 {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.submitted || 0}} / {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.total || 0}} · 已评分 {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.graded || 0}}</span></div></div>
+            <a-space wrap><a-button @click="downloadExport('grades')"><TrophyOutlined/> 成绩明细 XLSX</a-button><a-button @click="downloadExport('grades','csv')"><DownloadOutlined/> CSV</a-button><a-button type="primary" ghost @click="downloadAssignmentFiles"><InboxOutlined/> 学生作业原文件 ZIP</a-button></a-space>
+          </div>
+          <a-empty v-else description="请先选择需要导出的个人作业"/>
+          <div v-if="gradeAssignments.length" class="grade-coverage-list">
+            <div class="coverage-head"><span>作业</span><span>提交</span><span>评分</span><span>待处理</span></div>
+            <button v-for="item in gradeAssignments" :key="item.id" type="button" :class="{active:selectedGradeAssignmentId===item.id}" @click="selectedGradeAssignmentId=item.id"><span><strong>{{item.title}}</strong><small>截止 {{new Date(item.due_at).toLocaleString('zh-CN',{hour12:false})}}</small></span><span>{{item.submitted}} / {{item.total}}</span><span>{{item.graded}} / {{item.total}}</span><a-tag :color="item.pending?'gold':'green'">{{item.pending ? `${item.pending} 人` : '已完成'}}</a-tag></button>
+          </div>
+        </a-tab-pane>
+
+        <a-tab-pane key="data">
+          <template #tab><span><DatabaseOutlined/> 基础数据与导出</span></template>
+          <div class="data-export-list">
+            <div class="data-export-row"><span class="data-export-icon blue"><UserOutlined/></span><div><strong>成员名单</strong></div><a-space><a-button @click="downloadExport('members')">XLSX</a-button><a-button type="text" @click="downloadExport('members','csv')">CSV</a-button></a-space></div>
+            <div class="data-export-row"><span class="data-export-icon purple"><TeamOutlined/></span><div><strong>小组名单</strong></div><a-space><a-button @click="downloadExport('teams')">XLSX</a-button><a-button type="text" @click="downloadExport('teams','csv')">CSV</a-button></a-space></div>
+            <div class="data-export-row"><span class="data-export-icon cyan"><FormOutlined/></span><div><strong>互评记录</strong></div><a-space><a-button @click="downloadExport('reviews')">XLSX</a-button><a-button type="text" @click="downloadExport('reviews','csv')">CSV</a-button></a-space></div>
+          </div>
+        </a-tab-pane>
+      </a-tabs>
     </section>
   </template>
   <template v-else>

@@ -118,7 +118,7 @@ const modals = reactive({ class: false, import: false, member: false, team: fals
 const classForm = reactive({ id: '', version: 1, semester: '', name: '', team_deadline: '', topic_public: false })
 const memberForm = reactive({ id: '', student_no: '', name: '' })
 const teamForm = reactive({ name: '', open_recruitment: true })
-const assignmentForm = reactive({ id: '', version: 1, has_submissions: false, class_ids: [], title: '', description: '', submitter_type: 'INDIVIDUAL', starts_at: '', due_at: '', allow_late: false, publish: true, auto_review_enabled: false, auto_review_mode: 'TEAM', auto_review_criteria_text: '', auto_review_due_at: '' })
+const assignmentForm = reactive({ id: '', version: 1, has_submissions: false, class_ids: [], title: '', description: '', submitter_type: 'INDIVIDUAL', kind: 'ASSIGNMENT', starts_at: '', due_at: '', allow_late: false, publish: true, auto_review_enabled: false, auto_review_mode: 'TEAM', auto_review_criteria_text: '', auto_review_due_at: '' })
 const reviewForm = reactive({ grade: undefined, comment: '', reviewee_id: '' })
 const topicForm = reactive({ name: '', description: '' })
 const topicDecisionForm = reactive({ id: '', reason: '' })
@@ -345,6 +345,7 @@ async function changeAuditSemester() {
 }
 async function changeAuditPage(page) { auditPage.value = page; await loadView({ silent: true }) }
 function statusLabel(value) { return statusLabels[value] || value || '-' }
+function assignmentTypeLabel(item) { return `${item.submitter_type === 'INDIVIDUAL' ? '个人' : '小组'}${item.kind === 'EXPERIMENT' ? '实验' : '作业'}` }
 function roleLabel(value) { return roleLabels[value] || value || '-' }
 function objectLabel(value) { return objectLabels[value] || (value ? '其他业务对象' : '-') }
 function actionLabel(value) { return value === 'TEAM_RECRUITMENT_CLOSED' ? '截止小组招募' : value === 'TEAM_RECRUITMENT_OPENED' ? '继续小组招募' : actionLabels[value] || (value ? '其他系统操作' : '-') }
@@ -668,11 +669,11 @@ function defaultClassSelection() {
   return activeClasses.value[0] ? [activeClasses.value[0].id] : []
 }
 function openAssignmentCreate() {
-  Object.assign(assignmentForm, { id: '', version: 1, has_submissions: false, class_ids: defaultClassSelection(), title: '', description: '', submitter_type: 'INDIVIDUAL', starts_at: '', due_at: '', allow_late: false, publish: false, auto_review_enabled: false, auto_review_mode: 'TEAM', auto_review_criteria_text: '', auto_review_due_at: '' }); pendingAssignmentFiles.value = []; descriptionEditor.value?.commands.setContent('', { emitUpdate: false }); modals.assignment = true
+  Object.assign(assignmentForm, { id: '', version: 1, has_submissions: false, class_ids: defaultClassSelection(), title: '', description: '', submitter_type: 'INDIVIDUAL', kind: 'ASSIGNMENT', starts_at: '', due_at: '', allow_late: false, publish: false, auto_review_enabled: false, auto_review_mode: 'TEAM', auto_review_criteria_text: '', auto_review_due_at: '' }); pendingAssignmentFiles.value = []; descriptionEditor.value?.commands.setContent('', { emitUpdate: false }); modals.assignment = true
 }
 function openAssignmentEdit() {
   const item = selectedAssignment.value
-  Object.assign(assignmentForm, { id: item.id, version: item.version, has_submissions: (item.board || []).some(record => record.status === 'SUBMITTED'), class_ids: [item.class_id], title: item.title, description: item.description, submitter_type: item.submitter_type, starts_at: localDateTime(item.starts_at), due_at: localDateTime(item.due_at), allow_late: item.allow_late, publish: item.status === 'PUBLISHED', auto_review_enabled: item.auto_review_enabled, auto_review_mode: item.auto_review_mode || 'TEAM', auto_review_criteria_text: item.auto_review_criteria_text || '', auto_review_due_at: localDateTime(item.auto_review_due_at) })
+  Object.assign(assignmentForm, { id: item.id, version: item.version, has_submissions: (item.board || []).some(record => record.status === 'SUBMITTED'), class_ids: [item.class_id], title: item.title, description: item.description, submitter_type: item.submitter_type, kind: item.kind || 'ASSIGNMENT', starts_at: localDateTime(item.starts_at), due_at: localDateTime(item.due_at), allow_late: item.allow_late, publish: item.status === 'PUBLISHED', auto_review_enabled: item.auto_review_enabled, auto_review_mode: item.auto_review_mode || 'TEAM', auto_review_criteria_text: item.auto_review_criteria_text || '', auto_review_due_at: localDateTime(item.auto_review_due_at) })
   descriptionEditor.value?.commands.setContent(item.description || '', { emitUpdate: false }); pendingAssignmentFiles.value = []; modals.assignment = true
 }
 function setDescriptionLink() {
@@ -730,7 +731,7 @@ async function createAssignment(publishRequested = false) {
       const originalClassId = selectedAssignment.value.class_id
       const targetClassId = assignmentForm.class_ids.includes(originalClassId) ? originalClassId : assignmentForm.class_ids[0]
       const additionalClassIds = assignmentForm.class_ids.filter(id => id !== targetClassId)
-      const payload = { class_id: targetClassId, title: assignmentForm.title, description: assignmentForm.description, submitter_type: assignmentForm.submitter_type, starts_at: iso(assignmentForm.starts_at), due_at: iso(assignmentForm.due_at), allow_late: assignmentForm.allow_late, version: assignmentForm.version }
+      const payload = { class_id: targetClassId, title: assignmentForm.title, description: assignmentForm.description, submitter_type: assignmentForm.submitter_type, kind: assignmentForm.kind, starts_at: iso(assignmentForm.starts_at), due_at: iso(assignmentForm.due_at), allow_late: assignmentForm.allow_late, version: assignmentForm.version }
       if (reviewConfigEditable.value) Object.assign(payload, { auto_review_enabled: assignmentForm.auto_review_enabled, auto_review_mode: assignmentForm.auto_review_enabled ? assignmentForm.auto_review_mode : null, auto_review_criteria_text: assignmentForm.auto_review_enabled ? assignmentForm.auto_review_criteria_text : '', auto_review_due_at: assignmentForm.auto_review_enabled ? iso(assignmentForm.auto_review_due_at) : null })
       const saved = await api(`/assignments/${assignmentForm.id}`, { method: 'PATCH', body: JSON.stringify(payload) })
       assignmentForm.version = saved.version
@@ -742,6 +743,7 @@ async function createAssignment(publishRequested = false) {
             title: assignmentForm.title.trim(),
             description: assignmentForm.description,
             submitter_type: assignmentForm.submitter_type,
+            kind: assignmentForm.kind,
             starts_at: iso(assignmentForm.starts_at),
             due_at: iso(assignmentForm.due_at),
             allow_late: assignmentForm.allow_late,
@@ -773,6 +775,7 @@ async function createAssignment(publishRequested = false) {
     title: assignmentForm.title.trim(),
     description: assignmentForm.description,
     submitter_type: assignmentForm.submitter_type,
+    kind: assignmentForm.kind,
     starts_at: iso(assignmentForm.starts_at),
     due_at: iso(assignmentForm.due_at),
     allow_late: assignmentForm.allow_late,
@@ -1232,7 +1235,7 @@ provide(shellContextKey, {
   grades, gradeAssignments, selectedGradeAssignmentId, campaigns, selectedCampaign, reviewTask, reviewForm, selectedReviewCandidate,
   latestOverviewAssignment, assignmentHistory, assignmentChartLine, assignmentChartPoints, currentTeam, needsTopicSubmission,
   studentPendingAssignments, studentUpcomingAssignments, studentPendingReviews, studentLatestGrade,
-  changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, roleLabel, gradeSourceLabel, searchAudits, changeAuditSemester, changeAuditPage, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
+  changeClass, logout, navigate, formatTime, actionLabel, objectLabel, statusLabel, assignmentTypeLabel, roleLabel, gradeSourceLabel, searchAudits, changeAuditSemester, changeAuditPage, downloadExport, downloadTeamCoursework, openStudentFeedback, openStudentAssignment, openClassCreate,
   manageClass, closeClassDetail, openClassEdit, toggleClassStatus, deleteClass, openMemberCreate, openMemberDetail, openMemberEdit, resetMemberPassword, removeClassMember,
   applyTeam, openTeam, closeTeamDrawer, inviteTarget, inviteMember, closeTeamRecruitment, openTeamRecruitment, disbandTeam, decideTopic, decideRequest, respondInvitation, cancelRequest, openAssignmentCreate, assignmentStateClass, openAssignment, assignmentCountdown,
   openCampaign, selectReviewCandidate, openFilePreview, openPeerReviewDrawer, submitReview, openLatestSubmission, continueGrading
@@ -1266,7 +1269,7 @@ provide(shellContextKey, {
          <span v-if="role==='TEACHER'" class="drawer-resize-handle with-center-control drawer-resize-handle-top" role="separator" aria-label="调整作业详情抽屉宽度" aria-orientation="vertical" @pointerdown="resizeAssignmentDrawer"/>
          <span v-if="role==='TEACHER'" class="drawer-resize-handle with-center-control drawer-resize-handle-bottom" role="separator" aria-label="调整作业详情抽屉宽度" aria-orientation="vertical" @pointerdown="resizeAssignmentDrawer"/>
          <a-tooltip v-if="role==='TEACHER'" :open="assignmentDrawerAnimating?false:undefined" :title="assignmentDrawerExpanded?'收回':'展开至全屏'" placement="right"><button type="button" class="assignment-drawer-expand-button" :aria-label="assignmentDrawerExpanded?'收回作业详情':'将作业详情展开至全屏'" @pointerdown.stop @click="toggleAssignmentDrawerExpanded"><RightOutlined v-if="assignmentDrawerExpanded"/><ExpandOutlined v-else/></button></a-tooltip>
-         <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag color="blue">{{selectedAssignment.submitter_type==='INDIVIDUAL'?'个人作业':'小组作业'}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="closeAssignmentDrawer"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
+         <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag :color="selectedAssignment.kind==='EXPERIMENT'?'purple':'blue'">{{assignmentTypeLabel(selectedAssignment)}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="closeAssignmentDrawer"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
          <section class="assignment-workspace">
            <template v-if="role==='STUDENT'">
              <div class="student-assignment-content">
@@ -1395,6 +1398,7 @@ provide(shellContextKey, {
       <a-form layout="vertical">
         <a-form-item label="教学班" required><a-select v-model:value="assignmentForm.class_ids" mode="multiple" placeholder="选择一个或多个教学班" :options="classOptions"/></a-form-item>
         <a-form-item label="标题" required><a-input v-model:value="assignmentForm.title"/></a-form-item>
+        <a-form-item label="类型"><a-segmented v-model:value="assignmentForm.kind" :options="[{label:'作业',value:'ASSIGNMENT'},{label:'实验',value:'EXPERIMENT'}]"/></a-form-item>
         <a-form-item label="提交类型" :help="assignmentForm.has_submissions ? '已有提交，不能修改提交类型' : ''"><a-segmented v-model:value="assignmentForm.submitter_type" :disabled="assignmentForm.has_submissions||assignmentForm.auto_review_enabled" :options="[{label:'个人作业',value:'INDIVIDUAL'},{label:'小组作业',value:'TEAM'}]"/></a-form-item>
         <a-form-item label="开始时间"><a-input v-model:value="assignmentForm.starts_at" type="datetime-local"/></a-form-item>
         <a-form-item label="截止时间" required><a-input v-model:value="assignmentForm.due_at" type="datetime-local"/></a-form-item>

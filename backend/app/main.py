@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session, aliased, load_only
 from app.database import SessionLocal, get_db
 from app.grading import final_score, finalize_campaign
 from app.markdown_assets import extract_assets
-from app.models import Assignment, AuditLog, BackgroundJob, CAPSTONE_STAGES, CapstoneAsset, CapstoneConfig, CapstoneDocument, CapstoneDocumentTemplate, CapstoneModuleAssignment, CapstoneStageGrade, CapstoneUnlock, ClassJoinRequest, ClassMember, FileObject, FileObjectAsset, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, MarkdownAsset, Notification, PeerReview, ReviewAssignment, ReviewCampaign, RoleMenuPermission, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, SubmissionWorkspace, TeachingClass, TeachingMaterial, TeachingMaterialAsset, TeachingMaterialFolder, Team, TeamMember, TeamRequest, Topic, User, VersionFile
+from app.models import Assignment, AttendanceScoreManual, AuditLog, BackgroundJob, CAPSTONE_STAGES, CapstoneAsset, CapstoneConfig, CapstoneDocument, CapstoneDocumentTemplate, CapstoneModuleAssignment, CapstoneStageGrade, CapstoneUnlock, ClassJoinRequest, ClassMember, FileObject, FileObjectAsset, Grade, GradeCoefficient, GradeRevision, ImportBatch, LoginSession, MarkdownAsset, Notification, PeerReview, ReviewAssignment, ReviewCampaign, RoleMenuPermission, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, SubmissionWorkspace, TeachingClass, TeachingMaterial, TeachingMaterialAsset, TeachingMaterialFolder, Team, TeamMember, TeamRequest, Topic, User, VersionFile
 from app.security import hash_password, new_session, token_hash, verify_password
 from app.settings import settings
 from app import storage
@@ -393,7 +393,7 @@ class AutoGroupIn(BaseModel):
 class TopicIn(BaseModel):
     name: str = Field(min_length=2, max_length=100); description: str = Field("", max_length=1000)
 class AssignmentFields(BaseModel):
-    title: str = Field(min_length=2, max_length=100); description: str = Field(min_length=1, max_length=5000); submitter_type: Literal["TEAM", "INDIVIDUAL"]; starts_at: datetime | None = None; due_at: datetime; allow_late: bool = False; publish: bool = True
+    title: str = Field(min_length=2, max_length=100); description: str = Field(min_length=1, max_length=5000); submitter_type: Literal["TEAM", "INDIVIDUAL"]; kind: Literal["ASSIGNMENT", "EXPERIMENT"] = "ASSIGNMENT"; starts_at: datetime | None = None; due_at: datetime; allow_late: bool = False; publish: bool = True
     auto_review_enabled: bool = False
     auto_review_mode: Literal["TEAM"] | None = None
     auto_review_criteria_text: str = Field("", max_length=5000)
@@ -438,7 +438,7 @@ class GradePublishIn(BaseModel):
     reason: str = Field("", max_length=500)
 class AssignmentUpdateIn(BaseModel):
     class_id: UUID | None = None
-    title: str | None = Field(None, min_length=2, max_length=100); description: str | None = Field(None, min_length=1, max_length=5000); starts_at: datetime | None = None; due_at: datetime | None = None; allow_late: bool | None = None; submitter_type: Literal["TEAM", "INDIVIDUAL"] | None = None; version: int
+    title: str | None = Field(None, min_length=2, max_length=100); description: str | None = Field(None, min_length=1, max_length=5000); starts_at: datetime | None = None; due_at: datetime | None = None; allow_late: bool | None = None; submitter_type: Literal["TEAM", "INDIVIDUAL"] | None = None; kind: Literal["ASSIGNMENT", "EXPERIMENT"] | None = None; version: int
     auto_review_enabled: bool | None = None
     auto_review_mode: Literal["TEAM"] | None = None
     auto_review_criteria_text: str | None = Field(None, max_length=5000)
@@ -465,6 +465,8 @@ class CapstoneGradeIn(BaseModel):
     comment: str = Field("", max_length=2000)
 class CapstoneModuleIn(BaseModel):
     module_name: str = Field("", max_length=120)
+class AttendanceScoreIn(BaseModel):
+    score: Decimal | None = Field(None, ge=0, le=10)
 class ReasonIn(BaseModel): reason: str = Field(min_length=2, max_length=500)
 class PasswordIn(BaseModel): current_password: str; new_password: str = Field(min_length=8, max_length=128)
 class ClassJoinIn(BaseModel): invite_code: str = Field(min_length=4, max_length=12)
@@ -1130,7 +1132,7 @@ def topic(tid: UUID, data: TopicIn, user: CsrfUser, db: Db):
     return {"id": str(item.id), "name": item.name, "status": item.review_status}
 
 
-def assignment_json(x: Assignment): return {"id": str(x.id), "class_id": str(x.class_id), "title": x.title, "description": render_description(x.description), "submitter_type": x.submitter_type, "starts_at": x.starts_at, "due_at": x.due_at, "allow_late": x.allow_late, "auto_review_enabled": x.auto_review_enabled, "auto_review_mode": x.auto_review_mode, "auto_review_criteria_text": x.auto_review_criteria_text or "", "auto_review_due_at": x.auto_review_due_at, "auto_review_status": x.auto_review_status, "auto_review_error": x.auto_review_error, "status": x.status, "version": x.version}
+def assignment_json(x: Assignment): return {"id": str(x.id), "class_id": str(x.class_id), "title": x.title, "description": render_description(x.description), "submitter_type": x.submitter_type, "kind": x.kind, "starts_at": x.starts_at, "due_at": x.due_at, "allow_late": x.allow_late, "auto_review_enabled": x.auto_review_enabled, "auto_review_mode": x.auto_review_mode, "auto_review_criteria_text": x.auto_review_criteria_text or "", "auto_review_due_at": x.auto_review_due_at, "auto_review_status": x.auto_review_status, "auto_review_error": x.auto_review_error, "status": x.status, "version": x.version}
 
 
 def assignment_progress_json(db: Session, assignment: Assignment) -> dict:
@@ -1262,7 +1264,7 @@ def create_assignments_for_classes(data: AssignmentFields, courses: list[Teachin
         if data.publish and not data.auto_review_criteria_text.strip(): raise ApiError(422, "REVIEW_CRITERIA_REQUIRED", "直接发布时必须填写自动互评标准文字")
     created = []
     for course in courses:
-        item = Assignment(class_id=course.id, title=data.title.strip(), description=clean_html(data.description), submitter_type=data.submitter_type, starts_at=data.starts_at, due_at=data.due_at, allow_late=data.allow_late, auto_review_enabled=data.auto_review_enabled, auto_review_mode=data.auto_review_mode if data.auto_review_enabled else None, auto_review_criteria_text=data.auto_review_criteria_text.strip() if data.auto_review_enabled else None, auto_review_due_at=data.auto_review_due_at if data.auto_review_enabled else None, auto_review_status="PENDING" if data.auto_review_enabled else None, status="PUBLISHED" if data.publish else "DRAFT")
+        item = Assignment(class_id=course.id, title=data.title.strip(), description=clean_html(data.description), submitter_type=data.submitter_type, kind=data.kind, starts_at=data.starts_at, due_at=data.due_at, allow_late=data.allow_late, auto_review_enabled=data.auto_review_enabled, auto_review_mode=data.auto_review_mode if data.auto_review_enabled else None, auto_review_criteria_text=data.auto_review_criteria_text.strip() if data.auto_review_enabled else None, auto_review_due_at=data.auto_review_due_at if data.auto_review_enabled else None, auto_review_status="PENDING" if data.auto_review_enabled else None, status="PUBLISHED" if data.publish else "DRAFT")
         db.add(item); db.flush(); created.append(item)
         if item.status == "PUBLISHED":
             for member in db.scalars(select(ClassMember).where(ClassMember.class_id == course.id, ClassMember.status == "ACTIVE")): notify(db, member.user_id, "ASSIGNMENT_PUBLISHED", f"新作业：{item.title}")
@@ -1372,7 +1374,7 @@ def update_assignment(aid: UUID, data: AssignmentUpdateIn, user: CsrfUser, db: D
         if auto_review_due_at <= due_at: raise ApiError(422, "AUTO_REVIEW_TIME_INVALID", "互评截止时间必须晚于作业截止时间")
         if not (auto_review_criteria_text or "").strip() and not has_review_criteria_file(db, aid):
             raise ApiError(422, "REVIEW_CRITERIA_REQUIRED", "互评标准文字和附件至少提供一种")
-    for key in ("title", "description", "starts_at", "due_at", "allow_late", "submitter_type"):
+    for key in ("title", "description", "starts_at", "due_at", "allow_late", "submitter_type", "kind"):
         value = getattr(data, key)
         if value is not None:
             if key == "description": value = clean_html(value)
@@ -3315,6 +3317,118 @@ def grade_assignments(user: CurrentUser, db: Db, class_id: UUID = Query()):
             "total": total_students, "submitted": len(submissions), "graded": graded, "pending": max(0, total_students - graded),
         })
     return {"items": items, "total": len(items)}
+
+
+GRADE_PERCENT = {"A": 95, "B": 85, "C": 75, "D": 60, "E": 0}
+
+
+def kind_component_averages(db: Session, class_id: UUID, kind: str, student_ids: list[UUID]) -> dict[UUID, float]:
+    """Average each student's letter grades (via GRADE_PERCENT) across published/closed individual
+    assignments of the given kind (ASSIGNMENT/EXPERIMENT). Students with no graded item are omitted."""
+    assignments = db.scalars(select(Assignment).where(
+        Assignment.class_id == class_id, Assignment.kind == kind, Assignment.submitter_type == "INDIVIDUAL",
+        Assignment.status.in_(["PUBLISHED", "CLOSED"]),
+    )).all()
+    totals: dict[UUID, float] = {}
+    counts: dict[UUID, int] = {}
+    for assignment in assignments:
+        version_by_student = dict(db.execute(
+            select(Submission.owner_user_id, SubmissionVersion)
+            .join(SubmissionVersion, and_(SubmissionVersion.submission_id == Submission.id, SubmissionVersion.version_no == Submission.current_version_no))
+            .where(Submission.assignment_id == assignment.id, Submission.status == "SUBMITTED", Submission.owner_user_id.in_(student_ids))
+        ).all())
+        version_ids = [version.id for version in version_by_student.values()]
+        assessments_by_version: dict[UUID, list[SubmissionAssessment]] = {}
+        if version_ids:
+            for item in db.scalars(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id.in_(version_ids))).all():
+                assessments_by_version.setdefault(item.submission_version_id, []).append(item)
+        missing_grade = missing_submission_grade_result(assignment)["final_grade"]
+        for student_id in student_ids:
+            version = version_by_student.get(student_id)
+            if version:
+                final_grade = build_submission_grade_result(assessments_by_version.get(version.id, []), lambda item: None)["final_grade"]
+            else:
+                final_grade = missing_grade
+            if final_grade:
+                totals[student_id] = totals.get(student_id, 0) + GRADE_PERCENT[final_grade]
+                counts[student_id] = counts.get(student_id, 0) + 1
+    return {student_id: totals[student_id] / counts[student_id] for student_id in counts}
+
+
+def capstone_component_averages(db: Session, class_id: UUID, student_ids: list[UUID]) -> dict[UUID, float]:
+    grades_by_student: dict[UUID, dict[str, CapstoneStageGrade]] = {}
+    for grade in db.scalars(select(CapstoneStageGrade).where(CapstoneStageGrade.class_id == class_id)).all():
+        grades_by_student.setdefault(grade.student_user_id, {})[grade.stage] = grade
+    result = {}
+    for student_id in student_ids:
+        stage_grades = grades_by_student.get(student_id, {})
+        scores = [stage_grades[stage].score for stage in CAPSTONE_STAGES if stage_grades.get(stage) and stage_grades[stage].score is not None]
+        if len(scores) == len(CAPSTONE_STAGES):
+            result[student_id] = float(sum(scores)) / len(CAPSTONE_STAGES)
+    return result
+
+
+def composite_grade_letter(score: float) -> str:
+    if score >= 90: return "A"
+    if score >= 80: return "B"
+    if score >= 70: return "C"
+    if score >= 60: return "D"
+    return "E"
+
+
+@app.get("/api/v1/classes/{cid}/grade-overview")
+def grade_overview(cid: UUID, user: CurrentUser, db: Db):
+    teacher(user); require_class(db, user, cid)
+    rows = db.execute(
+        select(ClassMember, User, Team.name)
+        .select_from(ClassMember)
+        .join(User, User.id == ClassMember.user_id)
+        .outerjoin(TeamMember, and_(TeamMember.class_id == cid, TeamMember.user_id == User.id, TeamMember.status == "ACTIVE"))
+        .outerjoin(Team, and_(Team.id == TeamMember.team_id, Team.status == "ACTIVE"))
+        .where(ClassMember.class_id == cid, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT")
+        .order_by(ClassMember.joined_at, ClassMember.id)
+    ).all()
+    student_ids = [student.id for _, student, _ in rows]
+    homework_avg = kind_component_averages(db, cid, "ASSIGNMENT", student_ids)
+    lab_avg = kind_component_averages(db, cid, "EXPERIMENT", student_ids)
+    capstone_avg = capstone_component_averages(db, cid, student_ids)
+    attendance_by_student = {item.student_user_id: item.score for item in db.scalars(select(AttendanceScoreManual).where(AttendanceScoreManual.class_id == cid)).all()}
+
+    items = []
+    for _, student, team_name in rows:
+        homework_component = round(homework_avg[student.id] / 100 * 10, 1) if student.id in homework_avg else None
+        attendance_component = float(attendance_by_student[student.id]) if student.id in attendance_by_student else None
+        routine_score = round(homework_component + attendance_component, 1) if homework_component is not None and attendance_component is not None else None
+        lab_score = round(lab_avg[student.id] / 100 * 30, 1) if student.id in lab_avg else None
+        capstone_score = round(capstone_avg[student.id] / 100 * 50, 1) if student.id in capstone_avg else None
+        composite_score = round(routine_score + lab_score + capstone_score, 1) if routine_score is not None and lab_score is not None and capstone_score is not None else None
+        items.append({
+            "student_id": str(student.id), "student_no": student.login_name, "name": student.display_name,
+            "team_name": team_name, "homework_component": homework_component, "attendance_component": attendance_component,
+            "routine_score": routine_score, "lab_score": lab_score, "capstone_score": capstone_score,
+            "composite_score": composite_score, "grade": composite_grade_letter(composite_score) if composite_score is not None else None,
+        })
+    return {"items": items, "total": len(items)}
+
+
+@app.put("/api/v1/classes/{cid}/students/{student_id}/attendance-score")
+def set_attendance_score(cid: UUID, student_id: UUID, data: AttendanceScoreIn, user: CsrfUser, db: Db):
+    teacher(user); require_writable_class(db, user, cid)
+    if not db.scalar(select(ClassMember.id).where(ClassMember.class_id == cid, ClassMember.user_id == student_id, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT")):
+        raise ApiError(404, "STUDENT_NOT_FOUND", "该学生不在本班")
+    record = db.scalar(select(AttendanceScoreManual).where(AttendanceScoreManual.class_id == cid, AttendanceScoreManual.student_user_id == student_id))
+    if data.score is None:
+        if record: db.delete(record)
+        db.commit()
+        return {"class_id": str(cid), "student_id": str(student_id), "score": None}
+    if not record:
+        record = AttendanceScoreManual(class_id=cid, student_user_id=student_id)
+        db.add(record)
+    record.score = data.score
+    record.graded_by = user.id
+    audit(db, user, "ATTENDANCE_SCORE_SET", "attendance_score_manual", str(student_id), {"class_id": str(cid), "score": float(data.score)})
+    db.commit(); db.refresh(record)
+    return {"class_id": str(cid), "student_id": str(student_id), "score": float(record.score)}
 
 
 def require_grade_assignment(db: Session, user: User, assignment_id: UUID) -> tuple[Assignment, ReviewCampaign]:
