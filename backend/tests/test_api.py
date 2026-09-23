@@ -19,7 +19,7 @@ from app.database import SessionLocal, engine
 from app.main import app, parse_roster
 from app.grading import final_score
 from app.markdown_assets import extract_assets
-from app.models import Assignment, AuditLog, BackgroundJob, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, Team, TeamMember, TeamRequest, TeachingMaterialAsset, User
+from app.models import Assignment, AuditLog, BackgroundJob, CapstoneAsset, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, Team, TeamMember, TeamRequest, TeachingMaterialAsset, User
 from app.worker import cleanup_archive_exports, process_archive_export, process_auto_review, process_due_campaign, process_oss_delete
 
 
@@ -1821,3 +1821,251 @@ def test_teacher_assignment_and_review_lifecycle_controls():
     review_assignment = teacher.post("/api/v1/assignments", headers=teacher_headers, json={"class_id": class_id, "title": "互评截止作业", "description": "用于互评提前截止", "submitter_type": "INDIVIDUAL", "due_at": "2099-12-02T12:00:00+08:00", "publish": True}).json()
     assert teacher.delete(f"/api/v1/assignments/{review_assignment['id']}", headers=teacher_headers).status_code == 204
     assert teacher.get(f"/api/v1/assignments?class_id={class_id}").json()["items"] == []
+
+
+def test_capstone_workspace_lazy_initializes_five_stage_documents():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业测试", "name": "大作业测试班"}).json()
+    member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990201", "name": "大作业学生一"}).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+
+    first = student.post(f"/api/v1/capstone/classes/{course['id']}/workspace", headers=student_headers, json={})
+    assert first.status_code == 200, first.text
+    documents = first.json()["documents"]
+    assert len(documents) == 5
+    assert {doc["stage"] for doc in documents} == {"PROPOSAL", "REQUIREMENTS", "DESIGN", "IMPLEMENTATION", "TESTING"}
+
+    second = student.post(f"/api/v1/capstone/classes/{course['id']}/workspace", headers=student_headers, json={})
+    assert second.status_code == 200, second.text
+    assert {doc["id"] for doc in second.json()["documents"]} == {doc["id"] for doc in documents}
+
+
+def test_capstone_document_create_delete_and_last_document_guard():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业新建删除", "name": "大作业新建删除班"}).json()
+    member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990202", "name": "大作业学生二"}).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+    workspace = student.post(f"/api/v1/capstone/classes/{course['id']}/workspace", headers=student_headers, json={}).json()
+    proposal_doc = next(doc for doc in workspace["documents"] if doc["stage"] == "PROPOSAL")
+
+    created = student.post(f"/api/v1/capstone/classes/{course['id']}/workspace/documents", headers=student_headers, json={"stage": "PROPOSAL", "name": "补充说明"})
+    assert created.status_code == 201, created.text
+    new_doc_id = created.json()["id"]
+
+    deleted_extra = student.delete(f"/api/v1/capstone/classes/{course['id']}/workspace/documents/{new_doc_id}", headers=student_headers)
+    assert deleted_extra.status_code == 204
+
+    guard = student.delete(f"/api/v1/capstone/classes/{course['id']}/workspace/documents/{proposal_doc['id']}", headers=student_headers)
+    assert guard.status_code == 409
+    assert guard.json()["code"] == "CAPSTONE_LAST_DOCUMENT"
+
+
+def test_capstone_document_save_optimistic_lock_conflict():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业乐观锁", "name": "大作业乐观锁班"}).json()
+    member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990203", "name": "大作业学生三"}).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+    workspace = student.post(f"/api/v1/capstone/classes/{course['id']}/workspace", headers=student_headers, json={}).json()
+    doc = workspace["documents"][0]
+
+    saved = student.put(f"/api/v1/capstone/classes/{course['id']}/workspace/documents/{doc['id']}", headers=student_headers, json={"revision": doc["revision"], "markdown_content": "# 第一次保存"})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["revision"] == doc["revision"] + 1
+
+    conflict = student.put(f"/api/v1/capstone/classes/{course['id']}/workspace/documents/{doc['id']}", headers=student_headers, json={"revision": doc["revision"], "markdown_content": "# 冲突写入"})
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "DOCUMENT_VERSION_CONFLICT"
+
+
+def test_capstone_deadline_locks_editing_until_teacher_unlocks_student():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业截止", "name": "大作业截止班"}).json()
+    member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990204", "name": "大作业学生四"}).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+    workspace = student.post(f"/api/v1/capstone/classes/{course['id']}/workspace", headers=student_headers, json={}).json()
+    doc = workspace["documents"][0]
+
+    configured = teacher.put(f"/api/v1/capstone/classes/{course['id']}/config", headers=teacher_headers, json={"due_at": "2000-01-01T00:00:00+08:00"})
+    assert configured.status_code == 200, configured.text
+
+    locked_save = student.put(f"/api/v1/capstone/classes/{course['id']}/workspace/documents/{doc['id']}", headers=student_headers, json={"revision": doc["revision"], "markdown_content": "# 截止后尝试保存"})
+    assert locked_save.status_code == 409
+    assert locked_save.json()["code"] == "CAPSTONE_LOCKED"
+
+    unlocked = teacher.post(f"/api/v1/capstone/classes/{course['id']}/students/{member['id']}/unlock", headers=teacher_headers)
+    assert unlocked.status_code == 201, unlocked.text
+
+    resumed_save = student.put(f"/api/v1/capstone/classes/{course['id']}/workspace/documents/{doc['id']}", headers=student_headers, json={"revision": doc["revision"], "markdown_content": "# 解锁后保存"})
+    assert resumed_save.status_code == 200, resumed_save.text
+
+    relocked = teacher.delete(f"/api/v1/capstone/classes/{course['id']}/students/{member['id']}/unlock", headers=teacher_headers)
+    assert relocked.status_code == 204
+    reblocked_save = student.put(f"/api/v1/capstone/classes/{course['id']}/workspace/documents/{doc['id']}", headers=student_headers, json={"revision": resumed_save.json()["revision"], "markdown_content": "# 再次尝试"})
+    assert reblocked_save.status_code == 409
+    assert reblocked_save.json()["code"] == "CAPSTONE_LOCKED"
+
+
+def test_capstone_teacher_grades_stage_and_students_roster_reflects_it():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业评分", "name": "大作业评分班"}).json()
+    member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990205", "name": "大作业学生五"}).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+    student.post(f"/api/v1/capstone/classes/{course['id']}/workspace", headers=student_headers, json={})
+
+    graded = teacher.put(f"/api/v1/capstone/classes/{course['id']}/students/{member['id']}/grades/DESIGN", headers=teacher_headers, json={"score": 88, "comment": "设计合理"})
+    assert graded.status_code == 200, graded.text
+    assert graded.json()["score"] == 88.0
+
+    roster = teacher.get(f"/api/v1/capstone/classes/{course['id']}/students", headers=teacher_headers)
+    assert roster.status_code == 200, roster.text
+    entry = next(item for item in roster.json()["students"] if item["id"] == member["id"])
+    assert entry["grades"]["DESIGN"] == 88.0
+    assert entry["graded_count"] == 1
+
+    with SessionLocal() as db:
+        assert db.scalar(select(AuditLog).where(AuditLog.action == "CAPSTONE_STAGE_GRADED"))
+
+
+def test_capstone_student_cannot_access_another_students_document_and_only_teacher_can_grade():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业权限", "name": "大作业权限班"}).json()
+    first_member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990206", "name": "大作业学生六"}).json()
+    second_member = teacher.post(f"/api/v1/classes/{course['id']}/members", headers=teacher_headers, json={"student_no": "20990207", "name": "大作业学生七"}).json()
+    first_student, first_headers = login(first_member["student_no"], first_member["student_no"], "student")
+    second_student, second_headers = login(second_member["student_no"], second_member["student_no"], "student")
+    first_workspace = first_student.post(f"/api/v1/capstone/classes/{course['id']}/workspace", headers=first_headers, json={}).json()
+    target_doc = first_workspace["documents"][0]
+
+    forbidden = second_student.get(f"/api/v1/capstone/classes/{course['id']}/workspace/documents/{target_doc['id']}", headers=second_headers)
+    assert forbidden.status_code == 404
+
+    forbidden_grade = second_student.put(f"/api/v1/capstone/classes/{course['id']}/students/{first_member['id']}/grades/DESIGN", headers=second_headers, json={"score": 60, "comment": ""})
+    assert forbidden_grade.status_code == 403
+
+
+def test_capstone_teammates_can_read_but_not_write_each_others_documents():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业组内参考", "name": "大作业组内参考班"}).json()
+    class_id = course["id"]
+    members = []
+    for index in range(3):
+        student_no = f"2099080{index}"
+        member = teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": student_no, "name": f"组内参考学生{index}"}).json()
+        members.append((member, *login(student_no, student_no, "student")))
+
+    leader_member, leader, leader_headers = members[0]
+    teammate_member, teammate, teammate_headers = members[1]
+    outsider_member, outsider, outsider_headers = members[2]
+
+    team = leader.post("/api/v1/teams", headers=leader_headers, json={"class_id": class_id, "name": "组内参考队", "open_recruitment": True}).json()
+    request = teammate.post(f"/api/v1/teams/{team['id']}/applications", headers=teammate_headers).json()
+    assert leader.post(f"/api/v1/team-requests/{request['id']}/decision?decision=APPROVED", headers=leader_headers).status_code == 200
+
+    leader_workspace = leader.post(f"/api/v1/capstone/classes/{class_id}/workspace", headers=leader_headers, json={}).json()
+    leader_doc = leader_workspace["documents"][0]
+
+    teammates_view = teammate.get(f"/api/v1/capstone/classes/{class_id}/teammates", headers=teammate_headers)
+    assert teammates_view.status_code == 200, teammates_view.text
+    assert {item["id"] for item in teammates_view.json()["members"]} == {leader_member["id"], teammate_member["id"]}
+
+    doc_list = teammate.get(f"/api/v1/capstone/classes/{class_id}/students/{leader_member['id']}/documents", headers=teammate_headers)
+    assert doc_list.status_code == 200, doc_list.text
+    assert len(doc_list.json()["documents"]) == 5
+
+    read = teammate.get(f"/api/v1/capstone/classes/{class_id}/workspace/documents/{leader_doc['id']}", headers=teammate_headers)
+    assert read.status_code == 200, read.text
+
+    write_blocked = teammate.put(f"/api/v1/capstone/classes/{class_id}/workspace/documents/{leader_doc['id']}", headers=teammate_headers, json={"revision": leader_doc["revision"], "markdown_content": "# 组内同学不能改"})
+    assert write_blocked.status_code == 404
+
+    outsider_doc_list = outsider.get(f"/api/v1/capstone/classes/{class_id}/students/{leader_member['id']}/documents", headers=outsider_headers)
+    assert outsider_doc_list.status_code == 404
+
+    outsider_read = outsider.get(f"/api/v1/capstone/classes/{class_id}/workspace/documents/{leader_doc['id']}", headers=outsider_headers)
+    assert outsider_read.status_code == 404
+
+    outsider_teammates = outsider.get(f"/api/v1/capstone/classes/{class_id}/teammates", headers=outsider_headers)
+    assert outsider_teammates.status_code == 200
+    assert outsider_teammates.json()["members"] == []
+
+
+def test_capstone_teacher_assigns_module_name_and_it_appears_in_roster_and_teammates():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业模块分配", "name": "大作业模块分配班"}).json()
+    class_id = course["id"]
+    member = teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": "20990301", "name": "模块分配学生"}).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+    student.post(f"/api/v1/capstone/classes/{class_id}/workspace", headers=student_headers, json={})
+
+    assigned = teacher.put(f"/api/v1/capstone/classes/{class_id}/students/{member['id']}/module", headers=teacher_headers, json={"module_name": "报修申请模块"})
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["module_name"] == "报修申请模块"
+
+    roster = teacher.get(f"/api/v1/capstone/classes/{class_id}/students", headers=teacher_headers).json()
+    entry = next(item for item in roster["students"] if item["id"] == member["id"])
+    assert entry["module_name"] == "报修申请模块"
+
+    forbidden = student.put(f"/api/v1/capstone/classes/{class_id}/students/{member['id']}/module", headers=student_headers, json={"module_name": "自己改"})
+    assert forbidden.status_code == 403
+
+
+def test_capstone_team_leader_can_assign_module_name_but_regular_member_cannot():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业组长分配模块", "name": "大作业组长分配模块班"}).json()
+    class_id = course["id"]
+    leader_member = teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": "20990401", "name": "模块组长"}).json()
+    peer_member = teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": "20990402", "name": "模块组员"}).json()
+    leader, leader_headers = login(leader_member["student_no"], leader_member["student_no"], "student")
+    peer, peer_headers = login(peer_member["student_no"], peer_member["student_no"], "student")
+
+    team = leader.post("/api/v1/teams", headers=leader_headers, json={"class_id": class_id, "name": "模块分配队", "open_recruitment": True}).json()
+    request = peer.post(f"/api/v1/teams/{team['id']}/applications", headers=peer_headers).json()
+    assert leader.post(f"/api/v1/team-requests/{request['id']}/decision?decision=APPROVED", headers=leader_headers).status_code == 200
+
+    assigned = leader.put(f"/api/v1/capstone/classes/{class_id}/students/{peer_member['id']}/module", headers=leader_headers, json={"module_name": "工单处理模块"})
+    assert assigned.status_code == 200, assigned.text
+
+    forbidden = peer.put(f"/api/v1/capstone/classes/{class_id}/students/{leader_member['id']}/module", headers=peer_headers, json={"module_name": "组员不能改组长"})
+    assert forbidden.status_code == 403
+
+    modules = peer.get(f"/api/v1/capstone/classes/{class_id}/teams/{team['id']}/modules", headers=peer_headers)
+    assert modules.status_code == 200, modules.text
+    assert modules.json()["modules"][peer_member["id"]] == "工单处理模块"
+
+
+def test_capstone_document_save_extracts_base64_images_to_hosted_assets():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业图片转存", "name": "大作业图片转存班"}).json()
+    class_id = course["id"]
+    member = teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": "20990501", "name": "图片转存学生"}).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+    workspace = student.post(f"/api/v1/capstone/classes/{class_id}/workspace", headers=student_headers, json={}).json()
+    doc = workspace["documents"][0]
+
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    markdown_content = f"# 带图\n\n![截图](data:image/png;base64,{png})\n"
+    saved = student.put(f"/api/v1/capstone/classes/{class_id}/workspace/documents/{doc['id']}", headers=student_headers, json={"revision": doc["revision"], "markdown_content": markdown_content})
+    assert saved.status_code == 200, saved.text
+    assert "data:image" not in saved.json()["markdown_content"]
+    assert "/api/v1/capstone-assets/" in saved.json()["markdown_content"]
+
+    reloaded = student.get(f"/api/v1/capstone/classes/{class_id}/workspace/documents/{doc['id']}", headers=student_headers).json()
+    assert "/api/v1/capstone-assets/" in reloaded["markdown_content"]
+
+    with SessionLocal() as db:
+        asset = db.scalar(select(CapstoneAsset))
+        assert asset is not None and asset.mime_type == "image/png"
+
+
+def test_capstone_documents_are_ordered_by_lifecycle_not_alphabetically():
+    teacher, teacher_headers = login("teacher", "123456", "teacher")
+    course = teacher.post("/api/v1/classes", headers=teacher_headers, json={"semester": "大作业阶段排序", "name": "大作业阶段排序班"}).json()
+    class_id = course["id"]
+    member = teacher.post(f"/api/v1/classes/{class_id}/members", headers=teacher_headers, json={"student_no": "20990601", "name": "阶段排序学生"}).json()
+    student, student_headers = login(member["student_no"], member["student_no"], "student")
+
+    workspace = student.post(f"/api/v1/capstone/classes/{class_id}/workspace", headers=student_headers, json={}).json()
+    assert [doc["stage"] for doc in workspace["documents"]] == ["PROPOSAL", "REQUIREMENTS", "DESIGN", "IMPLEMENTATION", "TESTING"]
+
+    listing = teacher.get(f"/api/v1/capstone/classes/{class_id}/students/{member['id']}/documents", headers=teacher_headers).json()
+    assert [doc["stage"] for doc in listing["documents"]] == ["PROPOSAL", "REQUIREMENTS", "DESIGN", "IMPLEMENTATION", "TESTING"]

@@ -7,8 +7,18 @@ import { loadMarkdownPreview, renderMarkdown } from '../markdownPreview'
 import RichTextEditor from './RichTextEditor.vue'
 import RichTextViewer from './RichTextViewer.vue'
 
-const props = defineProps({ assignmentId: String, writable: Boolean, canSubmit: Boolean, submitLabel: { type: String, default: '提交当前版本' } })
+const props = defineProps({
+  assignmentId: String,
+  basePath: { type: String, default: '' },
+  documentId: { type: String, default: '' },
+  hideDocumentList: Boolean,
+  enableDownload: { type: Boolean, default: true },
+  writable: Boolean,
+  canSubmit: Boolean,
+  submitLabel: { type: String, default: '提交当前版本' },
+})
 const emit = defineEmits(['ready', 'preview-criteria', 'submit'])
+const resourceBase = computed(() => props.basePath || `/assignments/${props.assignmentId}/workspace`)
 const loading = ref(false)
 const documentLoading = ref(false)
 const workspace = ref(null)
@@ -99,7 +109,7 @@ function htmlToMarkdown(value) {
 async function load(preferredId) {
   loading.value = true
   try {
-    workspace.value = await api(`/assignments/${props.assignmentId}/workspace`, { method: 'POST', body: JSON.stringify({}) })
+    workspace.value = await api(resourceBase.value, { method: 'POST', body: JSON.stringify({}) })
     criteriaPreview.value = null
     activeId.value = workspace.value.documents.some(item => item.id === preferredId) ? preferredId : workspace.value.documents[0]?.id || ''
     emit('ready', workspace.value)
@@ -164,7 +174,7 @@ async function loadDocument(id, force = false) {
   documentLoading.value = true
   loadedId.value = ''
   try {
-    const document = await api(`/assignments/${props.assignmentId}/workspace/documents/${id}`, { signal: loadController.signal })
+    const document = await api(`${resourceBase.value}/documents/${id}`, { signal: loadController.signal })
     if (sequence !== loadSequence || activeId.value !== id) return
     Object.assign(target, document)
     documentCache.set(id, { revision: document.revision, markdownContent: document.markdown_content || '' })
@@ -183,7 +193,7 @@ async function uploadImage(blob, originalFile) {
   const extension = blob.type === 'image/webp' ? '.webp' : (originalFile.name.match(/\.[^.]+$/)?.[0] || '')
   const name = blob === originalFile ? originalFile.name : `${originalFile.name.replace(/\.[^.]+$/, '')}${extension}`
   body.append('file', blob, name)
-  return api(`/assignments/${props.assignmentId}/workspace/documents/${active.value.id}/images`, { method: 'POST', body })
+  return api(`${resourceBase.value}/documents/${active.value.id}/images`, { method: 'POST', body })
 }
 
 watch(editorHtml, () => {
@@ -215,13 +225,17 @@ async function save(force = false) {
           continue
         }
         state.value = 'saving'
-        const saved = await api(`/assignments/${props.assignmentId}/workspace/documents/${target.id}`, { method: 'PUT', body: JSON.stringify({ revision: target.revision, markdown_content: markdownContent }) })
+        const saved = await api(`${resourceBase.value}/documents/${target.id}`, { method: 'PUT', body: JSON.stringify({ revision: target.revision, markdown_content: markdownContent }) })
         Object.assign(target, saved)
-        documentCache.set(target.id, { revision: saved.revision, markdownContent })
-        lastSavedMarkdown.set(target.id, markdownContent)
+        // 后端可能把正文里的 Base64 内嵌图片转存成托管资源并重写了 URL（体现在 saved.markdown_content 上）；
+        // 这种情况以服务端返回的正文为准，否则本地缓存的还是重写前的 Base64 版本，预览时图片会被过滤掉。
+        const storedMarkdown = saved.markdown_content !== undefined ? saved.markdown_content : markdownContent
+        documentCache.set(target.id, { revision: saved.revision, markdownContent: storedMarkdown })
+        lastSavedMarkdown.set(target.id, storedMarkdown)
         if (target.id === activeId.value) {
           const latestMarkdown = currentMarkdown()
           if (!markdownEqual(latestMarkdown, markdownContent)) pendingSave = { target, markdownContent: latestMarkdown }
+          else if (storedMarkdown !== markdownContent) applyMarkdown(target.id, storedMarkdown)
         }
         state.value = pendingSave ? 'dirty' : 'saved'
       }
@@ -278,7 +292,7 @@ async function discardChanges() {
 }
 
 async function downloadCurrent() {
-  if (!active.value || downloading.value) return
+  if (!props.enableDownload || !active.value || downloading.value) return
   const documentId = active.value.id
   if (state.value === 'conflict') return message.warning('请先处理编辑冲突再下载')
   downloading.value = true
@@ -287,7 +301,7 @@ async function downloadCurrent() {
       if (!await save(true)) return
     } else if (state.value === 'saving' && !await savePromise) return
     if (state.value !== 'saved' || activeId.value !== documentId) return message.warning('请先保存当前修改再下载')
-    await exportArchive(`/assignments/${props.assignmentId}/workspace/documents/${documentId}/archive`)
+    await exportArchive(`${resourceBase.value}/documents/${documentId}/archive`)
   } catch (error) { message.error(error.message) }
   finally { downloading.value = false }
 }
@@ -303,7 +317,12 @@ function externalChange(event) {
   if (state.value === 'dirty' || state.value === 'saving') { state.value = 'conflict'; message.warning('同组成员更新了当前文档，请先处理未保存内容') }
   else loadDocument(activeId.value, true)
 }
-onMounted(() => { load(); window.addEventListener('workspace-changed', externalChange) })
+watch(() => props.documentId, id => {
+  if (!props.hideDocumentList || !id || id === activeId.value) return
+  if (state.value === 'dirty' || state.value === 'saving') return message.warning('请先保存或撤销当前修改')
+  selectDocument(id)
+})
+onMounted(() => { load(props.documentId); window.addEventListener('workspace-changed', externalChange) })
 onBeforeUnmount(() => {
   loadSequence += 1
   loadController?.abort()
@@ -313,20 +332,22 @@ defineExpose({ save: () => state.value === 'dirty' ? false : save(), reload: () 
 </script>
 
 <template>
-  <div class="markdown-workspace" :class="{loading,'sidebar-collapsed':sidebarCollapsed}">
-    <aside class="document-sidebar">
+  <div class="markdown-workspace" :class="{loading,'sidebar-collapsed':sidebarCollapsed,'no-sidebar':hideDocumentList}">
+    <aside v-if="!hideDocumentList" class="document-sidebar">
       <div class="document-sidebar-heading"><div><strong>文档</strong><span>{{workspace?.documents?.length||0}} 份 Markdown</span></div><a-tooltip :title="sidebarCollapsed?'展开文档栏':'折叠文档栏'"><a-button type="text" shape="circle" :aria-label="sidebarCollapsed?'展开文档栏':'折叠文档栏'" @click="sidebarCollapsed=!sidebarCollapsed"><MenuUnfoldOutlined v-if="sidebarCollapsed"/><MenuFoldOutlined v-else/></a-button></a-tooltip></div>
       <nav class="document-list" aria-label="作业文档列表"><a-tooltip v-for="item in workspace?.documents||[]" :key="item.id" :title="sidebarCollapsed?item.name:''" placement="right"><button type="button" class="document-item" :class="{active:item.id===activeId}" @click="selectDocument(item.id)"><span class="document-icon"><FileTextOutlined/></span><span class="document-name">{{item.name}}</span></button></a-tooltip></nav>
     </aside>
     <main class="document-surface">
       <header class="document-status"><div class="document-title"><strong>{{criteriaPreview?.file.name||active?.name}}</strong><span v-if="criteriaPreview">判定标准 · 只读</span><span v-else-if="active?.updated_by">最近由 {{active.updated_by}} 编辑</span></div><div v-if="criteriaPreview" class="readonly-indicator"><EyeOutlined/> 只读查看</div><div v-else-if="active" class="editor-mode-switch" role="tablist" aria-label="编辑模式"><button type="button" :class="{active:editorMode==='visual'}" role="tab" :aria-selected="editorMode==='visual'" @click="setEditorMode('visual')">可视化</button><button type="button" :class="{active:editorMode==='source'}" role="tab" :aria-selected="editorMode==='source'" @click="setEditorMode('source')"><CodeOutlined/> Markdown 源码</button></div></header>
-      <div class="writing-stage" :class="{'criteria-stage':criteriaPreview}"><a-skeleton v-if="criteriaPreview?.loading||documentLoading||loading" active/><RichTextViewer v-else-if="criteriaPreview?.type==='rich'" :html="criteriaPreview.html"/><a-empty v-else-if="criteriaPreview" description="判定标准仅支持 Markdown 文档"/><template v-else-if="active&&loadedId===active.id"><RichTextEditor v-if="editorMode==='visual'" v-model="editorHtml" :editable="writable" :image-upload="uploadImage" document placeholder="开始编写作业..."><template #toolbarEnd><a-tooltip title="下载当前原文件"><a-button type="text" shape="circle" aria-label="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button></a-tooltip><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></template></RichTextEditor><section v-else class="source-editor"><div class="source-editor-heading"><div><CodeOutlined/><strong>Markdown 源码</strong></div><div class="source-editor-actions"><a-tooltip title="下载当前原文件"><a-button type="text" shape="circle" aria-label="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button></a-tooltip><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span></div><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></div><textarea v-model="sourceMarkdown" :readonly="!writable" class="source-editor-input" spellcheck="false" aria-label="Markdown 源码"></textarea></section></template><a-empty v-else description="该作业没有可编辑的 Markdown 附件"/></div>
+      <div class="writing-stage" :class="{'criteria-stage':criteriaPreview}"><a-skeleton v-if="criteriaPreview?.loading||documentLoading||loading" active/><RichTextViewer v-else-if="criteriaPreview?.type==='rich'" :html="criteriaPreview.html"/><a-empty v-else-if="criteriaPreview" description="判定标准仅支持 Markdown 文档"/><template v-else-if="active&&loadedId===active.id"><RichTextEditor v-if="editorMode==='visual'" v-model="editorHtml" :editable="writable" :image-upload="uploadImage" document placeholder="开始编写作业..."><template #toolbarEnd><a-tooltip v-if="enableDownload" title="下载当前原文件"><a-button type="text" shape="circle" aria-label="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button></a-tooltip><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></template></RichTextEditor><section v-else class="source-editor"><div class="source-editor-heading"><div><CodeOutlined/><strong>Markdown 源码</strong></div><div class="source-editor-actions"><a-tooltip v-if="enableDownload" title="下载当前原文件"><a-button type="text" shape="circle" aria-label="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button></a-tooltip><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span></div><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></div><textarea v-model="sourceMarkdown" :readonly="!writable" class="source-editor-input" spellcheck="false" aria-label="Markdown 源码"></textarea></section></template><a-empty v-else description="该作业没有可编辑的 Markdown 附件"/></div>
     </main>
   </div>
 </template>
 
 <style scoped>
 .markdown-workspace{display:grid;grid-template-columns:248px minmax(0,1fr);min-height:680px;overflow:hidden;border:1px solid #dfe6eb;border-radius:6px;background:#f5f7f8}.document-sidebar{border-right:1px solid #dfe6eb;background:#fbfcfc}.document-sidebar-heading,.document-status{display:flex;align-items:center;justify-content:space-between;min-height:62px;border-bottom:1px solid #e4e9ed}.document-sidebar-heading{padding:0 14px 0 18px}.document-sidebar-heading>div,.document-title{display:flex;min-width:0;flex-direction:column}.document-sidebar-heading strong{color:#263943;font-size:14px}.document-sidebar-heading span,.document-title span{margin-top:2px;color:#87949c;font-size:11px}.document-list{padding:10px}.document-item{display:grid;grid-template-columns:30px minmax(0,1fr) 28px;align-items:center;width:100%;min-height:48px;margin-bottom:4px;padding:4px 6px;border:0;border-radius:5px;background:transparent;color:#526672;text-align:left;cursor:pointer}.document-item:hover{background:#f0f4f5}.document-item.active{background:#e5f1ed;color:#176f5b}.document-icon{display:grid;place-items:center;width:26px;height:30px;border:1px solid #dce5e7;border-radius:4px;background:#fff}.document-item.active .document-icon{border-color:#b9d9cf;color:#19816a}.document-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.document-surface{min-width:0}.document-status{padding:0 20px;background:#fff}.document-title strong{overflow:hidden;color:#263943;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.document-status>div{display:flex;align-items:center;gap:8px}.save-indicator{display:flex;align-items:center;gap:7px;color:#7d8b93;font-size:12px;white-space:nowrap}.save-indicator.saved{color:#24866e}.save-indicator.conflict,.save-indicator.error{color:#bd4f49}.writing-stage{min-height:618px;padding:28px 34px 42px;background:#f3f5f6}.writing-stage :deep(.feedback-rich-editor){width:min(100%,980px);margin:0 auto;box-shadow:0 2px 10px rgba(31,47,56,.07)}@media(max-width:900px){.markdown-workspace{grid-template-columns:210px minmax(0,1fr)}.writing-stage{padding:20px 18px 32px}}@media(max-width:760px){.markdown-workspace{display:block;min-height:0}.document-sidebar{border-right:0;border-bottom:1px solid #dfe5ea}.document-list{display:flex;overflow-x:auto;padding:8px}.document-item{width:min(220px,70vw);flex:0 0 auto;margin:0 4px 0 0}.document-status{align-items:flex-start;min-height:0;padding:11px 12px;gap:4px;flex-wrap:wrap}.document-status .document-title{width:100%;align-items:flex-start}.document-title strong{max-width:100%}.writing-stage{min-height:500px;padding:12px 8px 20px}}
+.markdown-workspace.no-sidebar{grid-template-columns:minmax(0,1fr);overflow:visible}
+.markdown-workspace.no-sidebar :deep(.feedback-editor-toolbar){top:0}
 .markdown-workspace.sidebar-collapsed{grid-template-columns:56px minmax(0,1fr)}.sidebar-collapsed .document-sidebar-heading{justify-content:center;padding:0}.sidebar-collapsed .document-sidebar-heading>div{display:none}.sidebar-collapsed .document-list{padding:10px 7px}.sidebar-collapsed .document-item{display:grid;width:42px;grid-template-columns:1fr;justify-items:center;padding:4px}.sidebar-collapsed .document-name{display:none}@media(max-width:760px){.markdown-workspace.sidebar-collapsed{display:block}.sidebar-collapsed .document-sidebar-heading{justify-content:space-between;padding:0 14px 0 18px}.sidebar-collapsed .document-sidebar-heading>div{display:flex}.sidebar-collapsed .document-sidebar-heading :deep(.ant-btn){display:none}.sidebar-collapsed .document-list{padding:8px}.sidebar-collapsed .document-item{display:grid;width:min(220px,70vw);grid-template-columns:30px minmax(0,1fr) 28px;justify-items:stretch;padding:4px 6px}.sidebar-collapsed .document-name{display:block}}
 </style>
 <style scoped>

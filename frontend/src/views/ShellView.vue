@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { ApartmentOutlined, ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CodeOutlined, ControlOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { ApartmentOutlined, ArrowLeftOutlined, BoldOutlined, BookOutlined, CheckCircleOutlined, CloseOutlined, CodeOutlined, ControlOutlined, DashboardOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, InboxOutlined, LinkOutlined, OrderedListOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined, TeamOutlined, TrophyOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { api, apiClientId, exportArchive, randomUUID } from '../api'
@@ -13,6 +13,7 @@ import ShellHeader from '../components/ShellHeader.vue'
 import StudentPortfolioDrawer from '../components/StudentPortfolioDrawer.vue'
 import AssignmentsPage from './shell/AssignmentsPage.vue'
 import CapstonePage from './shell/CapstonePage.vue'
+import StudentCapstonePage from './shell/StudentCapstonePage.vue'
 import ClassDetailPage from './shell/ClassDetailPage.vue'
 import ClassesPage from './shell/ClassesPage.vue'
 import GradesPage from './shell/GradesPage.vue'
@@ -57,6 +58,7 @@ const auditPageSize = 10
 const auditTotal = ref(0)
 const selectedTeam = ref(null)
 const selectedTeamAssignments = ref([])
+const teamCapstoneModules = ref({})
 const teamDrawerLoading = ref(false)
 const exportingTeamIds = reactive(new Set())
 const exportingAssignment = ref(false)
@@ -580,6 +582,8 @@ async function openTeam(item) {
     topicForm.name = item.topic?.name || ''
     topicForm.description = item.topic?.description || ''
     if (item.is_leader || role.value === 'TEACHER') members.value = (await api(`/classes/${classId.value}/members`)).items
+    try { teamCapstoneModules.value = (await api(`/capstone/classes/${classId.value}/teams/${item.id}/modules`)).modules || {} }
+    catch (e) { teamCapstoneModules.value = {} }
     if (role.value === 'TEACHER') {
       const assignmentData = await api(`/assignments?class_id=${classId.value}`)
       const recentAssignments = assignmentData.items.filter(assignment => assignment.submitter_type === 'TEAM' && assignment.status !== 'DRAFT')
@@ -596,15 +600,26 @@ async function openTeam(item) {
     if (generation === teamRequestGeneration) teamDrawerLoading.value = false
   }
 }
-function closeTeamDrawer() { teamRequestGeneration++; selectedTeam.value = null; selectedTeamAssignments.value = []; teamDrawerLoading.value = false }
+function closeTeamDrawer() { teamRequestGeneration++; selectedTeam.value = null; selectedTeamAssignments.value = []; teamCapstoneModules.value = {}; teamDrawerLoading.value = false }
 async function saveTopic() { await action(async () => { await api(`/teams/${selectedTeam.value.id}/topic`, { method: 'POST', body: JSON.stringify(topicForm) }); selectedTeam.value = null }, '选题已提交审核') }
+async function saveTeamModuleName(memberId, value) {
+  const moduleName = (value || '').trim()
+  try {
+    await api(`/capstone/classes/${classId.value}/students/${memberId}/module`, { method: 'PUT', body: JSON.stringify({ module_name: moduleName }) })
+    teamCapstoneModules.value = { ...teamCapstoneModules.value, [memberId]: moduleName }
+    message.success('模块名称已保存')
+  } catch (e) { message.error(e.message || '保存失败') }
+}
 async function decideTopic(item, decision) {
   if (decision === 'REJECTED') { Object.assign(topicDecisionForm, { id: item.topic.id, reason: '' }); modals.topicDecision = true; return }
   await action(() => api(`/topics/${item.topic.id}/decision?decision=APPROVED`, { method: 'POST', body: JSON.stringify({ reason: '审核通过' }) }), '选题已通过')
+  if (selectedTeam.value?.id === item.id) selectedTeam.value = await api(`/teams/${item.id}`)
 }
 async function rejectTopic() {
   if (!topicDecisionForm.reason.trim()) return message.warning('请填写驳回原因')
+  const affectedTeamId = selectedTeam.value?.topic?.id === topicDecisionForm.id ? selectedTeam.value.id : null
   await action(async () => { await api(`/topics/${topicDecisionForm.id}/decision?decision=REJECTED`, { method: 'POST', body: JSON.stringify({ reason: topicDecisionForm.reason.trim() }) }); modals.topicDecision = false }, '选题已驳回')
+  if (affectedTeamId) selectedTeam.value = await api(`/teams/${affectedTeamId}`)
 }
 async function inviteMember(item) {
   if (!inviteTarget.value) return
@@ -1314,7 +1329,8 @@ provide(shellContextKey, {
       <ReviewsPage v-else-if="view==='reviews'" />
       <ReviewDetailPage v-else-if="view==='review-detail'&&selectedCampaign" />
 
-      <CapstonePage v-else-if="view==='capstone'" />
+      <CapstonePage v-else-if="view==='capstone'&&role==='TEACHER'" />
+      <StudentCapstonePage v-else-if="view==='capstone'&&role==='STUDENT'" />
       <GradesPage v-else-if="view==='grades'" />
       <TeachingMaterialsPage v-else-if="view==='materials'" />
       <SystemPage v-else-if="view==='system'&&role==='TEACHER'" />
@@ -1368,10 +1384,10 @@ provide(shellContextKey, {
         <section class="team-portfolio-section team-portfolio-identity">
           <div class="team-portfolio-heading"><span class="team-portfolio-avatar"><TeamOutlined/></span><div class="team-portfolio-name"><h2>{{selectedTeam.name}}</h2><span>组长：{{selectedTeam.leader_name}}</span></div><div class="team-portfolio-stats"><div><span>成员</span><strong>{{selectedTeam.member_count}}</strong></div><div><span>选题</span><strong>{{selectedTeam.topic?'1':'0'}}</strong></div><div v-if="role==='TEACHER'"><span>作业</span><strong>{{selectedTeamAssignments.length}}</strong></div></div></div>
         </section>
-        <section class="team-portfolio-section"><div class="team-drawer-section-title"><strong>小组成员</strong><span>{{selectedTeam.member_count}} 人</span></div><a-list :data-source="selectedTeam.members||[]"><template #renderItem="{item}"><a-list-item><div class="team-member-identity"><span class="team-member-avatar">{{item.name?.slice(0,1)}}</span><div><strong>{{item.name}}</strong><span>{{item.student_no}}</span></div></div><a-space><a-tag>{{roleLabel(item.role)}}</a-tag><a-button v-if="selectedTeam.is_leader&&item.role!=='LEADER'" type="link" @click="transferLeader(item.id)">移交组长</a-button></a-space></a-list-item></template></a-list></section>
-        <section class="team-portfolio-section team-drawer-topic"><div class="team-drawer-section-title"><strong>小组选题</strong><a-tag v-if="selectedTeam.topic" :color="selectedTeam.topic.status==='APPROVED'?'green':selectedTeam.topic.status==='REJECTED'?'red':'gold'">{{statusLabel(selectedTeam.topic.status)}}</a-tag></div><strong>{{selectedTeam.topic?.name||'暂未提交选题'}}</strong><p>{{selectedTeam.topic?.description||'暂无选题说明'}}</p></section>
+        <section class="team-portfolio-section"><div class="team-drawer-section-title"><strong>小组成员</strong><span>{{selectedTeam.member_count}} 人</span></div><a-list :data-source="selectedTeam.members||[]"><template #renderItem="{item}"><a-list-item><div class="team-member-card"><div class="team-member-row"><div class="team-member-identity"><span class="team-member-avatar">{{item.name?.slice(0,1)}}</span><div><strong>{{item.name}}</strong><span>{{item.student_no}}</span></div></div><a-space><a-tag>{{roleLabel(item.role)}}</a-tag><a-button v-if="selectedTeam.is_leader&&item.role!=='LEADER'" type="link" @click="transferLeader(item.id)">移交组长</a-button></a-space></div><div class="team-member-module"><span class="label">大作业模块</span><a-input v-if="selectedTeam.is_leader" :value="teamCapstoneModules[item.id]" placeholder="填写该组员负责的大作业模块" size="small" @change="saveTeamModuleName(item.id,$event.target.value)"/><span v-else class="value">{{teamCapstoneModules[item.id]||'未分配'}}</span></div></div></a-list-item></template></a-list></section>
+        <section class="team-portfolio-section team-drawer-topic"><div class="team-drawer-section-title"><strong>小组选题</strong><a-tag v-if="selectedTeam.topic" :color="selectedTeam.topic.status==='APPROVED'?'green':selectedTeam.topic.status==='REJECTED'?'red':'gold'">{{statusLabel(selectedTeam.topic.status)}}</a-tag></div><strong>{{selectedTeam.topic?.name||'暂未提交选题'}}</strong><p>{{selectedTeam.topic?.description||'暂无选题说明'}}</p><a-space v-if="role==='TEACHER'&&selectedTeam.topic?.status==='PENDING'" class="team-drawer-topic-actions"><a-button type="primary" @click="decideTopic(selectedTeam,'APPROVED')"><CheckCircleOutlined/> 通过选题</a-button><a-button danger @click="decideTopic(selectedTeam,'REJECTED')"><CloseOutlined/> 退回选题</a-button></a-space></section>
         <section v-if="role==='TEACHER'" class="team-portfolio-section team-portfolio-work"><div class="team-drawer-section-title"><strong>小组作业记录</strong><span>{{selectedTeamAssignments.length}} 次</span></div><a-skeleton v-if="teamDrawerLoading" active :paragraph="{rows:4}"/><a-empty v-else-if="!selectedTeamAssignments.length" description="暂无小组作业"/><a-collapse v-else ghost class="team-assignment-list" expand-icon-position="end"><a-collapse-panel v-for="(assignment,index) in selectedTeamAssignments" :key="assignment.id"><template #header><div class="team-assignment-title"><span class="team-assignment-sequence">{{String(index+1).padStart(2,'0')}}</span><div class="team-assignment-name"><strong>{{assignment.title}}</strong><small>截止 {{formatTime(assignment.due_at)}}<span v-if="assignment.submission.files?.length"> · {{assignment.submission.files.length}} 个附件</span></small></div><a-tag :color="assignment.submission.status==='SUBMITTED'?(assignment.submission.is_late?'orange':'green'):'default'">{{assignment.submission.status==='SUBMITTED'?(assignment.submission.is_late?'迟交':'已提交'):'未提交'}}</a-tag><span class="team-assignment-grade" :class="{system:assignment.submission.grade_source==='SYSTEM'}">{{assignment.submission.final_grade||'—'}}<small>{{assignment.submission.final_grade?gradeSourceLabel(assignment.submission.grade_source):assignment.submission.status==='SUBMITTED'?'待评分':'暂无等级'}}</small></span></div></template><a-descriptions :column="2" size="small"><a-descriptions-item label="截止时间">{{formatTime(assignment.due_at)}}</a-descriptions-item><a-descriptions-item label="提交时间">{{formatTime(assignment.submission.submitted_at)}}</a-descriptions-item><a-descriptions-item label="提交版本">{{assignment.submission.submission_version_no||'-'}}</a-descriptions-item><a-descriptions-item label="教师等级">{{assignment.submission.teacher_grade?.grade||'-'}}</a-descriptions-item><a-descriptions-item label="最终等级">{{assignment.submission.final_grade||'-'}}</a-descriptions-item><a-descriptions-item label="评分状态">{{assignment.submission.grade_source==='SYSTEM'?'逾期未交，系统评为 E':assignment.submission.final_grade?'已评分':assignment.submission.status==='SUBMITTED'?'待评分':'待提交'}}</a-descriptions-item></a-descriptions><h4>提交附件 <small>{{assignment.submission.files?.length||0}}</small></h4><div v-if="assignment.submission.files?.length" class="team-assignment-files"><div v-for="file in assignment.submission.files" :key="file.id"><FileTextOutlined/><button class="file-preview-link" @click.stop="openPortfolioFilePreview(file,assignment.submission.files,assignment)">{{file.name}}</button><span>{{Math.max(1,Math.round(file.size/1024))}} KB</span><a-tooltip title="下载附件"><a-button type="text" shape="circle" :href="`/api/v1/files/${file.id}`" aria-label="下载附件"><DownloadOutlined/></a-button></a-tooltip></div></div><p v-else class="team-assignment-muted">暂无提交附件</p></a-collapse-panel></a-collapse></section>
-<section v-if="selectedTeam.is_leader" class="team-portfolio-section team-management-section"><div class="team-drawer-section-title"><strong>小组管理</strong></div><a-form layout="vertical"><a-form-item label="选题名称"><a-input v-model:value="topicForm.name"/></a-form-item><a-form-item><template #label><span class="topic-description-label">选题说明<a-tooltip overlay-class-name="topic-guidance-tooltip"><template #title>请说明项目面向谁、当前业务如何运作、存在什么具体痛点和关键异常；写明已经可以访谈的真实人员、与其关系及联系渠道，并概括准备纳入系统的核心后台流程。避免只写“提高效率、实现信息化”等空泛表述。选题应面向运营侧或后台流程，具有真实业务约束，并能延续到后续需求、设计、开发与测试。</template><QuestionCircleOutlined class="topic-help-icon" tabindex="0" aria-label="查看选题说明填写要求"/></a-tooltip></span></template><a-textarea v-model:value="topicForm.description" :rows="3"/></a-form-item><a-space><a-button type="primary" @click="saveTopic">提交选题审核</a-button><a-button danger @click="disbandTeam">解散小组</a-button></a-space></a-form></section>
+<section v-if="selectedTeam.is_leader" class="team-portfolio-section team-management-section"><div class="team-drawer-section-title"><strong>小组管理</strong></div><a-form layout="vertical"><a-form-item label="选题名称"><a-input v-model:value="topicForm.name"/></a-form-item><a-form-item><template #label><span class="topic-description-label">选题说明<a-tooltip overlay-class-name="topic-guidance-tooltip"><template #title>请说明项目面向谁、当前业务如何运作、存在什么具体痛点和关键异常；写明已经可以访谈的真实人员、与其关系及联系渠道，并概括准备纳入系统的核心后台流程。避免只写“提高效率、实现信息化”等空泛表述。选题应面向运营侧或后台流程，具有真实业务约束，并能延续到后续需求、设计、开发与测试。<br/><br/>请务必写清楚组内每位成员负责的模块及大致任务分工，方便教师审核选题时判断模块划分是否合理、任务量是否均衡（每位成员具体负责的模块名称，也请到"小组成员"列表里逐人填写，会显示在其大作业页面上）。</template><QuestionCircleOutlined class="topic-help-icon" tabindex="0" aria-label="查看选题说明填写要求"/></a-tooltip></span></template><a-textarea v-model:value="topicForm.description" :rows="4" placeholder="项目背景、核心流程、真实痛点……&#10;并请写清楚组内每位成员负责的模块及大致任务，例如：&#10;张三 —— 报修申请模块：用户提交工单、上传附件、查看处理进度&#10;李四 —— 工单处理模块：维修人员接单、状态流转、处理记录"/></a-form-item><a-space><a-button type="primary" @click="saveTopic">提交选题审核</a-button><a-button danger @click="disbandTeam">解散小组</a-button></a-space></a-form></section>
         <section v-else-if="role==='STUDENT'&&selectedTeam.id===session.context?.team_membership?.team_id" class="team-portfolio-section team-exit-section"><a-button danger @click="leaveTeam">退出小组</a-button></section>
       </template>
     </a-drawer>
