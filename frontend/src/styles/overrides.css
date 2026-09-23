@@ -1,0 +1,25 @@
+body { margin: 0; min-width: 320px; min-height: 100vh; background: #f3f6fa; }
+
+body.ant-scrolling-effect { width: 100% !important; padding-right: 0 !important; }
+
+html{scrollbar-gutter:stable}
+
+.page-surface{min-height:calc(100vh - 240px)}
+
+.page-surface .ant-table-tbody>tr>td{height:56px}
+
+.page-surface .ant-empty{min-height:160px;display:flex;justify-content:center;flex-direction:column}
+
+.ant-modal{max-width:calc(100vw - 32px)}
+
+.ant-modal .ant-modal-body{max-height:min(70vh,720px);overflow-y:auto;scrollbar-gutter:stable}
+
+.ant-modal .modal-actions{min-height:32px;align-items:center}
+
+@media(max-width:760px) {
+  :root{--page-gutter:16px}
+  .page-title{min-height:0}
+  .page-surface{min-height:calc(100vh - 220px)}
+  .page-progress{right:var(--page-gutter);left:var(--page-gutter)}
+  .page-surface .ant-table-tbody>tr>td{height:52px}
+}

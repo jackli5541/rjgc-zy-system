@@ -2,10 +2,18 @@
 
 ## 项目结构与模块组织
 
-- `backend/app/`：FastAPI 应用（当前业务路由主要在 `main.py`）、SQLAlchemy 模型、配置与安全工具；`storage.py` 对接阿里云 OSS，`worker.py` 处理后台任务，`archive_exports.py` 生成异步 ZIP 导出。
+代码按业务模块划分，七个模块前后端一一对应：`system`（系统/登录/审计/通知）、`members`（学员管理：教学班、成员、小组与选题）、`assignments`（作业：作业、附件、在线文档、提交批阅、互评）、`capstone`（大作业）、`materials`（教学资料）、`grades`（成绩统计与导出）、`attendance`（考勤）、`overview`（总览聚合）。**新增功能请放进对应模块目录，不要再往 `main.py` / `ShellView.vue` 里堆。**
+
+- `backend/app/main.py`：只负责创建 app、中间件、异常处理、`include_router` 和前端兜底路由。新增路由不改这里，只在模块内加，然后注册一行。**兜底路由 `/{full_path:path}` 必须保持在所有 `include_router` 之后。**
+- `backend/app/core/`：跨模块公用件——`deps.py`（`Db`/`CurrentUser`/`CsrfUser` 与班级、小组权限校验）、`errors.py`（`ApiError`）、`audit.py`（审计与实时事件）、`html.py`、`files.py`、`utils.py`、`context.py`。`core/` 不允许反向依赖任何业务模块。
+- `backend/app/modules/<模块>/`：每个模块是 `router.py` + `schemas.py` + `service.py` 三件套（作业模块较大，路由再拆为 `router/files/workspace/submissions/reviews`）。模块之间只允许单向依赖：`grades → assignments/members`、`overview → members`，不得出现环。
+- `backend/app/models/`：模型按同样的模块拆分，`__init__.py` 统一导出，因此 `from app.models import X` 与迁移里的 `import *` 写法保持不变。
 - `backend/migrations/versions/`：按顺序保存 Alembic 数据库迁移；持久化模型变化时应同步新增迁移。
 - `backend/tests/`：pytest 接口及业务流程测试。
-- `frontend/src/`：Vue 3 页面（`views/shell/` 为主要业务页面）、组件、路由、Pinia 会话状态、API 客户端和全局样式。
+- `frontend/src/modules/<模块>/`：`pages/`（路由页面）、`components/`（该模块的抽屉与弹窗）、`composables/`（状态与动作，导出 `useXxx(ctx)`）。
+- `frontend/src/views/ShellView.vue`：只做布局、路由分发和把各模块 composable 组装进 `ctx` 并 `provide`。各模块通过 `ctx.xxx` 延迟引用彼此，因此不依赖创建顺序；页面组件用 `useShellContext()` 取用。某个视图的取数逻辑写在对应模块的 `loadXxxView()` 里，`ShellView` 只在 `viewLoaders` 里登记一行。
+- `frontend/src/shared/`：跨模块共用的组件与 `useLabels` 等工具。
+- `frontend/src/styles/`：样式按同样的模块拆分，`style.css` 只保留按层叠顺序排列的 `@import`；`base.css` 必须最先、`overrides.css`（`.page-surface`、`.ant-modal` 等全局覆盖）必须最后。
 - `frontend/tests/e2e/`：Playwright 端到端测试。
 - `docs/`：架构、接口、部署和验收文档，部分早期方案仅供历史参考；`scripts/`：Windows 本地初始化、启动和停止脚本；根目录 `start-server.bat`：Windows 服务器托管前端构建产物的入口。
 

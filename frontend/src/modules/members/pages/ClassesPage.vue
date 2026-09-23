@@ -1,0 +1,10 @@
+<script setup>
+import { DeleteOutlined, EditOutlined, EyeOutlined, InboxOutlined, PlusOutlined, RedoOutlined } from '@ant-design/icons-vue'
+import { useShellContext } from '../../../shellContext'
+const { session, openClassCreate, manageClass, openClassEdit, toggleClassStatus, deleteClass } = useShellContext()
+</script>
+
+<template>
+  <div class="page-title"><div><div class="eyebrow">课程管理</div><h1>教学班</h1><p>管理教学班资料、状态和正式成员名单。</p></div><a-button type="primary" @click="openClassCreate"><PlusOutlined /> 创建教学班</a-button></div>
+  <a-card class="panel-card class-list-panel" :bordered="false"><a-empty v-if="!session.classes.length" description="暂无教学班"/><a-table v-else :data-source="session.classes" row-key="id" :pagination="false" :scroll="{x:760}"><a-table-column title="学期" data-index="semester"/><a-table-column title="班级名称" data-index="name"/><a-table-column title="成员" data-index="member_count" :width="90"/><a-table-column title="作业" data-index="assignment_count" :width="90"/><a-table-column title="状态" :width="100"><template #default="{record}"><a-tag :color="record.status==='ACTIVE'?'green':'default'">{{record.status==='ACTIVE'?'进行中':'已归档'}}</a-tag></template></a-table-column><a-table-column title="操作" :width="270" fixed="right"><template #default="{record}"><a-space><a-tooltip title="管理教学班"><a-button type="text" shape="circle" @click="manageClass(record)"><EyeOutlined/></a-button></a-tooltip><a-tooltip title="编辑教学班"><a-button type="text" shape="circle" :disabled="record.status!=='ACTIVE'" @click="openClassEdit(record)"><EditOutlined/></a-button></a-tooltip><a-tooltip :title="record.status==='ACTIVE'?'归档教学班':'恢复教学班'"><a-button type="text" shape="circle" @click="toggleClassStatus(record)"><InboxOutlined v-if="record.status==='ACTIVE'"/><RedoOutlined v-else/></a-button></a-tooltip><a-tooltip :title="record.deletable?'删除空班':'已有历史数据，只能归档'"><span><a-button danger type="text" shape="circle" :disabled="!record.deletable" @click="deleteClass(record)"><DeleteOutlined/></a-button></span></a-tooltip></a-space></template></a-table-column></a-table></a-card>
+</template>

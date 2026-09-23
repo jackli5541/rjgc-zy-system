@@ -19,7 +19,9 @@ def plain_text(value):
 
 
 def portfolio(db, cid, uid):
-    from app.main import clean_html, displayed_submission_grade_result, file_json, latest_personal_submission, member_detail, missing_submission_grade_result
+    from app.core.html import clean_html
+    from app.modules.assignments.service import displayed_submission_grade_result, file_json, latest_personal_submission, missing_submission_grade_result
+    from app.modules.members.service import member_detail
     person = member_detail(db, cid, uid)[2]
     assignments = db.scalars(select(Assignment).where(Assignment.class_id == cid, Assignment.submitter_type == "INDIVIDUAL", Assignment.status.in_(["PUBLISHED", "CLOSED"])).order_by(Assignment.due_at, Assignment.id)).all()
     items = []
@@ -55,7 +57,7 @@ def safe_name(value):
 
 
 def workbook_bytes(data):
-    from app.main import export_cell
+    from app.modules.grades.service import export_cell
     workbook = Workbook()
     basic = workbook.active
     basic.title = "基本信息"

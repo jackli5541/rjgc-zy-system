@@ -16,7 +16,8 @@ import pytest
 from sqlalchemy import event, func, select
 
 from app.database import SessionLocal, engine
-from app.main import app, parse_roster
+from app.main import app
+from app.modules.members.service import parse_roster
 from app.grading import final_score
 from app.markdown_assets import extract_assets
 from app.models import Assignment, AuditLog, BackgroundJob, CapstoneAsset, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, Team, TeamMember, TeamRequest, TeachingMaterialAsset, User
@@ -1702,7 +1703,7 @@ def test_rich_preview_feedback_annotations_and_resubmission_history(monkeypatch)
 
 
 def test_restore_embedded_images_supports_markdown_and_html_without_duplicates():
-    from app.main import restore_embedded_images
+    from app.modules.assignments.service import restore_embedded_images
 
     markdown_image = "![流程图](data:image/png;base64,aGVsbG8=)"
     html_image = '<img src="data:image/jpeg;base64,d29ybGQ=" alt="截图" width="50%">'
@@ -1718,7 +1719,7 @@ def test_restore_embedded_images_supports_markdown_and_html_without_duplicates()
 
 
 def test_restore_embedded_tables_repairs_only_unchanged_flattened_tables():
-    from app.main import restore_embedded_tables
+    from app.modules.assignments.service import restore_embedded_tables
 
     table = "| 我发现的问题 | 属于哪一类 | 怎么改（修法） |\r\n|---|---|---|\r\n|  |  |  |\r\n|  |  |  |"
     template = f"# 任务\r\n\r\n{table}\r\n\r\n---\r\n"

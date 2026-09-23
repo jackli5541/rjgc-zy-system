@@ -169,7 +169,8 @@ def build_assignment_archive(db: Session, assignment_id: UUID) -> Path:
 
 
 def build_team_archive(db: Session, team_id: UUID) -> Path:
-    from app.main import displayed_submission_grade_result, export_cell, missing_submission_grade_result
+    from app.modules.assignments.service import displayed_submission_grade_result, missing_submission_grade_result
+    from app.modules.grades.service import export_cell
 
     team = db.get(Team, team_id)
     assignments = db.scalars(select(Assignment).where(

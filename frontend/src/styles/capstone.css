@@ -1,0 +1,63 @@
+.capstone-title{margin-bottom:20px}
+
+.capstone-title p{margin:7px 0 0;color:#7a8996;font-size:12px}
+
+.capstone-topic-line strong{color:#176b78;font-weight:600}
+
+.capstone-editor{padding:0;min-height:0;max-height:78vh;overflow-y:auto}
+
+.capstone-context-hint{display:block;padding:9px 14px;color:#9aa7b1;font-size:12px}
+
+.capstone-stage-strip{display:flex;align-items:stretch;flex:1;max-width:640px;margin:0 8px;border:1px solid #e5ebee;border-radius:10px;background:#fbfcfd;overflow:hidden}
+
+.capstone-stage-chip{display:flex;flex:1;align-items:center;justify-content:center;gap:7px;min-width:0;padding:11px 6px;border:0;border-right:1px solid #e9eef1;background:transparent;color:#7a8996;font:inherit;cursor:pointer}
+
+.capstone-stage-chip:last-child{border-right:0}
+
+.capstone-stage-chip:hover{background:#f1f6f5;color:#26424a}
+
+.capstone-stage-chip .count{flex:0 0 auto;color:#98a4ac;font-size:10px;white-space:nowrap}
+
+@media(max-width:900px) {
+  .capstone-title{flex-wrap:wrap}
+  .capstone-stage-strip{order:3;flex:1 1 100%;max-width:none;margin:6px 0 0}
+}
+
+.capstone-readonly-banner{display:flex;align-items:center;gap:10px;padding:10px 18px;border-bottom:1px solid #f0d9a8;background:#fff8ea;color:#8a611a;font-size:12px}
+
+.capstone-readonly-banner .ant-btn{margin-left:auto}
+
+.capstone-readonly-body{display:grid;grid-template-columns:200px minmax(0,1fr);min-height:520px}
+
+.capstone-readonly-doc-list{display:flex;flex-direction:column;gap:3px;padding:10px;border-right:1px solid #e2e8ea;background:#fbfcfd}
+
+.capstone-readonly-doc-list button{display:flex;align-items:center;gap:7px;padding:7px 10px;border:0;border-radius:5px;background:transparent;color:#3c5262;font-size:12px;text-align:left;cursor:pointer}
+
+.capstone-readonly-doc-list button:hover{background:#f0f6f8}
+
+.capstone-readonly-content{overflow:auto;padding:22px}
+
+.capstone-teammates{margin-top:16px;border:1px solid #dfe7ec;background:#fff}
+
+.capstone-teammates-toggle{display:flex;align-items:center;gap:9px;width:100%;padding:13px 18px;border:0;background:transparent;color:#2f4655;font:inherit;font-size:13px;font-weight:600;text-align:left;cursor:pointer}
+
+.capstone-teammates-toggle .count{margin-left:4px;color:#8b99a5;font-size:11px;font-weight:400}
+
+.capstone-teammates-toggle svg:last-child{margin-left:auto;color:#8b99a5;font-size:11px}
+
+.capstone-teammates-body{display:flex;flex-wrap:wrap;gap:8px;padding:0 18px 16px}
+
+.capstone-teammate-item{display:flex;flex-direction:column;gap:3px;min-width:140px;padding:9px 13px;border:1px solid #e2e8ea;border-radius:6px;background:#fbfcfd;color:#3c5262;text-align:left;cursor:pointer}
+
+.capstone-teammate-item:hover:not(:disabled){background:#f0f6f8;border-color:#c7dce0}
+
+.capstone-teammate-item.self{cursor:default;opacity:.7}
+
+.capstone-teammate-item .name{font-size:12px;font-weight:600}
+
+.capstone-teammate-item .module{color:#8b99a5;font-size:10px}
+
+@media(max-width:760px) {
+  .capstone-readonly-body{grid-template-columns:1fr}
+  .capstone-readonly-doc-list{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid #e2e8ea}
+}
