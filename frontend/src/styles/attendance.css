@@ -26,6 +26,7 @@
 .attendance-session-row strong,.attendance-session-row small{display:block}
 .attendance-session-row strong{color:#223744;font-size:14px}
 .attendance-session-row small{color:#83919b;font-size:12px;margin-top:4px}
+.attendance-mobile-records{display:none}
 .attendance-correction{display:grid;gap:15px}
 .attendance-correction label{display:grid;gap:6px;color:#576a75}
 .attendance-projection{position:fixed;inset:0;z-index:2000;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#f8fcfb;color:#143f40;text-align:center;padding:32px}
@@ -44,3 +45,18 @@
 .student-attendance-recent h3{font-size:14px;color:#5a6d79}
 .student-attendance-recent>div{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #edf0f2}
 @media(max-width:760px){.attendance-heading{align-items:flex-start;flex-wrap:wrap}.attendance-live{align-items:flex-start;flex-direction:column;padding:18px}.attendance-live-main{gap:20px}.attendance-code{font-size:42px;letter-spacing:4px}.attendance-session-row{grid-template-columns:minmax(140px,1fr) 80px;gap:8px}.attendance-session-stats{grid-column:1/-1;justify-content:flex-start;gap:6px 18px}.attendance-projection>strong{font-size:clamp(65px,17vw,130px)}.attendance-projection-foot{flex-direction:column;gap:12px}.student-attendance-trigger.ant-btn{min-width:80px;height:44px;padding:0 18px;font-size:16px;font-weight:600}.student-attendance-entry{flex-direction:column;gap:12px}.student-attendance-entry .ant-input{min-height:52px;font-size:19px}.student-attendance-entry .ant-btn{width:100%;height:52px;font-size:17px;font-weight:600}}
+@media(max-width:760px){
+  .attendance-desktop-table{display:none}
+  .attendance-mobile-records{display:grid;gap:8px}
+  .attendance-mobile-record{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px 12px;padding:14px;border:1px solid #e4ebf1;border-radius:7px;background:#fff}
+  .attendance-mobile-record strong,.attendance-mobile-record small{display:block}
+  .attendance-mobile-record small,.attendance-mobile-record>span{color:#738391;font-size:12px}
+  .attendance-mobile-record .ant-tag{margin:0}
+  .attendance-mobile-record>span,.attendance-mobile-record>p{grid-column:1/-1;margin:0;overflow-wrap:anywhere}
+  .attendance-mobile-record .ant-btn{grid-column:1/-1;min-height:44px}
+  .attendance-start-fields>.ant-input,.attendance-start-fields>label,.attendance-start-fields>.ant-btn{width:100%}
+  .attendance-start-fields>.ant-btn{min-height:44px}
+  .attendance-live-actions{width:100%}
+  .attendance-live-actions .ant-btn{min-height:44px;flex:1}
+  .attendance-section-title{align-items:flex-start;flex-direction:column;gap:5px}
+}

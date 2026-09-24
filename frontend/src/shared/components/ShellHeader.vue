@@ -1,8 +1,20 @@
 <script setup>
-import { BellOutlined, CodeOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { computed, ref, watch } from 'vue'
+import { BellOutlined, CodeOutlined, LogoutOutlined, MenuOutlined, UserOutlined } from '@ant-design/icons-vue'
 import { useShellContext } from '../../shellContext'
 
 const { session, role, classId, menu, navView, notifications, noticesOpen, attendanceOpen, modals, changeClass, logout, navigate } = useShellContext()
+const moreOpen = ref(false)
+const priority = computed(() => role.value === 'TEACHER'
+  ? ['overview', 'classes', 'assignments', 'attendance']
+  : ['overview', 'assignments', 'reviews', 'teams'])
+const primaryMenu = computed(() => priority.value.map(key => menu.value.find(item => item[0] === key)).filter(Boolean))
+const moreMenu = computed(() => menu.value.filter(item => !primaryMenu.value.includes(item)))
+watch(navView, () => { moreOpen.value = false })
+function openPage(key) {
+  moreOpen.value = false
+  navigate('/' + key)
+}
 </script>
 
 <template>
@@ -20,4 +32,13 @@ const { session, role, classId, menu, navView, notifications, noticesOpen, atten
     </div>
     <nav class="top-nav" aria-label="主导航"><button v-for="item in menu" :key="item[0]" :class="{active:navView===item[0]}" @click="navigate('/'+item[0])"><component :is="item[1]" />{{ item[2] }}</button></nav>
   </a-layout-header>
+  <nav class="mobile-nav" aria-label="手机主导航">
+    <button v-for="item in primaryMenu" :key="item[0]" type="button" :class="{active:navView===item[0]}" :aria-current="navView===item[0]?'page':undefined" @click="openPage(item[0])"><component :is="item[1]" /><span>{{ item[2] }}</span></button>
+    <button v-if="moreMenu.length" type="button" :class="{active:moreMenu.some(item=>item[0]===navView)}" :aria-expanded="moreOpen" aria-controls="mobile-more-menu" @click="moreOpen=true"><MenuOutlined /><span>更多</span></button>
+  </nav>
+  <a-drawer v-model:open="moreOpen" title="更多功能" placement="bottom" class="mobile-more-drawer" :height="'min(70dvh, 480px)'">
+    <nav id="mobile-more-menu" class="mobile-more-list" aria-label="其他页面">
+      <button v-for="item in moreMenu" :key="item[0]" type="button" :class="{active:navView===item[0]}" :aria-current="navView===item[0]?'page':undefined" @click="openPage(item[0])"><component :is="item[1]" /><span>{{ item[2] }}</span></button>
+    </nav>
+  </a-drawer>
 </template>

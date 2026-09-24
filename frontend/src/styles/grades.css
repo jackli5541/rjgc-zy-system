@@ -89,6 +89,7 @@
 .export-toolbar{display:flex;justify-content:flex-end;padding:18px 24px}
 
 .grades-tabs-card .data-export-list{margin-top:2px}
+.grades-mobile-view,.grades-mobile-list{display:none}
 
 @media(max-width:1000px) {
   .archive-overview{grid-template-columns:minmax(0,1fr) auto}
@@ -102,6 +103,20 @@
 }
 
 @media(max-width:760px) {
+  .grades-mobile-view{display:block;width:calc(100% - 36px);margin:16px 18px 0}
+  .grades-tabs-card .ant-tabs-nav{display:none}
+  .grades-desktop-table{display:none}
+  .grades-mobile-list{display:grid;gap:8px;padding:0 18px 18px}
+  .grades-mobile-item{padding:14px;border:1px solid #e4ebf1;border-radius:6px;background:#fff}
+  .grades-mobile-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+  .grades-mobile-heading strong,.grades-mobile-heading small{display:block;overflow-wrap:anywhere}
+  .grades-mobile-heading small{margin-top:3px;color:#738391;font-size:12px}
+  .grades-mobile-heading .ant-tag{flex-shrink:0;margin:0}
+  .grades-mobile-scores{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:14px;color:#738391;font-size:12px}
+  .grades-mobile-scores strong{color:#26394d;font-size:14px}
+  .grades-mobile-feedback{display:grid;gap:8px;margin-top:12px}
+  .grades-mobile-feedback:empty{display:none}
+  .grades-mobile-feedback .ant-btn{min-height:44px}
   .archive-overview{grid-template-columns:1fr;padding:20px}
   .archive-metrics>div:first-child{padding-left:0;border-left:0}
   .archive-overview>.ant-btn{grid-column:auto;width:100%;margin-left:0}

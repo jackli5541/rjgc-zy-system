@@ -125,12 +125,22 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
   </section>
 
   <section v-if="selectedAttendance" class="attendance-roster"><div class="attendance-section-title"><h2>{{selectedAttendance.title}} · 学生记录</h2><span>出勤 {{selectedAttendance.present}} · 迟到 {{selectedAttendance.late}} · 请假 {{selectedAttendance.leave}} · {{selectedAttendance.status==='ACTIVE'?'未签到':'缺勤'}} {{selectedAttendance.status==='ACTIVE'?selectedAttendance.pending:selectedAttendance.absent}}</span></div>
-    <a-table :data-source="selectedAttendance.records || []" row-key="student_id" size="small" :pagination="{pageSize:20}" :scroll="{x:680}">
+    <a-table class="attendance-desktop-table" :data-source="selectedAttendance.records || []" row-key="student_id" size="small" :pagination="{pageSize:20}" :scroll="{x:680}">
       <a-table-column title="学号" data-index="student_no" :width="150"/><a-table-column title="姓名" data-index="student_name" :width="130"/>
       <a-table-column title="状态" :width="110"><template #default="{record}"><a-tag :color="record.status==='PRESENT'?'green':record.status==='LATE'?'orange':record.status==='LEAVE'?'blue':'default'">{{statusLabels[record.status]}}</a-tag></template></a-table-column>
       <a-table-column title="签到时间" :width="200"><template #default="{record}">{{dateTime(record.checked_in_at)}}</template></a-table-column>
       <a-table-column title="备注" data-index="note"/><a-table-column title="操作" :width="90"><template #default="{record}"><a-button type="link" size="small" @click="edit(record)">更正</a-button></template></a-table-column>
     </a-table>
+    <div class="attendance-mobile-records">
+      <article v-for="record in selectedAttendance.records || []" :key="record.student_id" class="attendance-mobile-record">
+        <div><strong>{{record.student_name}}</strong><small>{{record.student_no}}</small></div>
+        <a-tag :color="record.status==='PRESENT'?'green':record.status==='LATE'?'orange':record.status==='LEAVE'?'blue':'default'">{{statusLabels[record.status]}}</a-tag>
+        <span>签到：{{dateTime(record.checked_in_at)}}</span>
+        <p v-if="record.note">{{record.note}}</p>
+        <a-button @click="edit(record)">更正</a-button>
+      </article>
+      <a-empty v-if="!selectedAttendance.records?.length" description="暂无学生记录"/>
+    </div>
   </section>
 
   <a-modal v-model:open="correctionOpen" :title="`更正考勤 · ${correction.name}`" ok-text="保存" @ok="saveCorrection"><div class="attendance-correction"><label>状态<a-select v-model:value="correction.status" :options="correctionOptions"/></label><label>备注<a-textarea v-model:value="correction.note" :rows="3" :maxlength="500"/></label></div></a-modal>
