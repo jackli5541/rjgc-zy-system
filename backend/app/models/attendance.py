@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import DateTime, Index, Integer, LargeBinary, Unicode as String, UnicodeText as Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Float, Index, Integer, LargeBinary, Unicode as String, UnicodeText as Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from uuid import UUID
 
@@ -15,6 +15,9 @@ class AttendanceSession(Base):
     title: Mapped[str] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
     code_secret: Mapped[bytes] = mapped_column(LargeBinary(32))
+    latitude: Mapped[float | None] = mapped_column(Float)
+    longitude: Mapped[float | None] = mapped_column(Float)
+    radius_meters: Mapped[int | None] = mapped_column(Integer)
     late_after_minutes: Mapped[int] = mapped_column(Integer, default=10)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -38,6 +41,9 @@ class AttendanceRecord(Base):
     note: Mapped[str | None] = mapped_column(Text)
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     failed_window_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    out_of_range_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_out_of_range_meters: Mapped[int | None] = mapped_column(Integer)
+    last_out_of_range_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     __table_args__ = (UniqueConstraint("session_id", "student_user_id", name="uq_attendance_record_student"),)

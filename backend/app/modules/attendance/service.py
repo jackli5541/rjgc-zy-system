@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from app.models import AttendanceRecord, AttendanceSession
 
 CODE_PERIOD_SECONDS = 30
 CODE_GRACE_SECONDS = 5
+EARTH_RADIUS_METERS = 6371000
 STATUS_LABELS = {"PENDING": "未签到", "PRESENT": "出勤", "LATE": "迟到", "ABSENT": "缺勤", "LEAVE": "请假"}
 
 
@@ -35,6 +37,14 @@ def code_valid(session: AttendanceSession, code: str, at: datetime) -> bool:
     return int(at.timestamp()) % CODE_PERIOD_SECONDS < CODE_GRACE_SECONDS and hmac.compare_digest(
         current_code(session, at - timedelta(seconds=CODE_PERIOD_SECONDS)), code
     )
+
+
+def distance_meters(latitude_a: float, longitude_a: float, latitude_b: float, longitude_b: float) -> float:
+    lat_a, lat_b = math.radians(latitude_a), math.radians(latitude_b)
+    delta_lat = lat_b - lat_a
+    delta_lon = math.radians(longitude_b - longitude_a)
+    haversine = math.sin(delta_lat / 2) ** 2 + math.cos(lat_a) * math.cos(lat_b) * math.sin(delta_lon / 2) ** 2
+    return 2 * EARTH_RADIUS_METERS * math.asin(min(1, math.sqrt(haversine)))
 
 
 def effective_status(session: AttendanceSession, at: datetime) -> str:
@@ -74,6 +84,7 @@ def session_json(session: AttendanceSession, records: list[AttendanceRecord] | N
         "status": effective_status(session, at), "started_at": aware(session.started_at).isoformat(),
         "expires_at": aware(session.expires_at).isoformat(),
         "ended_at": aware(session.ended_at).isoformat() if session.ended_at else None,
+        "radius_meters": session.radius_meters,
     }
     if records is not None:
         data["total"] = len(records)
@@ -94,6 +105,9 @@ def record_json(record: AttendanceRecord) -> dict:
         "student_no": record.student_no, "student_name": record.student_name,
         "status": record.status, "checked_in_at": aware(record.checked_in_at).isoformat() if record.checked_in_at else None,
         "source": record.source, "note": record.note,
+        "out_of_range_attempts": record.out_of_range_attempts,
+        "last_out_of_range_meters": record.last_out_of_range_meters,
+        "last_out_of_range_at": aware(record.last_out_of_range_at).isoformat() if record.last_out_of_range_at else None,
     }
 
 

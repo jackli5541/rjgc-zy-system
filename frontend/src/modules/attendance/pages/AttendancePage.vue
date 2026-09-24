@@ -4,9 +4,10 @@ import { message, Modal } from 'ant-design-vue'
 import { CheckCircleOutlined, ClockCircleOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { useShellContext } from '../../../shellContext'
+import { currentLocation } from '../location'
 
 const { classId, session, attendanceSessions, selectedAttendance, activeAttendance, loadAttendanceView, selectAttendance } = useShellContext()
-const form = reactive({ title: '', duration_minutes: 15 })
+const form = reactive({ title: '', duration_minutes: 15, radius_meters: 100 })
 const creating = ref(false)
 const nowMs = ref(Date.now())
 const projecting = ref(false)
@@ -28,7 +29,8 @@ async function create() {
   if (creating.value) return
   creating.value = true
   try {
-    const created = await api(`/classes/${classId.value}/attendance-sessions`, { method: 'POST', body: JSON.stringify(form) })
+    const location = await currentLocation(form.radius_meters)
+    const created = await api(`/classes/${classId.value}/attendance-sessions`, { method: 'POST', body: JSON.stringify({ ...form, ...location }) })
     await reload()
     await selectAttendance(created.id)
     message.success('考勤已开始')
@@ -108,12 +110,13 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
     <div class="attendance-start-fields">
       <a-input v-model:value="form.title" aria-label="考勤标题" maxlength="100" placeholder="考勤标题" :disabled="!!activeAttendance"/>
       <label>持续时间 <a-input-number v-model:value="form.duration_minutes" :min="1" :max="120" :disabled="!!activeAttendance"/> 分钟</label>
-      <a-button type="primary" :loading="creating" :disabled="!!activeAttendance || !form.title.trim()" @click="create"><PlayCircleOutlined/> 开始</a-button>
+      <label>签到范围 <a-input-number v-model:value="form.radius_meters" :min="30" :max="500" :step="10" :disabled="!!activeAttendance"/> 米</label>
+      <a-button type="primary" :loading="creating" :disabled="!!activeAttendance || !form.title.trim() || !form.radius_meters" @click="create"><PlayCircleOutlined/> 开始</a-button>
     </div>
   </section>
 
   <section v-if="selectedAttendance?.status==='ACTIVE'" class="attendance-live">
-    <div class="attendance-live-main"><div><span class="attendance-live-label">当前考勤 · {{selectedAttendance.title}}</span><div class="attendance-code">{{selectedAttendance.code || '------'}}</div><span class="attendance-countdown"><ClockCircleOutlined/> {{codeSeconds}} 秒后更新 · {{Math.ceil(sessionSeconds / 60)}} 分钟后结束</span></div><div class="attendance-live-stats"><strong>{{selectedAttendance.present + selectedAttendance.late}} / {{selectedAttendance.total}}</strong><span>已签到</span></div></div>
+    <div class="attendance-live-main"><div><span class="attendance-live-label">当前考勤 · {{selectedAttendance.title}}</span><div class="attendance-code">{{selectedAttendance.code || '------'}}</div><span class="attendance-countdown"><ClockCircleOutlined/> {{codeSeconds}} 秒后更新 · {{Math.ceil(sessionSeconds / 60)}} 分钟后结束<span v-if="selectedAttendance.radius_meters"> · 范围 {{selectedAttendance.radius_meters}} 米</span></span></div><div class="attendance-live-stats"><strong>{{selectedAttendance.present + selectedAttendance.late}} / {{selectedAttendance.total}}</strong><span>已签到</span></div></div>
     <div class="attendance-live-actions"><a-button @click="projecting=true"><ExpandOutlined/> 投屏展示</a-button><a-button danger @click="end"><StopOutlined/> 结束考勤</a-button></div>
   </section>
 
@@ -125,10 +128,11 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
   </section>
 
   <section v-if="selectedAttendance" class="attendance-roster"><div class="attendance-section-title"><h2>{{selectedAttendance.title}} · 学生记录</h2><span>出勤 {{selectedAttendance.present}} · 迟到 {{selectedAttendance.late}} · 请假 {{selectedAttendance.leave}} · {{selectedAttendance.status==='ACTIVE'?'未签到':'缺勤'}} {{selectedAttendance.status==='ACTIVE'?selectedAttendance.pending:selectedAttendance.absent}}</span></div>
-    <a-table :data-source="selectedAttendance.records || []" row-key="student_id" size="small" :pagination="{pageSize:20}" :scroll="{x:680}">
+    <a-table :data-source="selectedAttendance.records || []" row-key="student_id" size="small" :pagination="{pageSize:20}" :scroll="{x:850}">
       <a-table-column title="学号" data-index="student_no" :width="150"/><a-table-column title="姓名" data-index="student_name" :width="130"/>
       <a-table-column title="状态" :width="110"><template #default="{record}"><a-tag :color="record.status==='PRESENT'?'green':record.status==='LATE'?'orange':record.status==='LEAVE'?'blue':'default'">{{statusLabels[record.status]}}</a-tag></template></a-table-column>
       <a-table-column title="签到时间" :width="200"><template #default="{record}">{{dateTime(record.checked_in_at)}}</template></a-table-column>
+      <a-table-column title="异常" :width="190"><template #default="{record}"><span v-if="record.out_of_range_attempts" :title="`最近尝试：${dateTime(record.last_out_of_range_at)}`">范围外 {{record.out_of_range_attempts}} 次 · 最近 {{record.last_out_of_range_meters}} 米</span><span v-else>—</span></template></a-table-column>
       <a-table-column title="备注" data-index="note"/><a-table-column title="操作" :width="90"><template #default="{record}"><a-button type="link" size="small" @click="edit(record)">更正</a-button></template></a-table-column>
     </a-table>
   </section>

@@ -34,9 +34,13 @@ def setup_class():
 
 
 def start(teacher, headers, class_id, title):
-    response = teacher.post(f"/api/v1/classes/{class_id}/attendance-sessions", headers=headers, json={"title": title, "duration_minutes": 15})
+    response = teacher.post(f"/api/v1/classes/{class_id}/attendance-sessions", headers=headers, json={"title": title, "duration_minutes": 15, "latitude": 31.2304, "longitude": 121.4737, "accuracy_meters": 10, "radius_meters": 100})
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def check_in_payload(code, latitude=31.2304, longitude=121.4737, accuracy_meters=10):
+    return {"code": code, "latitude": latitude, "longitude": longitude, "accuracy_meters": accuracy_meters}
 
 
 def test_attendance_check_in_correction_export_and_deduction():
@@ -49,13 +53,13 @@ def test_attendance_check_in_correction_export_and_deduction():
     assert teacher.get(f"/api/v1/classes/{class_id}/attendance-sessions").json()["items"][0]["pending"] == 1
     assert student.get(f"/api/v1/classes/{class_id}/attendance/current").json()["active"]["id"] == first["id"]
     assert student.get(f"/api/v1/attendance-sessions/{first['id']}").status_code == 403
-    assert student.post(f"/api/v1/attendance-sessions/{first['id']}/check-in", json={"code": first["code"]}).status_code == 403
+    assert student.post(f"/api/v1/attendance-sessions/{first['id']}/check-in", json=check_in_payload(first["code"])).status_code == 403
     code = teacher.get(f"/api/v1/attendance-sessions/{first['id']}/code").json()["code"]
-    signed = student.post(f"/api/v1/attendance-sessions/{first['id']}/check-in", headers=student_headers, json={"code": code})
+    signed = student.post(f"/api/v1/attendance-sessions/{first['id']}/check-in", headers=student_headers, json=check_in_payload(code))
     assert signed.status_code == 200, signed.text
     assert signed.json()["status"] == "PRESENT"
     assert teacher.get(f"/api/v1/classes/{class_id}/attendance-sessions").json()["items"][0]["present"] == 1
-    assert student.post(f"/api/v1/attendance-sessions/{first['id']}/check-in", headers=student_headers, json={"code": "000000"}).json()["status"] == "PRESENT"
+    assert student.post(f"/api/v1/attendance-sessions/{first['id']}/check-in", headers=student_headers, json=check_in_payload("000000")).json()["status"] == "PRESENT"
     assert teacher.post(f"/api/v1/attendance-sessions/{first['id']}/end", headers=teacher_headers).status_code == 200
 
     second = start(teacher, teacher_headers, class_id, "第二次")
@@ -64,7 +68,7 @@ def test_attendance_check_in_correction_export_and_deduction():
         session.started_at = now() - timedelta(minutes=11)
         db.commit()
     code = teacher.get(f"/api/v1/attendance-sessions/{second['id']}/code").json()["code"]
-    signed = student.post(f"/api/v1/attendance-sessions/{second['id']}/check-in", headers=student_headers, json={"code": code})
+    signed = student.post(f"/api/v1/attendance-sessions/{second['id']}/check-in", headers=student_headers, json=check_in_payload(code))
     assert signed.status_code == 200 and signed.json()["status"] == "PRESENT"
     late = teacher.put(f"/api/v1/attendance-sessions/{second['id']}/records/{member['id']}", headers=teacher_headers, json={"status": "LATE"})
     assert late.status_code == 200 and late.json()["status"] == "LATE"
@@ -93,16 +97,52 @@ def test_attendance_code_limit_and_closed_session():
     teacher, teacher_headers, student, student_headers, course, member = setup_class()
     class_id = course["id"]
     session = start(teacher, teacher_headers, class_id, "限流测试")
-    assert teacher.post(f"/api/v1/classes/{class_id}/attendance-sessions", headers=teacher_headers, json={"title": "重复场次", "duration_minutes": 15}).status_code == 409
+    assert teacher.post(f"/api/v1/classes/{class_id}/attendance-sessions", headers=teacher_headers, json={"title": "重复场次", "duration_minutes": 15, "latitude": 31.2304, "longitude": 121.4737, "accuracy_meters": 10}).status_code == 409
     wrong = "000000" if session["code"] != "000000" else "111111"
     for _ in range(5):
-        assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json={"code": wrong}).status_code == 422
-    assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json={"code": session["code"]}).status_code == 429
+        assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json=check_in_payload(wrong)).status_code == 422
+    assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json=check_in_payload(session["code"])).status_code == 429
     teacher.post(f"/api/v1/attendance-sessions/{session['id']}/end", headers=teacher_headers)
-    assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json={"code": session["code"]}).status_code == 409
+    assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json=check_in_payload(session["code"])).status_code == 409
     manual = start(teacher, teacher_headers, class_id, "教师确认")
     teacher.put(f"/api/v1/attendance-sessions/{manual['id']}/records/{member['id']}", headers=teacher_headers, json={"status": "ABSENT", "note": "现场核实"})
-    assert student.post(f"/api/v1/attendance-sessions/{manual['id']}/check-in", headers=student_headers, json={"code": manual["code"]}).status_code == 409
+    assert student.post(f"/api/v1/attendance-sessions/{manual['id']}/check-in", headers=student_headers, json=check_in_payload(manual["code"])).status_code == 409
+
+
+def test_out_of_range_is_rejected_and_visible_to_teacher():
+    teacher, teacher_headers, student, student_headers, course, member = setup_class()
+    session = start(teacher, teacher_headers, course["id"], "定位考勤")
+    path = f"/api/v1/attendance-sessions/{session['id']}"
+    code = teacher.get(f"{path}/code").json()["code"]
+
+    outside = student.post(f"{path}/check-in", headers=student_headers, json=check_in_payload(code, latitude=31.2324))
+    assert outside.status_code == 403
+    assert outside.json()["code"] == "ATTENDANCE_OUT_OF_RANGE"
+    record = teacher.get(path).json()["records"][0]
+    assert record["status"] == "PENDING"
+    assert record["out_of_range_attempts"] == 1
+    assert record["last_out_of_range_meters"] > session["radius_meters"]
+    assert record["last_out_of_range_at"] is not None
+
+    signed = student.post(f"{path}/check-in", headers=student_headers, json=check_in_payload(code))
+    assert signed.status_code == 200
+    assert signed.json()["status"] == "PRESENT"
+    assert signed.json()["out_of_range_attempts"] == 1
+
+
+def test_attendance_location_is_required_and_validated():
+    teacher, teacher_headers, student, student_headers, course, member = setup_class()
+    create_path = f"/api/v1/classes/{course['id']}/attendance-sessions"
+    assert teacher.post(create_path, headers=teacher_headers, json={"title": "缺少位置", "duration_minutes": 15}).status_code == 422
+    inaccurate_center = {"title": "中心不准", "duration_minutes": 15, "latitude": 31.2304, "longitude": 121.4737, "accuracy_meters": 60, "radius_meters": 100}
+    assert teacher.post(create_path, headers=teacher_headers, json=inaccurate_center).status_code == 422
+    session = start(teacher, teacher_headers, course["id"], "定位校验")
+    path = f"/api/v1/attendance-sessions/{session['id']}/check-in"
+    assert student.post(path, headers=student_headers, json={"code": session["code"]}).status_code == 422
+    imprecise = student.post(path, headers=student_headers, json=check_in_payload(session["code"], accuracy_meters=101))
+    assert imprecise.status_code == 422
+    assert student.post(path, headers=student_headers, json=check_in_payload(session["code"], accuracy_meters=60)).status_code == 422
+    assert teacher.get(f"/api/v1/attendance-sessions/{session['id']}").json()["records"][0]["out_of_range_attempts"] == 0
 
 
 def test_expired_attendance_becomes_absent_and_can_be_corrected():
@@ -122,7 +162,7 @@ def test_expired_attendance_becomes_absent_and_can_be_corrected():
     assert after["status"] == "ENDED"
     assert after["absent"] == 1 and after["pending"] == 0
     assert after["records"][0]["status"] == "ABSENT"
-    assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json={"code": session["code"]}).status_code == 409
+    assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json=check_in_payload(session["code"])).status_code == 409
     assert teacher.get(f"/api/v1/classes/{class_id}/grade-overview").json()["items"][0]["attendance_component"] == 9
     corrected = teacher.put(f"/api/v1/attendance-sessions/{session['id']}/records/{member['id']}", headers=teacher_headers, json={"status": "LATE", "note": "现场核实"})
     assert corrected.status_code == 200 and corrected.json()["status"] == "LATE"
@@ -147,7 +187,7 @@ def test_active_legacy_absence_is_pending_and_can_check_in():
         record.status = "ABSENT"
         db.commit()
     code = teacher.get(f"/api/v1/attendance-sessions/{session['id']}/code").json()["code"]
-    signed = student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json={"code": code})
+    signed = student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json=check_in_payload(code))
     assert signed.status_code == 200 and signed.json()["status"] == "PRESENT"
 
 
@@ -192,7 +232,7 @@ def test_check_in_does_not_wait_for_session_update_lock():
                 student.post,
                 f"/api/v1/attendance-sessions/{session['id']}/check-in",
                 headers=student_headers,
-                json={"code": code},
+                json=check_in_payload(code),
             )
             try:
                 response = future.result(timeout=5)
@@ -250,7 +290,7 @@ def test_fifty_students_can_check_in_concurrently(monkeypatch):
         return client.post(
             f"/api/v1/attendance-sessions/{session['id']}/check-in",
             headers=headers,
-            json={"code": code},
+            json=check_in_payload(code),
         )
 
     with ThreadPoolExecutor(max_workers=len(students)) as executor:
