@@ -14,7 +14,7 @@ const { session, role, classId, menu, navView, notifications, noticesOpen, atten
       </div>
       <div class="header-right">
         <a-badge :count="notifications.filter(x=>!x.read).length" size="small"><a-button type="text" shape="circle" @click="noticesOpen=true"><BellOutlined /></a-button></a-badge>
-        <a-button v-if="role==='STUDENT'" @click="attendanceOpen=true">考勤</a-button>
+        <a-button v-if="role==='STUDENT'" class="student-attendance-trigger" type="primary" @click="attendanceOpen=true">签到</a-button>
         <a-dropdown><div class="user-chip"><a-avatar :style="{background:role==='TEACHER'?'#7352bd':'#1769aa'}">{{ session.user.name.slice(0,1) }}</a-avatar><div class="user-meta"><strong>{{ session.user.name }}</strong><span>{{ role==='TEACHER'?'教师':'学生' }}</span></div></div><template #overlay><a-menu><a-menu-item @click="modals.password=true"><UserOutlined /> 修改密码</a-menu-item><a-menu-item @click="logout"><LogoutOutlined /> 退出登录</a-menu-item></a-menu></template></a-dropdown>
       </div>
     </div>
