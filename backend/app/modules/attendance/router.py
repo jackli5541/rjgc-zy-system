@@ -15,7 +15,7 @@ from app.core.errors import ApiError
 from app.core.utils import content_disposition, now
 from app.models import AttendanceRecord, AttendanceSession, ClassMember, TeachingClass, User
 from app.modules.attendance.schemas import AttendanceCheckIn, AttendanceCorrection, AttendanceSessionIn
-from app.modules.attendance.service import STATUS_LABELS, aware, close_expired, code_valid, distance_meters, finish_session, record_json, roster_records, session_json
+from app.modules.attendance.service import STATUS_LABELS, aware, close_expired, code_valid, finish_session, record_json, roster_records, session_json
 from app.modules.grades.service import export_cell
 
 router = APIRouter()
@@ -58,8 +58,6 @@ def list_sessions(cid: UUID, user: CurrentUser, db: Db):
 @router.post("/api/v1/classes/{cid}/attendance-sessions", status_code=201)
 def create_session(cid: UUID, data: AttendanceSessionIn, user: CsrfUser, db: Db):
     teacher(user)
-    if data.accuracy_meters > data.radius_meters / 2:
-        raise ApiError(422, "LOCATION_INACCURATE", "定位精度不足，请开启精确定位后重试")
     course = db.scalar(select(TeachingClass).where(TeachingClass.id == cid, TeachingClass.teacher_id == user.id).with_for_update())
     if not course: raise ApiError(404, "CLASS_NOT_FOUND", "未找到可访问的教学班")
     if course.status != "ACTIVE": raise ApiError(409, "CLASS_ARCHIVED", "教学班已归档")
@@ -74,11 +72,11 @@ def create_session(cid: UUID, data: AttendanceSessionIn, user: CsrfUser, db: Db)
         .where(ClassMember.class_id == cid, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT")
     ).all()
     if not people: raise ApiError(409, "ROSTER_EMPTY", "当前教学班没有学生")
-    session = AttendanceSession(class_id=cid, title=title, code_secret=secrets.token_bytes(32), latitude=data.latitude, longitude=data.longitude, radius_meters=data.radius_meters, started_at=at, expires_at=at + timedelta(minutes=data.duration_minutes), created_by=user.id)
+    session = AttendanceSession(class_id=cid, title=title, code_secret=secrets.token_bytes(32), started_at=at, expires_at=at + timedelta(minutes=data.duration_minutes), created_by=user.id)
     db.add(session); db.flush()
     records = [AttendanceRecord(session_id=session.id, student_user_id=person.id, student_no=person.login_name, student_name=person.display_name) for _, person in people]
     db.add_all(records)
-    audit(db, user, "ATTENDANCE_STARTED", "attendance_session", str(session.id), {"class_id": str(cid), "title": title, "radius_meters": data.radius_meters})
+    audit(db, user, "ATTENDANCE_STARTED", "attendance_session", str(session.id), {"class_id": str(cid), "title": title})
     db.commit()
     return session_json(session, records, at, include_code=True)
 
@@ -181,17 +179,6 @@ def check_in(sid: UUID, data: AttendanceCheckIn, user: CsrfUser, db: Db):
         record.failed_attempts += 1
         db.commit()
         raise ApiError(422, "ATTENDANCE_CODE_INVALID", "考勤码不正确或已更新")
-    if session.latitude is not None and session.longitude is not None and session.radius_meters is not None:
-        if data.accuracy_meters > session.radius_meters / 2:
-            raise ApiError(422, "LOCATION_INACCURATE", "定位精度不足，请开启精确定位后重试")
-        distance = distance_meters(session.latitude, session.longitude, data.latitude, data.longitude)
-        if distance > session.radius_meters:
-            record.out_of_range_attempts += 1
-            record.last_out_of_range_meters = round(distance)
-            record.last_out_of_range_at = at
-            audit(db, user, "ATTENDANCE_OUT_OF_RANGE", "attendance_record", str(record.id), {"class_id": str(session.class_id), "session_id": str(session.id), "student_id": str(user.id), "distance_meters": round(distance)})
-            db.commit()
-            raise ApiError(403, "ATTENDANCE_OUT_OF_RANGE", "当前位置超出签到范围，请到教室后重试")
     record.status = "PRESENT"
     record.checked_in_at = at
     record.source = "CODE"

@@ -4,7 +4,6 @@ import { message } from 'ant-design-vue'
 import { CheckCircleOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { useShellContext } from '../../../shellContext'
-import { currentLocation } from '../location'
 
 const { attendanceOpen, classId } = useShellContext()
 const data = ref({ active: null, recent: [] })
@@ -28,8 +27,7 @@ async function checkIn() {
   if (!data.value.active || submitting.value) return
   submitting.value = true
   try {
-    const location = await currentLocation(data.value.active.radius_meters || 200)
-    await api(`/attendance-sessions/${data.value.active.id}/check-in`, { method: 'POST', body: JSON.stringify({ code: code.value, ...location }) })
+    await api(`/attendance-sessions/${data.value.active.id}/check-in`, { method: 'POST', body: JSON.stringify({ code: code.value }) })
     code.value = ''
     await load()
     message.success('签到成功')
@@ -49,7 +47,7 @@ onBeforeUnmount(() => clearInterval(refresh))
 <template>
   <a-modal v-model:open="attendanceOpen" title="考勤" :footer="null" :width="430">
     <a-spin :spinning="loading">
-      <div v-if="data.active" class="student-attendance-active"><strong>{{data.active.title}}</strong><span>{{new Date(data.active.expires_at).toLocaleString('zh-CN', {hour12:false})}} 截止<span v-if="data.active.radius_meters"> · 签到范围 {{data.active.radius_meters}} 米</span></span>
+      <div v-if="data.active" class="student-attendance-active"><strong>{{data.active.title}}</strong><span>{{new Date(data.active.expires_at).toLocaleString('zh-CN', {hour12:false})}} 截止</span>
         <div v-if="activeRecord?.status==='PRESENT'||activeRecord?.status==='LATE'||activeRecord?.status==='LEAVE'" class="student-attendance-success"><CheckCircleOutlined/> {{statusLabels[activeRecord.status]}}</div>
         <div v-else class="student-attendance-entry"><a-input v-model:value="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入 6 位考勤码" aria-label="考勤码" @pressEnter="checkIn"/><a-button type="primary" :disabled="!/^[0-9]{6}$/.test(code)" :loading="submitting" @click="checkIn">签到</a-button></div>
       </div>
