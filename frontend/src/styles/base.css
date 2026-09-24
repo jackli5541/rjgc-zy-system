@@ -309,6 +309,11 @@ button, input, textarea { letter-spacing: 0; }
   .top-nav button.active::after{right:14px;left:14px}
 }
 
+@media (max-width: 420px) {
+  .student-header .header-left{width:100%;padding-right:0}
+  .student-header .header-right{position:static;width:100%;justify-content:flex-end;margin-top:8px}
+}
+
 .ant-upload-wrapper{display:block;margin:18px 0}
 
 .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}

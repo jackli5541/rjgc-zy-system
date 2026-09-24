@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { ApartmentOutlined, BookOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
+import { ApartmentOutlined, BookOutlined, CalendarOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { useSessionStore } from '../../../stores/session'
 
@@ -19,6 +19,7 @@ const icons = {
   reviews: FormOutlined,
   capstone: ApartmentOutlined,
   materials: FolderOpenOutlined,
+  attendance: CalendarOutlined,
   grades: TrophyOutlined,
   system: SettingOutlined
 }

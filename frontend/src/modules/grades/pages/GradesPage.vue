@@ -24,14 +24,6 @@ async function loadGradeOverview() {
 }
 onMounted(loadGradeOverview)
 watch(classId, loadGradeOverview)
-async function saveAttendance(record, value) {
-  try {
-    await api(`/classes/${classId.value}/students/${record.student_id}/attendance-score`, { method: 'PUT', body: JSON.stringify({ score: value ?? null }) })
-    await loadGradeOverview()
-  } catch (error) {
-    message.error(error.message || '考勤分保存失败')
-  }
-}
 function gradeTagColor(grade) {
   if (grade === 'A' || grade === 'B') return 'green'
   if (grade === 'C') return 'blue'
@@ -100,7 +92,7 @@ async function downloadAssignmentFiles() {
       <a-tabs v-model:activeKey="gradesTab" class="grades-tabs" :animated="{inkBar:true,tabPane:true}">
         <a-tab-pane key="overview">
           <template #tab><span><TrophyOutlined/> 成绩总览</span></template>
-          <p class="overview-hint">按导入名单顺序排列；平时成绩20%=平时作业10%+考勤10%（考勤为手动录入，直接在下面输入框里填写）；实验成绩30%；期末成绩50%来自大作业5个阶段评分。任一分项暂无数据时显示"—"。</p>
+          <p class="overview-hint">按导入名单顺序排列；平时成绩20%=平时作业10%+考勤10%。考勤从10分起算，每次缺勤扣1分、迟到扣0.5分、请假不扣分，最低0分；只统计已结束场次。实验成绩30%，期末成绩50%来自大作业阶段评分。任一分项暂无数据时显示“—”。</p>
           <a-table :data-source="overviewItems" :loading="overviewLoading" row-key="student_id" size="small" :pagination="false">
             <a-table-column title="学号" data-index="student_no" :width="130"/>
             <a-table-column title="姓名" data-index="name" :width="100"/>
@@ -111,7 +103,7 @@ async function downloadAssignmentFiles() {
                 <div class="routine-score-cell">
                   <strong>{{record.routine_score ?? '—'}}</strong>
                   <span class="routine-score-sub">作业 {{record.homework_component ?? '—'}}</span>
-                  <a-input-number class="attendance-input" size="small" :min="0" :max="10" :step="0.5" :precision="1" :value="record.attendance_component" placeholder="考勤" @change="value => saveAttendance(record, value)"/>
+                  <span class="routine-score-sub">考勤 {{record.attendance_component ?? '—'}}</span>
                 </div>
               </template>
             </a-table-column>

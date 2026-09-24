@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { ApartmentOutlined, BookOutlined, ControlOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
+import { ApartmentOutlined, BookOutlined, CalendarOutlined, ControlOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
 import { api, apiClientId } from '../api'
 import ShellHeader from '../shared/components/ShellHeader.vue'
 import AssignmentsPage from '../modules/assignments/pages/AssignmentsPage.vue'
@@ -17,6 +17,8 @@ import ReviewsPage from '../modules/assignments/pages/ReviewsPage.vue'
 import RoleMenuPage from '../modules/system/pages/RoleMenuPage.vue'
 import SystemPage from '../modules/system/pages/SystemPage.vue'
 import TeachingMaterialsPage from '../modules/materials/pages/TeachingMaterialsPage.vue'
+import AttendancePage from '../modules/attendance/pages/AttendancePage.vue'
+import StudentAttendanceModal from '../modules/attendance/components/StudentAttendanceModal.vue'
 import TeamsPage from '../modules/members/pages/TeamsPage.vue'
 import AssignmentDetailDrawer from '../modules/assignments/components/AssignmentDetailDrawer.vue'
 import AssignmentFormModal from '../modules/assignments/components/AssignmentFormModal.vue'
@@ -36,6 +38,7 @@ import { useAssignmentDrawer } from '../modules/assignments/composables/useAssig
 import { useFeedback } from '../modules/assignments/composables/useFeedback'
 import { useReviews } from '../modules/assignments/composables/useReviews'
 import { useGrades } from '../modules/grades/composables/useGrades'
+import { useAttendance } from '../modules/attendance/composables/useAttendance'
 import { useAudits } from '../modules/system/composables/useAudits'
 import { useNotifications } from '../modules/system/composables/useNotifications'
 import { useSessionStore } from '../stores/session'
@@ -72,7 +75,7 @@ const menu = computed(() => {
   const visible = items => items.filter(item => session.isMenuEnabled(item[0]))
   if (role.value === 'TEACHER') return [...visible([
     ['overview', DashboardOutlined, '总览'], ['classes', BookOutlined, '教学班'], ['teams', TeamOutlined, '小组与选题'],
-    ['assignments', FileTextOutlined, '作业管理'], ['capstone', ApartmentOutlined, '大作业管理'], ['materials', FolderOpenOutlined, '教学资料'], ['grades', TrophyOutlined, '成绩与导出'], ['system', SettingOutlined, '系统与审计']
+    ['assignments', FileTextOutlined, '作业管理'], ['capstone', ApartmentOutlined, '大作业管理'], ['materials', FolderOpenOutlined, '教学资料'], ['attendance', CalendarOutlined, '考勤管理'], ['grades', TrophyOutlined, '成绩与导出'], ['system', SettingOutlined, '系统与审计']
   ]), ['menu-permissions', ControlOutlined, '角色菜单']]
   if (session.teamGate) return [['teams', TeamOutlined, '加入小组']]
   return visible([['overview', DashboardOutlined, '总览'], ['teams', TeamOutlined, '我的小组'], ['assignments', FileTextOutlined, '我的作业'], ['reviews', FormOutlined, '作品互评'], ['capstone', ApartmentOutlined, '大作业'], ['grades', TrophyOutlined, '成绩与反馈'], ['materials', FolderOpenOutlined, '教学资料']])
@@ -100,6 +103,7 @@ Object.assign(
   useReviews(ctx),
   useFeedback(ctx),
   useGrades(ctx),
+  useAttendance(ctx),
   useDashboard(ctx),
 )
 
@@ -118,6 +122,7 @@ const viewLoaders = {
   reviews: (...args) => ctx.loadReviewsView(...args),
   'review-detail': (...args) => ctx.loadReviewDetailView(...args),
   grades: (...args) => ctx.loadGradesView(...args),
+  attendance: (...args) => ctx.loadAttendanceView(...args),
   system: (...args) => ctx.loadAuditsView(...args),
   'grade-detail': async () => {
     if (role.value !== 'TEACHER') { await router.replace('/grades'); return }
@@ -179,6 +184,7 @@ function currentViewUses(scopes) {
     'review-detail': ['reviews', 'submissions'],
     capstone: [],
     grades: ['grades'],
+    attendance: ['attendance'],
     materials: [],
     system: ['audit']
   }
@@ -310,6 +316,7 @@ const { selectedAssignment, selectedCampaign } = ctx
       <CapstonePage v-else-if="view==='capstone'&&role==='TEACHER'" />
       <StudentCapstonePage v-else-if="view==='capstone'&&role==='STUDENT'" />
       <GradesPage v-else-if="view==='grades'" />
+      <AttendancePage v-else-if="view==='attendance'&&role==='TEACHER'" />
       <TeachingMaterialsPage v-else-if="view==='materials'" />
       <SystemPage v-else-if="view==='system'&&role==='TEACHER'" />
       <RoleMenuPage v-else-if="view==='menu-permissions'&&role==='TEACHER'" />
@@ -319,6 +326,7 @@ const { selectedAssignment, selectedCampaign } = ctx
 
     <AssignmentReviewDrawer />
     <SystemModals />
+    <StudentAttendanceModal v-if="role==='STUDENT'" />
     <MemberModals />
     <TeamDrawer />
     <AssignmentFormModal />

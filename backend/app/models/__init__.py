@@ -10,11 +10,12 @@ from app.models.assignments import Assignment, FileObject, FileObjectAsset, Mark
 from app.models.reviews import PeerReview, ReviewAssignment, ReviewCampaign
 from app.models.grades import Grade, GradeCoefficient, GradeRevision
 from app.models.capstone import CAPSTONE_STAGES, CapstoneAsset, CapstoneConfig, CapstoneDocument, CapstoneDocumentTemplate, CapstoneModuleAssignment, CapstoneStageGrade, CapstoneUnlock
-from app.models.attendance import AttendanceScoreManual
+from app.models.attendance import AttendanceRecord, AttendanceSession
 
 __all__ = [
     "Assignment",
-    "AttendanceScoreManual",
+    "AttendanceRecord",
+    "AttendanceSession",
     "AuditLog",
     "BackgroundJob",
     "CAPSTONE_STAGES",
