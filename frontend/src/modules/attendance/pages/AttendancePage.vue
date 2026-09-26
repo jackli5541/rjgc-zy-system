@@ -6,7 +6,7 @@ import { api } from '../../../api'
 import { useShellContext } from '../../../shellContext'
 
 const { classId, session, attendanceSessions, selectedAttendance, activeAttendance, loadAttendanceView, selectAttendance } = useShellContext()
-const form = reactive({ title: '', duration_minutes: 15 })
+const form = reactive({ title: '', duration_minutes: 15, start_mode: 'NOW', started_at: '' })
 const creating = ref(false)
 const nowMs = ref(Date.now())
 const projecting = ref(false)
@@ -14,6 +14,8 @@ const correctionOpen = ref(false)
 const correction = reactive({ student_id: '', name: '', status: 'PRESENT', note: '' })
 const codeSeconds = computed(() => selectedAttendance.value?.code_expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.code_expires_at) - nowMs.value) / 1000)) : 0)
 const sessionSeconds = computed(() => selectedAttendance.value?.expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.expires_at) - nowMs.value) / 1000)) : 0)
+const checkedInStudents = computed(() => (selectedAttendance.value?.records || []).filter(record => ['PRESENT', 'LATE'].includes(record.status)))
+const avatarText = name => (name || '?').trim().slice(0, 1)
 const statusLabels = { PENDING: '未签到', PRESENT: '出勤', LATE: '迟到', ABSENT: '缺勤', LEAVE: '请假' }
 const correctionOptions = Object.entries(statusLabels).filter(([value]) => value !== 'PENDING').map(([value, label]) => ({ value, label }))
 const dateTime = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
@@ -26,12 +28,14 @@ async function reload() {
 
 async function create() {
   if (creating.value) return
+  if (form.start_mode === 'SCHEDULED' && (!form.started_at || new Date(form.started_at) <= new Date())) return message.warning('请选择晚于当前时间的开始时间')
   creating.value = true
   try {
-    const created = await api(`/classes/${classId.value}/attendance-sessions`, { method: 'POST', body: JSON.stringify(form) })
+    const payload = { title: form.title, duration_minutes: form.duration_minutes, started_at: form.start_mode === 'SCHEDULED' ? new Date(form.started_at).toISOString() : null }
+    const created = await api(`/classes/${classId.value}/attendance-sessions`, { method: 'POST', body: JSON.stringify(payload) })
     await reload()
     await selectAttendance(created.id)
-    message.success('考勤已开始')
+    message.success(created.status === 'SCHEDULED' ? '考勤已预约' : '考勤已开始')
   } catch (error) { message.error(error.message) }
   finally { creating.value = false }
 }
@@ -89,9 +93,10 @@ onMounted(() => {
     try {
       const latest = await api(`/attendance-sessions/${activeAttendance.value.id}`)
       const index = attendanceSessions.value.findIndex(item => item.id === latest.id)
+      const previousStatus = index >= 0 ? attendanceSessions.value[index].status : null
       if (index >= 0) attendanceSessions.value[index] = latest
       if (selectedAttendance.value?.id === latest.id) selectedAttendance.value = latest
-      if (latest.status === 'ENDED') await reload()
+      if (latest.status !== previousStatus) await reload()
     } catch (_) {}
   }, 5000)
   window.addEventListener('keydown', escape)
@@ -104,11 +109,13 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
   <div class="page-title attendance-heading"><div><h1>考勤管理</h1><p>{{session.context?.current_class?.semester}} · {{session.context?.current_class?.name}}</p></div><a-button @click="exportClass"><DownloadOutlined/> 导出本学期 XLSX</a-button></div>
 
   <section class="attendance-start">
-    <div class="attendance-section-title"><h2>发起考勤</h2><span v-if="activeAttendance">本班已有进行中的考勤</span></div>
+    <div class="attendance-section-title"><h2>发起考勤</h2><span v-if="activeAttendance">本班已有进行中或待开始的考勤</span></div>
     <div class="attendance-start-fields">
       <a-input v-model:value="form.title" aria-label="考勤标题" maxlength="100" placeholder="考勤标题" :disabled="!!activeAttendance"/>
+      <label>开始时间 <a-radio-group v-model:value="form.start_mode" :disabled="!!activeAttendance" button-style="solid"><a-radio-button value="NOW">立即</a-radio-button><a-radio-button value="SCHEDULED">预约</a-radio-button></a-radio-group></label>
+      <a-input v-if="form.start_mode==='SCHEDULED'" v-model:value="form.started_at" type="datetime-local" aria-label="预约开始时间" :disabled="!!activeAttendance"/>
       <label>持续时间 <a-input-number v-model:value="form.duration_minutes" :min="1" :max="120" :disabled="!!activeAttendance"/> 分钟</label>
-      <a-button type="primary" :loading="creating" :disabled="!!activeAttendance || !form.title.trim()" @click="create"><PlayCircleOutlined/> 开始</a-button>
+      <a-button type="primary" :loading="creating" :disabled="!!activeAttendance || !form.title.trim() || (form.start_mode==='SCHEDULED' && !form.started_at)" @click="create"><PlayCircleOutlined/> {{form.start_mode==='SCHEDULED'?'预约':'开始'}}</a-button>
     </div>
   </section>
 
@@ -117,10 +124,12 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
     <div class="attendance-live-actions"><a-button @click="projecting=true"><ExpandOutlined/> 投屏展示</a-button><a-button danger @click="end"><StopOutlined/> 结束考勤</a-button></div>
   </section>
 
+  <section v-if="selectedAttendance?.status==='SCHEDULED'" class="attendance-live attendance-scheduled"><div><span class="attendance-live-label">待开始 · {{selectedAttendance.title}}</span><div class="attendance-scheduled-time">{{dateTime(selectedAttendance.started_at)}}</div><span class="attendance-countdown">开始后持续 {{Math.round((Date.parse(selectedAttendance.expires_at) - Date.parse(selectedAttendance.started_at)) / 60000)}} 分钟</span></div><a-button danger @click="remove(selectedAttendance)"><DeleteOutlined/> 取消预约</a-button></section>
+
   <section class="attendance-history"><div class="attendance-section-title"><h2>考勤记录</h2><span>{{attendanceSessions.length}} 次</span></div>
     <a-empty v-if="!attendanceSessions.length" description="暂无考勤记录"/>
     <div v-else class="attendance-session-list">
-      <div v-for="item in attendanceSessions" :key="item.id" class="attendance-session-item" :class="{selected:selectedAttendance?.id===item.id}"><button type="button" class="attendance-session-row" @click="selectAttendance(item.id)"><span><strong>{{item.title}}</strong><small>{{dateTime(item.started_at)}}</small></span><a-tag :color="item.status==='ACTIVE'?'processing':'default'">{{item.status==='ACTIVE'?'进行中':'已结束'}}</a-tag><span class="attendance-session-stats"><span>已签到 {{item.present + item.late}} / {{item.total}}</span><span>迟到 {{item.late}}</span><span>缺勤 {{item.absent}}</span><span>请假 {{item.leave}}</span><span v-if="item.status==='ACTIVE'">待签到 {{item.pending}}</span></span></button><a-button type="text" danger class="attendance-session-delete" :aria-label="`删除考勤记录 ${item.title}`" :title="`删除考勤记录 ${item.title}`" @click="remove(item)"><DeleteOutlined/></a-button></div>
+      <div v-for="item in attendanceSessions" :key="item.id" class="attendance-session-item" :class="{selected:selectedAttendance?.id===item.id}"><button type="button" class="attendance-session-row" @click="selectAttendance(item.id)"><span><strong>{{item.title}}</strong><small>开始：{{dateTime(item.started_at)}}</small></span><a-tag :color="item.status==='ACTIVE'?'processing':item.status==='SCHEDULED'?'warning':'default'">{{item.status==='ACTIVE'?'进行中':item.status==='SCHEDULED'?'待开始':'已结束'}}</a-tag><span class="attendance-session-stats"><span>已签到 {{item.present + item.late}} / {{item.total}}</span><span>迟到 {{item.late}}</span><span>缺勤 {{item.absent}}</span><span>请假 {{item.leave}}</span><span v-if="item.status==='ACTIVE'">待签到 {{item.pending}}</span></span></button><a-button type="text" danger class="attendance-session-delete" :aria-label="`删除考勤记录 ${item.title}`" :title="`删除考勤记录 ${item.title}`" @click="remove(item)"><DeleteOutlined/></a-button></div>
     </div>
   </section>
 
@@ -151,5 +160,15 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
     <strong>{{selectedAttendance.code || '------'}}</strong>
     <div class="attendance-projection-time">{{codeSeconds}} 秒后更新</div>
     <div class="attendance-projection-foot"><span><CheckCircleOutlined/> 已签到 {{selectedAttendance.present + selectedAttendance.late}} / {{selectedAttendance.total}}</span><span>剩余 {{Math.ceil(sessionSeconds / 60)}} 分钟</span></div>
+    <div class="attendance-projection-attendees">
+      <div class="attendance-projection-attendees-title">已签到同学</div>
+      <div v-if="checkedInStudents.length" class="attendance-projection-attendees-list">
+        <div v-for="record in checkedInStudents" :key="record.student_id" class="attendance-projection-attendee" :class="{late:record.status==='LATE'}" :title="`${record.student_name}${record.status==='LATE'?' · 迟到':''}`">
+          <span class="attendance-projection-avatar">{{avatarText(record.student_name)}}</span>
+          <span class="attendance-projection-name">{{record.student_name}}</span>
+        </div>
+      </div>
+      <div v-else class="attendance-projection-attendees-empty">等待同学签到</div>
+    </div>
   </div>
 </template>

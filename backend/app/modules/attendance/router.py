@@ -64,19 +64,25 @@ def create_session(cid: UUID, data: AttendanceSessionIn, user: CsrfUser, db: Db)
     at = now()
     close_expired(db, cid, at)
     if db.scalar(select(AttendanceSession.id).where(AttendanceSession.class_id == cid, AttendanceSession.status == "ACTIVE")):
-        raise ApiError(409, "ATTENDANCE_ACTIVE", "当前教学班已有进行中的考勤")
+        raise ApiError(409, "ATTENDANCE_ACTIVE", "当前教学班已有进行中或待开始的考勤")
     title = data.title.strip()
     if not title: raise ApiError(422, "TITLE_REQUIRED", "请填写考勤标题")
+    if data.started_at is not None and data.started_at.utcoffset() is None:
+        raise ApiError(422, "ATTENDANCE_TIMEZONE_REQUIRED", "开始时间必须包含时区")
+    starts_at = aware(data.started_at) if data.started_at else at
+    if starts_at < at - timedelta(minutes=1):
+        raise ApiError(422, "ATTENDANCE_START_PAST", "开始时间不能早于当前时间")
+    starts_at = max(starts_at, at)
     people = db.execute(
         select(ClassMember, User).join(User, User.id == ClassMember.user_id)
         .where(ClassMember.class_id == cid, ClassMember.status == "ACTIVE", ClassMember.role == "STUDENT")
     ).all()
     if not people: raise ApiError(409, "ROSTER_EMPTY", "当前教学班没有学生")
-    session = AttendanceSession(class_id=cid, title=title, code_secret=secrets.token_bytes(32), started_at=at, expires_at=at + timedelta(minutes=data.duration_minutes), created_by=user.id)
+    session = AttendanceSession(class_id=cid, title=title, code_secret=secrets.token_bytes(32), started_at=starts_at, expires_at=starts_at + timedelta(minutes=data.duration_minutes), created_by=user.id)
     db.add(session); db.flush()
     records = [AttendanceRecord(session_id=session.id, student_user_id=person.id, student_no=person.login_name, student_name=person.display_name) for _, person in people]
     db.add_all(records)
-    audit(db, user, "ATTENDANCE_STARTED", "attendance_session", str(session.id), {"class_id": str(cid), "title": title})
+    audit(db, user, "ATTENDANCE_STARTED", "attendance_session", str(session.id), {"class_id": str(cid), "title": title, "started_at": starts_at.isoformat()})
     db.commit()
     return session_json(session, records, at, include_code=True)
 
@@ -163,6 +169,8 @@ def check_in(sid: UUID, data: AttendanceCheckIn, user: CsrfUser, db: Db):
     if session.status != "ACTIVE" or aware(session.expires_at) <= at:
         if close_expired(db, session.class_id, at): db.commit()
         raise ApiError(409, "ATTENDANCE_ENDED", "本次考勤已结束")
+    if aware(session.started_at) > at:
+        raise ApiError(409, "ATTENDANCE_NOT_STARTED", "本次考勤尚未开始")
     record = db.scalar(select(AttendanceRecord).where(AttendanceRecord.session_id == sid, AttendanceRecord.student_user_id == user.id).with_for_update())
     if not record: raise ApiError(403, "NOT_IN_ATTENDANCE_ROSTER", "你不在本次考勤名单")
     if record.status == "ABSENT" and record.source is None:

@@ -38,7 +38,12 @@ def code_valid(session: AttendanceSession, code: str, at: datetime) -> bool:
 
 
 def effective_status(session: AttendanceSession, at: datetime) -> str:
-    return "ENDED" if session.status == "ACTIVE" and aware(session.expires_at) <= at else session.status
+    if session.status == "ACTIVE":
+        if aware(session.expires_at) <= at:
+            return "ENDED"
+        if aware(session.started_at) > at:
+            return "SCHEDULED"
+    return session.status
 
 
 def finish_session(db: Session, session: AttendanceSession, at: datetime, user=None, automatic: bool = False) -> None:

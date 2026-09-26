@@ -39,6 +39,41 @@ def start(teacher, headers, class_id, title):
     return response.json()
 
 
+def test_scheduled_attendance_starts_at_selected_time():
+    teacher, teacher_headers, student, student_headers, course, _ = setup_class()
+    path = f"/api/v1/classes/{course['id']}/attendance-sessions"
+    planned = now() + timedelta(minutes=5)
+    response = teacher.post(path, headers=teacher_headers, json={"title": "预约考勤", "duration_minutes": 15, "started_at": planned.isoformat()})
+    assert response.status_code == 201, response.text
+    session = response.json()
+    assert session["status"] == "SCHEDULED"
+    assert "code" not in session
+    assert datetime.fromisoformat(session["started_at"]) == planned
+    assert datetime.fromisoformat(session["expires_at"]) == planned + timedelta(minutes=15)
+    assert teacher.get(f"/api/v1/attendance-sessions/{session['id']}/code").json().get("code") is None
+    assert student.get(f"/api/v1/classes/{course['id']}/attendance/current").json()["active"] is None
+    assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json={"code": "000000"}).status_code == 409
+    assert teacher.post(path, headers=teacher_headers, json={"title": "冲突", "duration_minutes": 15}).status_code == 409
+
+    with SessionLocal() as db:
+        item = db.get(AttendanceSession, UUID(session["id"]))
+        item.started_at = now() - timedelta(seconds=1)
+        db.commit()
+    active = teacher.get(f"/api/v1/attendance-sessions/{session['id']}/code").json()
+    assert active["status"] == "ACTIVE" and "code" in active
+    assert student.get(f"/api/v1/classes/{course['id']}/attendance/current").json()["active"]["id"] == session["id"]
+    assert student.post(f"/api/v1/attendance-sessions/{session['id']}/check-in", headers=student_headers, json={"code": active["code"]}).status_code == 200
+
+
+def test_scheduled_attendance_rejects_invalid_start_time():
+    teacher, headers, _, _, course, _ = setup_class()
+    path = f"/api/v1/classes/{course['id']}/attendance-sessions"
+    for started_at in ((now() + timedelta(minutes=5)).replace(tzinfo=None).isoformat(), (now() - timedelta(minutes=5)).isoformat()):
+        response = teacher.post(path, headers=headers, json={"title": "无效时间", "started_at": started_at})
+        assert response.status_code == 422
+    assert teacher.get(path).json()["items"] == []
+
+
 def test_attendance_check_in_correction_export_and_deduction():
     teacher, teacher_headers, student, student_headers, course, member = setup_class()
     class_id = course["id"]
