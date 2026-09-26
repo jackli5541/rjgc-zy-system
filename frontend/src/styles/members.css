@@ -35,6 +35,20 @@
 .teacher-team-actions{flex-wrap:wrap}
 
 .class-list-panel { margin-bottom: 20px; }
+.class-mobile-list{display:none}
+@media(max-width:760px){
+  .class-list-panel.has-classes{display:none}
+  .class-mobile-list{display:grid;gap:10px}
+  .class-mobile-item{padding:16px;border:1px solid #e4ebf1;border-radius:7px;background:#fff}
+  .class-mobile-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+  .class-mobile-heading small{color:#718096}
+  .class-mobile-heading h2{margin:3px 0 0;color:#24374b;font-size:17px;overflow-wrap:anywhere}
+  .class-mobile-heading .ant-tag{flex-shrink:0;margin:0}
+  .class-mobile-stats{display:flex;gap:20px;margin:14px 0;color:#536579;font-size:13px}
+  .class-mobile-actions{display:flex;gap:8px}
+  .class-mobile-actions>.ant-btn:first-child{flex:1}
+  .class-mobile-actions .ant-btn{min-height:44px}
+}
 
 .class-member-caption { margin-left: 10px; color: #8491a0; font-size: 12px; }
 
@@ -295,3 +309,16 @@
 .topic-guidance-tooltip{max-width:380px}
 
 .topic-guidance-tooltip .ant-tooltip-inner{line-height:1.65;white-space:normal}
+
+@media(max-width:760px) {
+  .team-grid{grid-template-columns:minmax(0,1fr);gap:12px}
+  .team-grid>.team-card{min-width:0;width:100%}
+  .team-card-meta{flex-wrap:wrap;gap:6px 16px}
+  .team-card .ant-space{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px!important;width:100%}
+  .team-card .ant-space .ant-space-item,.team-card .ant-space .ant-btn{width:100%}
+  .team-card-invitation{flex-wrap:wrap}
+  .team-card-invitation>.ant-select{flex-basis:100%}
+  .team-card-invitation>.ant-btn{width:100%}
+  .request-row{align-items:flex-start;flex-wrap:wrap}
+  .request-row>.ant-space{width:100%;justify-content:flex-end}
+}

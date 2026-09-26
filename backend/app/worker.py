@@ -13,6 +13,7 @@ from app import storage
 from app.models import Assignment, AuditLog, BackgroundJob, ClassMember, FileObject, FileObjectAsset, ImportBatch, LoginSession, MarkdownAsset, Notification, RealtimeEvent, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocumentAsset, SubmissionVersion, TeachingClass, Team, TeamMember, User
 from app.realtime import publish_event
 from app.settings import settings
+from app.modules.attendance.service import process_due_attendance
 
 
 def fail_preview(job_id: UUID, file_id: UUID | None, reason: str) -> None:
@@ -228,6 +229,7 @@ def run_once() -> None:
         db.execute(delete(RealtimeEvent).where(RealtimeEvent.created_at < current - timedelta(days=1)))
         process_auto_review(db, current)
         process_due_campaign(db, current)
+        process_due_attendance(db, current)
         cleanup_markdown_assets(db, current)
         cleanup_archive_exports(db, current)
         # Old immediate archive jobs used SQL Server's local CURRENT_TIMESTAMP,

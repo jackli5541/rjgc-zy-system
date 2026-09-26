@@ -32,7 +32,8 @@ const { assignmentAttachments, assignmentDetailTab, assignmentDrawerAnimating, a
                </footer>
              </div>
            </template>
-           <a-tabs v-else :active-key="assignmentDetailTab" :animated="{inkBar:true,tabPane:true}" class="assignment-detail-tabs" @change="changeAssignmentDetailTab">
+           <template v-else><a-select class="assignment-mobile-view" :value="assignmentDetailTab" :options="[{value:'details',label:'作业详情'},{value:'submission',label:'提交情况'}]" aria-label="选择作业视图" @change="changeAssignmentDetailTab"/>
+           <a-tabs :active-key="assignmentDetailTab" :animated="{inkBar:true,tabPane:true}" class="assignment-detail-tabs" @change="changeAssignmentDetailTab">
             <a-tab-pane key="details" :tab="role==='TEACHER'?'详情':'作业详情'">
               <section class="assignment-pane">
                 <div class="assignment-pane-heading"><h2>作业说明</h2></div>
@@ -71,7 +72,7 @@ const { assignmentAttachments, assignmentDetailTab, assignmentDrawerAnimating, a
               </section>
               </template>
             </a-tab-pane>
-          </a-tabs>
+          </a-tabs></template>
         </section>
         </div>
         </Transition>

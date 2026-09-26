@@ -13,7 +13,7 @@ export const useSessionStore = defineStore('session', {
     landingPath: state => {
       if (state.context?.team_gate_required) return '/teams'
       const order = state.user?.role === 'TEACHER'
-        ? ['overview', 'classes', 'teams', 'assignments', 'capstone', 'materials', 'grades', 'system']
+        ? ['overview', 'classes', 'teams', 'assignments', 'capstone', 'materials', 'attendance', 'grades', 'system']
         : ['overview', 'teams', 'assignments', 'reviews', 'capstone', 'grades', 'materials']
       const first = order.find(key => state.menuPermissions === null || state.menuPermissions.includes(key))
       return first ? `/${first}` : state.user?.role === 'TEACHER' ? '/menu-permissions' : '/login'

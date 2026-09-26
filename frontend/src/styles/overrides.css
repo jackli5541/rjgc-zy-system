@@ -22,4 +22,10 @@ html{scrollbar-gutter:stable}
   .page-surface{min-height:calc(100vh - 220px)}
   .page-progress{right:var(--page-gutter);left:var(--page-gutter)}
   .page-surface .ant-table-tbody>tr>td{height:52px}
+  .page-title>.ant-btn,.page-surface .ant-btn:not(.ant-btn-circle),.ant-modal .ant-btn:not(.ant-btn-circle){min-height:44px}
+  .page-surface .ant-btn-circle,.app-header .ant-btn-circle{width:44px;height:44px}
+  .page-surface .ant-select-selector,.ant-modal .ant-select-selector{min-height:44px!important;align-items:center}
+  .page-surface input,.page-surface textarea,.ant-modal input,.ant-modal textarea{font-size:16px}
+  .ant-modal{top:12px;max-width:calc(100vw - 24px)}
+  .ant-modal .ant-modal-body{max-height:calc(100dvh - 170px)}
 }

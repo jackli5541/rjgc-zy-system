@@ -5,10 +5,11 @@ from sqlalchemy import and_, func, or_, select
 from uuid import UUID
 
 from app.grading import final_score
-from app.models import Assignment, AttendanceScoreManual, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ReviewCampaign, Submission, SubmissionAssessment, SubmissionVersion, Team, TeamMember, User, VersionFile
+from app.models import Assignment, AttendanceRecord, AttendanceSession, ClassMember, FileObject, Grade, GradeCoefficient, GradeRevision, ReviewCampaign, Submission, SubmissionAssessment, SubmissionVersion, Team, TeamMember, User, VersionFile
 from app.core.audit import audit, notify
 from app.core.deps import CsrfUser, CurrentUser, Db, require_class, require_team, require_writable_class, teacher, user_class
 from app.core.errors import ApiError
+from app.core.utils import now
 from app.modules.assignments.service import displayed_submission_grade_result, file_json, latest_personal_submission, missing_submission_grade_result, submission_grade_result
 from app.modules.grades.schemas import CoefficientIn, GradePublishIn
 from app.modules.grades.service import capstone_component_averages, composite_grade_letter, kind_component_averages, require_grade_assignment
@@ -101,12 +102,22 @@ def grade_overview(cid: UUID, user: CurrentUser, db: Db):
     homework_avg = kind_component_averages(db, cid, "ASSIGNMENT", student_ids)
     lab_avg = kind_component_averages(db, cid, "EXPERIMENT", student_ids)
     capstone_avg = capstone_component_averages(db, cid, student_ids)
-    attendance_by_student = {item.student_user_id: item.score for item in db.scalars(select(AttendanceScoreManual).where(AttendanceScoreManual.class_id == cid)).all()}
+    attendance_deductions = {}
+    attendance_seen = set()
+    if student_ids:
+        attendance_rows = db.execute(
+            select(AttendanceRecord.student_user_id, AttendanceRecord.status)
+            .join(AttendanceSession, AttendanceSession.id == AttendanceRecord.session_id)
+            .where(AttendanceSession.class_id == cid, or_(AttendanceSession.status == "ENDED", AttendanceSession.expires_at <= now()), AttendanceRecord.student_user_id.in_(student_ids))
+        ).all()
+        for student_id, status in attendance_rows:
+            attendance_seen.add(student_id)
+            attendance_deductions[student_id] = attendance_deductions.get(student_id, 0) + {"ABSENT": 1, "PENDING": 1, "LATE": 0.5}.get(status, 0)
 
     items = []
     for _, student, team_name in rows:
         homework_component = round(homework_avg[student.id] / 100 * 10, 1) if student.id in homework_avg else None
-        attendance_component = float(attendance_by_student[student.id]) if student.id in attendance_by_student else None
+        attendance_component = max(0, 10 - attendance_deductions[student.id]) if student.id in attendance_seen else None
         routine_score = round(homework_component + attendance_component, 1) if homework_component is not None and attendance_component is not None else None
         lab_score = round(lab_avg[student.id] / 100 * 30, 1) if student.id in lab_avg else None
         capstone_score = round(capstone_avg[student.id] / 100 * 50, 1) if student.id in capstone_avg else None

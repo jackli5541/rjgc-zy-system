@@ -18,6 +18,7 @@ MENU_CATALOG = [
     {"key": "reviews", "labels": {"STUDENT": "作品互评"}, "roles": ["STUDENT"]},
     {"key": "capstone", "labels": {"TEACHER": "大作业管理", "STUDENT": "大作业"}, "roles": ["TEACHER", "STUDENT"]},
     {"key": "materials", "labels": {"TEACHER": "教学资料", "STUDENT": "教学资料"}, "roles": ["TEACHER", "STUDENT"]},
+    {"key": "attendance", "labels": {"TEACHER": "考勤管理"}, "roles": ["TEACHER"]},
     {"key": "grades", "labels": {"TEACHER": "成绩与导出", "STUDENT": "成绩与反馈"}, "roles": ["TEACHER", "STUDENT"]},
     {"key": "system", "labels": {"TEACHER": "系统与审计"}, "roles": ["TEACHER"]},
 ]

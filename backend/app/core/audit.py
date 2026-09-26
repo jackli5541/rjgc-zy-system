@@ -14,6 +14,7 @@ def realtime_scopes(action: str) -> list[str]:
     if action.startswith("SUBMISSION_"): return ["submissions", "assignments", "dashboard", "grades", "audit"]
     if action.startswith(("PEER_", "REVIEW_")): return ["reviews", "submissions", "grades", "dashboard", "audit"]
     if action.startswith(("TEACHER_", "GRADE_", "GRADES_")): return ["submissions", "grades", "dashboard", "audit"]
+    if action.startswith("ATTENDANCE_"): return ["attendance", "grades", "audit"]
     return ["audit"]
 
 
