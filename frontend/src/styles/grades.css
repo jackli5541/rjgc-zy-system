@@ -88,6 +88,8 @@
 
 .export-toolbar{display:flex;justify-content:flex-end;padding:18px 24px}
 
+.export-toolbar>.ant-select{width:min(360px,45%)}
+
 .grades-tabs-card .data-export-list{margin-top:2px}
 
 @media(max-width:1000px) {
