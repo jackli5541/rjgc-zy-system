@@ -52,7 +52,7 @@ onBeforeUnmount(() => clearInterval(refresh))
         <div v-else class="student-attendance-entry"><a-input v-model:value="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入 6 位考勤码" aria-label="考勤码" @pressEnter="checkIn"/><a-button type="primary" :disabled="!/^[0-9]{6}$/.test(code)" :loading="submitting" @click="checkIn">签到</a-button></div>
       </div>
       <a-empty v-else description="当前没有进行中的考勤"/>
-      <div v-if="data.recent.length" class="student-attendance-recent"><h3>最近记录</h3><div v-for="item in data.recent.slice(0,5)" :key="item.id"><span>{{item.title}}</span><a-tag :color="displayStatus(item)==='PRESENT'?'green':displayStatus(item)==='LATE'?'orange':displayStatus(item)==='LEAVE'?'blue':'default'">{{statusLabels[displayStatus(item)]}}</a-tag></div></div>
+      <div v-if="data.recent.length" class="student-attendance-recent"><h3>最近记录</h3><div v-for="item in data.recent.slice(0,5)" :key="item.id"><span>{{item.title}}<small v-if="item.status==='SCHEDULED'">{{new Date(item.started_at).toLocaleString('zh-CN', {hour12:false})}} 开始</small></span><a-tag :color="item.status==='SCHEDULED'?'orange':displayStatus(item)==='PRESENT'?'green':displayStatus(item)==='LATE'?'orange':displayStatus(item)==='LEAVE'?'blue':'default'">{{item.status==='SCHEDULED'?'待开始':statusLabels[displayStatus(item)]}}</a-tag></div></div>
     </a-spin>
   </a-modal>
 </template>

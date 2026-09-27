@@ -5,7 +5,7 @@ export function useAttendance(ctx) {
   const attendanceSessions = ref([])
   const selectedAttendance = ref(null)
   const attendanceOpen = ref(false)
-  const activeAttendance = computed(() => attendanceSessions.value.find(item => item.status === 'ACTIVE'))
+  const activeAttendance = computed(() => attendanceSessions.value.find(item => ['ACTIVE', 'SCHEDULED'].includes(item.status)))
 
   async function loadAttendanceView(isCurrent = () => true) {
     if (ctx.role.value !== 'TEACHER') return
