@@ -16,5 +16,5 @@ class AttendanceCheckIn(BaseModel):
 
 
 class AttendanceCorrection(BaseModel):
-    status: str = Field(pattern=r"^(PRESENT|LATE|ABSENT|LEAVE)$")
+    status: str | None = Field(default=None, pattern=r"^(PRESENT|LATE|ABSENT|LEAVE)$")
     note: str | None = Field(default=None, max_length=500)

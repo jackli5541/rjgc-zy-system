@@ -4,23 +4,24 @@ import { message, Modal } from 'ant-design-vue'
 import { CheckCircleOutlined, ClockCircleOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { useShellContext } from '../../../shellContext'
+import AttendanceRecordField from '../components/AttendanceRecordField.vue'
 
 const { classId, session, attendanceSessions, selectedAttendance, activeAttendance, loadAttendanceView, selectAttendance } = useShellContext()
 const form = reactive({ title: '', duration_minutes: 15, start_mode: 'NOW', started_at: '' })
 const creating = ref(false)
 const nowMs = ref(Date.now())
 const projecting = ref(false)
-const correctionOpen = ref(false)
-const correction = reactive({ student_id: '', name: '', status: 'PRESENT', note: '' })
+const statusSaving = reactive({})
+const attendanceStatusColumns = [{ value: 'PRESENT', label: '出勤' }, { value: 'LATE', label: '迟到' }, { value: 'LEAVE', label: '请假' }]
+function setStatusSaving(key, saving) { statusSaving[key] = saving }
 const codeSeconds = computed(() => selectedAttendance.value?.code_expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.code_expires_at) - nowMs.value) / 1000)) : 0)
 const sessionSeconds = computed(() => selectedAttendance.value?.expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.expires_at) - nowMs.value) / 1000)) : 0)
 const checkedInStudents = computed(() => (selectedAttendance.value?.records || []).filter(record => ['PRESENT', 'LATE'].includes(record.status)))
 const avatarText = name => (name || '?').trim().slice(0, 1)
-const statusLabels = { PENDING: '未签到', PRESENT: '出勤', LATE: '迟到', ABSENT: '缺勤', LEAVE: '请假' }
-const correctionOptions = Object.entries(statusLabels).filter(([value]) => value !== 'PENDING').map(([value, label]) => ({ value, label }))
 const dateTime = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
 let tick
 let refresh
+let recordRevision = 0
 
 async function reload() {
   try { await loadAttendanceView() } catch (error) { message.error(error.message) }
@@ -63,18 +64,25 @@ function remove(item) {
   } })
 }
 
-function edit(record) {
-  Object.assign(correction, { student_id: record.student_id, name: record.student_name, status: record.status === 'PENDING' ? 'PRESENT' : record.status, note: record.note || '' })
-  correctionOpen.value = true
-}
-
-async function saveCorrection() {
-  try {
-    await api(`/attendance-sessions/${selectedAttendance.value.id}/records/${correction.student_id}`, { method: 'PUT', body: JSON.stringify({ status: correction.status, note: correction.note }) })
-    correctionOpen.value = false
-    await reload()
-    message.success('记录已更新')
-  } catch (error) { message.error(error.message) }
+function recordSaved(sessionId, updated, field) {
+  recordRevision += 1
+  const selected = selectedAttendance.value
+  if (selected?.id !== sessionId) return
+  const record = selected.records.find(item => item.student_id === updated.student_id)
+  if (!record) return
+  const before = record.status.toLowerCase()
+  const after = field === 'status' ? updated.status.toLowerCase() : before
+  if (field === 'status') Object.assign(record, { status: updated.status, checked_in_at: updated.checked_in_at })
+  else record.note = updated.note
+  if (before !== after) {
+    selected[before] -= 1
+    selected[after] += 1
+    const summary = attendanceSessions.value.find(item => item.id === sessionId)
+    if (summary && summary !== selected) {
+      summary[before] -= 1
+      summary[after] += 1
+    }
+  }
 }
 
 function exportClass() { window.location.href = `/api/v1/classes/${classId.value}/attendance.xlsx` }
@@ -91,7 +99,9 @@ onMounted(() => {
   refresh = setInterval(async () => {
     if (!activeAttendance.value) return
     try {
+      const revision = recordRevision
       const latest = await api(`/attendance-sessions/${activeAttendance.value.id}`)
+      if (revision !== recordRevision) return
       const index = attendanceSessions.value.findIndex(item => item.id === latest.id)
       const previousStatus = index >= 0 ? attendanceSessions.value[index].status : null
       if (index >= 0) attendanceSessions.value[index] = latest
@@ -136,23 +146,24 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
   <section v-if="selectedAttendance" class="attendance-roster"><div class="attendance-section-title"><h2>{{selectedAttendance.title}} · 学生记录</h2><span>出勤 {{selectedAttendance.present}} · 迟到 {{selectedAttendance.late}} · 请假 {{selectedAttendance.leave}} · {{selectedAttendance.status==='ACTIVE'?'未签到':'缺勤'}} {{selectedAttendance.status==='ACTIVE'?selectedAttendance.pending:selectedAttendance.absent}}</span></div>
     <a-table class="attendance-desktop-table" :data-source="selectedAttendance.records || []" row-key="student_id" size="small" :pagination="{pageSize:20}" :scroll="{x:680}">
       <a-table-column title="学号" data-index="student_no" :width="150"/><a-table-column title="姓名" data-index="student_name" :width="130"/>
-      <a-table-column title="状态" :width="110"><template #default="{record}"><a-tag :color="record.status==='PRESENT'?'green':record.status==='LATE'?'orange':record.status==='LEAVE'?'blue':'default'">{{statusLabels[record.status]}}</a-tag></template></a-table-column>
+      <a-table-column v-for="status in attendanceStatusColumns" :key="status.value" :width="76" align="center">
+        <template #title><span :class="`attendance-status-${status.value.toLowerCase()}`">{{status.label}}</span></template>
+        <template #default="{record}"><AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-${status.value}`" :record="record" :session-id="selectedAttendance.id" field="status" :status-value="status.value" :busy="statusSaving[`${selectedAttendance.id}-${record.student_id}`]" @saving="setStatusSaving" @saved="recordSaved"/></template>
+      </a-table-column>
       <a-table-column title="签到时间" :width="200"><template #default="{record}">{{dateTime(record.checked_in_at)}}</template></a-table-column>
-      <a-table-column title="备注" data-index="note"/><a-table-column title="操作" :width="90"><template #default="{record}"><a-button type="link" size="small" @click="edit(record)">更正</a-button></template></a-table-column>
+      <a-table-column title="备注" :width="260"><template #default="{record}"><AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-note`" :record="record" :session-id="selectedAttendance.id" field="note" @saved="recordSaved"/></template></a-table-column>
     </a-table>
     <div class="attendance-mobile-records">
       <article v-for="record in selectedAttendance.records || []" :key="record.student_id" class="attendance-mobile-record">
         <div><strong>{{record.student_name}}</strong><small>{{record.student_no}}</small></div>
-        <a-tag :color="record.status==='PRESENT'?'green':record.status==='LATE'?'orange':record.status==='LEAVE'?'blue':'default'">{{statusLabels[record.status]}}</a-tag>
+        <AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-status`" :record="record" :session-id="selectedAttendance.id" field="status" :busy="statusSaving[`${selectedAttendance.id}-${record.student_id}`]" @saving="setStatusSaving" @saved="recordSaved"/>
         <span>签到：{{dateTime(record.checked_in_at)}}</span>
-        <p v-if="record.note">{{record.note}}</p>
-        <a-button @click="edit(record)">更正</a-button>
+        <AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-note`" :record="record" :session-id="selectedAttendance.id" field="note" @saved="recordSaved"/>
       </article>
       <a-empty v-if="!selectedAttendance.records?.length" description="暂无学生记录"/>
     </div>
   </section>
 
-  <a-modal v-model:open="correctionOpen" :title="`更正考勤 · ${correction.name}`" ok-text="保存" @ok="saveCorrection"><div class="attendance-correction"><label>状态<a-select v-model:value="correction.status" :options="correctionOptions"/></label><label>备注<a-textarea v-model:value="correction.note" :rows="3" :maxlength="500"/></label></div></a-modal>
 
   <div v-if="projecting && selectedAttendance?.status==='ACTIVE'" class="attendance-projection" role="dialog" aria-modal="true" aria-label="考勤投屏">
     <button type="button" class="attendance-projection-close" aria-label="关闭投屏" @click="projecting=false">×</button>
