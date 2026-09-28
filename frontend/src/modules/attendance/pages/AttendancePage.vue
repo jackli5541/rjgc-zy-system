@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { CheckCircleOutlined, ClockCircleOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
+import { beijingDateTimeToIso, formatBeijingDate, formatBeijingTime } from '../../../shared/time'
 import { useShellContext } from '../../../shellContext'
 import AttendanceRecordField from '../components/AttendanceRecordField.vue'
 
@@ -18,7 +19,7 @@ const codeSeconds = computed(() => selectedAttendance.value?.code_expires_at ? M
 const sessionSeconds = computed(() => selectedAttendance.value?.expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.expires_at) - nowMs.value) / 1000)) : 0)
 const checkedInStudents = computed(() => (selectedAttendance.value?.records || []).filter(record => ['PRESENT', 'LATE'].includes(record.status)))
 const avatarText = name => (name || '?').trim().slice(0, 1)
-const dateTime = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+const dateTime = value => formatBeijingTime(value, '—')
 let tick
 let refresh
 let recordRevision = 0
@@ -29,10 +30,10 @@ async function reload() {
 
 async function create() {
   if (creating.value) return
-  if (form.start_mode === 'SCHEDULED' && (!form.started_at || new Date(form.started_at) <= new Date())) return message.warning('请选择晚于当前时间的开始时间')
+  if (form.start_mode === 'SCHEDULED' && (!form.started_at || new Date(beijingDateTimeToIso(form.started_at)) <= new Date())) return message.warning('请选择晚于当前时间的开始时间')
   creating.value = true
   try {
-    const payload = { title: form.title, duration_minutes: form.duration_minutes, started_at: form.start_mode === 'SCHEDULED' ? new Date(form.started_at).toISOString() : null }
+    const payload = { title: form.title, duration_minutes: form.duration_minutes, started_at: form.start_mode === 'SCHEDULED' ? beijingDateTimeToIso(form.started_at) : null }
     const created = await api(`/classes/${classId.value}/attendance-sessions`, { method: 'POST', body: JSON.stringify(payload) })
     await reload()
     await selectAttendance(created.id)
@@ -89,7 +90,7 @@ function exportClass() { window.location.href = `/api/v1/classes/${classId.value
 function escape(event) { if (event.key === 'Escape') projecting.value = false }
 
 onMounted(() => {
-  form.title = `${new Date().toLocaleDateString('zh-CN')} 考勤`
+  form.title = `${formatBeijingDate(new Date())} 考勤`
   tick = setInterval(async () => {
     nowMs.value = Date.now()
     if (selectedAttendance.value?.status === 'ACTIVE' && codeSeconds.value === 0) {

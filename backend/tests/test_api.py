@@ -1541,6 +1541,14 @@ def test_peer_review_requires_reviewer_submission_and_submitted_work_is_immediat
     assert updated.status_code == 200 and updated.json()["updated"] is True and updated.json()["grade"] == "A"
     owner_detail = reviewer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()["candidates"][0]
     assert owner_detail["can_review"] is True and owner_detail["can_edit"] is True
+    with SessionLocal.begin() as db:
+        db.get(Assignment, UUID(assignment["id"])).due_at = datetime.now(UTC) - timedelta(seconds=1)
+    closed_detail = reviewer.get(f"/api/v1/assignments/{assignment['id']}/peer-review").json()["candidates"][0]
+    assert closed_detail["can_review"] is False and closed_detail["can_edit"] is False
+    closed_rich_update = reviewer.post(f"/api/v1/submission-versions/{version_id}/peer-feedback/publish", headers=reviewer_headers, json={"revision": updated.json()["revision"], "grade": "B", "comment": "", "annotations": []})
+    assert closed_rich_update.status_code == 409 and closed_rich_update.json()["code"] == "PEER_REVIEW_CLOSED"
+    closed_simple_update = reviewer.post(f"/api/v1/assignments/{assignment['id']}/peer-reviews", headers=reviewer_headers, json={"reviewee_id": first_student_id, "grade": "B", "comment": ""})
+    assert closed_simple_update.status_code == 409 and closed_simple_update.json()["code"] == "PEER_REVIEW_CLOSED"
     self_review = first_student.get(f"/api/v1/submission-versions/{version_id}/peer-feedback")
     assert self_review.status_code == 422 and self_review.json()["code"] == "SELF_REVIEW_FORBIDDEN"
 

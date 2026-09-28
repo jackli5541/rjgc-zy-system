@@ -1,9 +1,10 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { DatabaseOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, TeamOutlined, TrophyOutlined, UserOutlined } from '@ant-design/icons-vue'
 import { api, exportArchive } from '../../../api'
 import { useShellContext } from '../../../shellContext'
+import { formatBeijingTime } from '../../../shared/time'
 
 const { role, classId, activeClasses, grades, gradeAssignments, selectedGradeAssignmentId, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback } = useShellContext()
 const className = computed(() => activeClasses.value.find(item => item.id === classId.value)?.name || '')
@@ -11,7 +12,7 @@ const gradesTab = ref('overview')
 const overviewItems = ref([])
 const overviewLoading = ref(false)
 async function loadGradeOverview() {
-  if (!classId.value) { overviewItems.value = []; return }
+  if (role.value !== 'TEACHER' || !classId.value) { overviewItems.value = []; return }
   overviewLoading.value = true
   try {
     const data = await api(`/classes/${classId.value}/grade-overview`)
@@ -22,8 +23,7 @@ async function loadGradeOverview() {
     overviewLoading.value = false
   }
 }
-onMounted(loadGradeOverview)
-watch(classId, loadGradeOverview)
+watch([role, classId], loadGradeOverview, { immediate: true })
 function gradeTagColor(grade) {
   if (grade === 'A' || grade === 'B') return 'green'
   if (grade === 'C') return 'blue'
@@ -126,7 +126,7 @@ async function downloadAssignmentFiles() {
           <a-empty v-else description="请先选择需要导出的个人作业"/>
           <div v-if="gradeAssignments.length" class="grade-coverage-list">
             <div class="coverage-head"><span>作业</span><span>提交</span><span>评分</span><span>待处理</span></div>
-            <button v-for="item in gradeAssignments" :key="item.id" type="button" :class="{active:selectedGradeAssignmentId===item.id}" @click="selectedGradeAssignmentId=item.id"><span><strong>{{item.title}}</strong><small>截止 {{new Date(item.due_at).toLocaleString('zh-CN',{hour12:false})}}</small></span><span>{{item.submitted}} / {{item.total}}</span><span>{{item.graded}} / {{item.total}}</span><a-tag :color="item.pending?'gold':'green'">{{item.pending ? `${item.pending} 人` : '已完成'}}</a-tag></button>
+            <button v-for="item in gradeAssignments" :key="item.id" type="button" :class="{active:selectedGradeAssignmentId===item.id}" @click="selectedGradeAssignmentId=item.id"><span><strong>{{item.title}}</strong><small>截止 {{formatBeijingTime(item.due_at)}}</small></span><span>{{item.submitted}} / {{item.total}}</span><span>{{item.graded}} / {{item.total}}</span><a-tag :color="item.pending?'gold':'green'">{{item.pending ? `${item.pending} 人` : '已完成'}}</a-tag></button>
           </div>
         </a-tab-pane>
 

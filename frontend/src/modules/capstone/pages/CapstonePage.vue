@@ -6,6 +6,7 @@ import { api } from '../../../api'
 import { renderMarkdown } from '../../../markdownPreview'
 import RichTextViewer from '../../../shared/components/RichTextViewer.vue'
 import { useShellContext } from '../../../shellContext'
+import { beijingDateTimeToIso, toBeijingDateTimeLocal } from '../../../shared/time'
 
 const { classId } = useShellContext()
 
@@ -61,20 +62,13 @@ const filteredReviewStudents = computed(() => {
   })
 })
 
-function toLocalInput(iso) {
-  if (!iso) return ''
-  const date = new Date(iso)
-  const pad = value => String(value).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-
 async function loadReviewStudents() {
   if (!classId.value) return
   reviewLoading.value = true
   try {
     const data = await api(`/capstone/classes/${classId.value}/students`)
     reviewStudents.value = data.students || []
-    reviewDueAt.value = toLocalInput(data.due_at)
+    reviewDueAt.value = toBeijingDateTimeLocal(data.due_at)
   } catch (err) { message.error(err.message || '加载学生名单失败') }
   finally { reviewLoading.value = false }
 }
@@ -116,7 +110,7 @@ async function saveGrade(stage) {
 
 async function saveDueAt() {
   try {
-    await api(`/capstone/classes/${classId.value}/config`, { method: 'PUT', body: JSON.stringify({ due_at: reviewDueAt.value ? new Date(reviewDueAt.value).toISOString() : null }) })
+    await api(`/capstone/classes/${classId.value}/config`, { method: 'PUT', body: JSON.stringify({ due_at: beijingDateTimeToIso(reviewDueAt.value) }) })
     message.success('已更新截止时间')
   } catch (err) { message.error(err.message || '设置失败') }
 }

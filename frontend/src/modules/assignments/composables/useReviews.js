@@ -43,11 +43,12 @@ export function useReviews(ctx) {
   function openPeerReviewDrawer(candidate, file = candidate?.files?.[0]) {
     if (!candidate?.files?.length || !file) return message.warning('该组员没有可预览的提交文件')
     ctx.peerReviewExpanded.value = true
-    const lockedByOther = Boolean(candidate.review && candidate.can_review === false)
+    const readonly = Boolean(candidate.review && !candidate.can_edit)
+    const lockedByOther = Boolean(readonly && !candidate.review.is_current_evaluator)
     const submission = { ...candidate, owner: lockedByOther ? candidate.review.evaluator_name : candidate.name }
     const criteriaFiles = [...(reviewTask.value?.review_criteria || []), ...(reviewTask.value?.criteria_files || [])]
       .filter((item, index, files) => files.findIndex(file => file.id === item.id) === index)
-    ctx.openAssessmentDrawer(submission, { mode: 'PEER', file, initialFeedback: lockedByOther ? candidate.review : null, readonly: lockedByOther, criteriaFiles, criteriaText: reviewTask.value?.assignment?.auto_review_criteria_text || '' })
+    ctx.openAssessmentDrawer(submission, { mode: 'PEER', file, initialFeedback: readonly ? candidate.review : null, readonly, criteriaFiles, criteriaText: reviewTask.value?.assignment?.auto_review_criteria_text || '' })
   }
 
   async function loadReviewsView(isCurrent, { background = false } = {}) {

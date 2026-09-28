@@ -27,7 +27,6 @@ const { changeReviewTarget, clearTeacherGrade, closeFilePreview, filePreview, fi
       :peer-feedbacks="filePreview.mode==='TEACHER' ? selectedSubmission?.peer_feedbacks||[] : []"
       allow-download
       :expanded="filePreview.mode==='PEER'?peerReviewExpanded:fileReviewExpanded"
-      :grade-cap="selectedSubmission?.grade_cap||''"
       @close="closeFilePreview"
       @update:expanded="updateFileReviewExpanded"
       @feedback-published="handleFeedbackPublished"

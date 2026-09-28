@@ -3,7 +3,6 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ColumnWidthOutlined, LeftOutlined, RightOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { loadMarkdownPreview } from '../../../markdownPreview'
-import PdfDocumentViewer from '../../../shared/components/PdfDocumentViewer.vue'
 import RichTextViewer from '../../../shared/components/RichTextViewer.vue'
 
 const props = defineProps({ files: { type: Array, default: () => [] } })
@@ -16,7 +15,11 @@ const binaryUrl = ref('')
 let loadSequence = 0
 
 const activeFile = computed(() => props.files[index.value] || null)
-const renderType = computed(() => activeFile.value?.render_type || (/\.pdf$/i.test(activeFile.value?.name || '') ? 'PDF' : /\.(md|html?)$/i.test(activeFile.value?.name || '') ? 'RICH_TEXT' : /\.(png|jpe?g|gif|webp)$/i.test(activeFile.value?.name || '') ? 'IMAGE' : 'DOWNLOAD_ONLY'))
+const renderType = computed(() => {
+  const type = activeFile.value?.render_type
+  if (type === 'RICH_TEXT' || type === 'IMAGE') return type
+  return /\.(md|html?)$/i.test(activeFile.value?.name || '') ? 'RICH_TEXT' : /\.(png|jpe?g|gif|webp)$/i.test(activeFile.value?.name || '') ? 'IMAGE' : 'DOWNLOAD_ONLY'
+})
 
 function releaseBinaryUrl() {
   if (binaryUrl.value?.startsWith('blob:')) URL.revokeObjectURL(binaryUrl.value)
@@ -63,18 +66,15 @@ onBeforeUnmount(() => { loadSequence += 1; releaseBinaryUrl() })
       <span>{{files.length ? `${index+1} / ${files.length}` : '0 / 0'}}</span>
       <a-tooltip title="下一个标准文件"><span><a-button shape="circle" :disabled="index>=files.length-1" @click="index+=1"><RightOutlined/></a-button></span></a-tooltip>
       <a-select v-if="files.length>1" v-model:value="index" :options="files.map((file,fileIndex)=>({value:fileIndex,label:file.name}))"/>
-      <template v-if="renderType!=='PDF'">
-        <i></i>
-        <a-tooltip title="缩小标准"><a-button shape="circle" :disabled="zoom<=.6" @click="zoom=Math.max(.6,zoom-.1)"><ZoomOutOutlined/></a-button></a-tooltip>
-        <span>{{Math.round(zoom*100)}}%</span>
-        <a-tooltip title="放大标准"><a-button shape="circle" :disabled="zoom>=2" @click="zoom=Math.min(2,zoom+.1)"><ZoomInOutlined/></a-button></a-tooltip>
-        <a-tooltip title="恢复标准大小"><a-button shape="circle" @click="zoom=1"><ColumnWidthOutlined/></a-button></a-tooltip>
-      </template>
+      <i></i>
+      <a-tooltip title="缩小标准"><a-button shape="circle" :disabled="zoom<=.6" @click="zoom=Math.max(.6,zoom-.1)"><ZoomOutOutlined/></a-button></a-tooltip>
+      <span>{{Math.round(zoom*100)}}%</span>
+      <a-tooltip title="放大标准"><a-button shape="circle" :disabled="zoom>=2" @click="zoom=Math.min(2,zoom+.1)"><ZoomInOutlined/></a-button></a-tooltip>
+      <a-tooltip title="恢复标准大小"><a-button shape="circle" @click="zoom=1"><ColumnWidthOutlined/></a-button></a-tooltip>
     </header>
     <div class="criteria-preview-stage">
       <a-spin v-if="loading" size="large" tip="正在加载互评标准"/>
       <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"/>
-      <PdfDocumentViewer v-else-if="renderType==='PDF'&&binaryUrl" :url="binaryUrl"/>
       <div v-else-if="renderType==='RICH_TEXT'&&richHtml" class="criteria-rich-scroll"><div :style="{zoom:`${zoom*100}%`}"><RichTextViewer :html="richHtml"/></div></div>
       <div v-else-if="renderType==='IMAGE'&&binaryUrl" class="criteria-image-scroll"><img :style="{width:`${zoom*100}%`}" :src="binaryUrl" :alt="activeFile?.name" @error="error='图片加载失败'"/></div>
     </div>

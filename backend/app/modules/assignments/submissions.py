@@ -98,9 +98,7 @@ def submit(aid: UUID, user: CsrfUser, db: Db, idempotency_key: Annotated[str | N
             snapshot = {"members": [{"id": str(person.id), "student_no": person.login_name, "name": person.display_name, "role": member.role} for member, person in rows]}
         submitted_at = now()
         s.current_version_no = (current.version_no + 1) if current else 1
-        was_peer_reviewed = bool(current and db.scalar(select(SubmissionAssessment.id).where(SubmissionAssessment.submission_version_id == current.id, SubmissionAssessment.kind == "PEER", SubmissionAssessment.status == "PUBLISHED").limit(1)))
-        resubmission_grade_cap = "B" if was_peer_reviewed else None
-        v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key, grade_cap=resubmission_grade_cap)
+        v = SubmissionVersion(submission_id=s.id, version_no=s.current_version_no, submitted_by=user.id, submitted_at=submitted_at, member_snapshot=snapshot, is_late=a.due_at < submitted_at, idempotency_key=idempotency_key)
         db.add(v); db.flush()
         old_versions = db.scalars(select(SubmissionVersion).where(SubmissionVersion.submission_id == s.id, SubmissionVersion.id != v.id)).all()
         for old in old_versions:

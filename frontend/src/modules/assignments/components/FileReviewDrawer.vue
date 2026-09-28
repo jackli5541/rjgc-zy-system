@@ -4,7 +4,6 @@ import { ArrowDownOutlined, ArrowUpOutlined, BookOutlined, CaretRightOutlined, C
 import { message } from 'ant-design-vue'
 import { api, exportArchive, randomUUID } from '../../../api'
 import { loadMarkdownPreview } from '../../../markdownPreview'
-import PdfDocumentViewer from '../../../shared/components/PdfDocumentViewer.vue'
 import RichTextEditor from '../../../shared/components/RichTextEditor.vue'
 import RichTextViewer from '../../../shared/components/RichTextViewer.vue'
 import { useResizableDrawer, useResizableRightPane } from '../../../useHorizontalResize'
@@ -29,7 +28,6 @@ const props = defineProps({
   peerFeedbacks: { type: Array, default: () => [] },
   allowDownload: Boolean,
   expanded: Boolean,
-  gradeCap: { type: String, default: '' }
 })
 const emit = defineEmits(['close', 'feedback-published', 'clear-feedback', 'target-change', 'external-target', 'update:expanded'])
 const index = ref(0)
@@ -111,7 +109,11 @@ const criteriaPanelStyle = computed(() => ({
   width: `${criteriaState.width}px`,
   height: criteriaState.collapsed ? 'auto' : `${criteriaState.height}px`
 }))
-const renderType = computed(() => activeFile.value?.render_type || (/\.pdf$/i.test(activeFile.value?.name || '') ? 'PDF' : /\.(md|html?)$/i.test(activeFile.value?.name || '') ? 'RICH_TEXT' : /\.(png|jpe?g|gif|webp)$/i.test(activeFile.value?.name || '') ? 'IMAGE' : 'DOWNLOAD_ONLY'))
+const renderType = computed(() => {
+  const type = activeFile.value?.render_type
+  if (type === 'RICH_TEXT' || type === 'IMAGE') return type
+  return /\.(md|html?)$/i.test(activeFile.value?.name || '') ? 'RICH_TEXT' : /\.(png|jpe?g|gif|webp)$/i.test(activeFile.value?.name || '') ? 'IMAGE' : 'DOWNLOAD_ONLY'
+})
 const activeAnnotations = computed(() => feedback.annotations.filter(item => item.file_id === activeFile.value?.id))
 const visiblePeerFeedbacks = computed(() => props.mode === 'TEACHER' ? props.peerFeedbacks : [])
 const peerFeedbackSummary = computed(() => visiblePeerFeedbacks.value.map(peer => `${peer.evaluator_name} ${peer.grade}`).join('、'))
@@ -504,7 +506,7 @@ function addCommentToMark(annotation, event) {
 
 function markTypeOptions(annotation) {
   if (annotation.comment && htmlHasText(annotation.comment)) return markTypes.filter(item => item.value === 'COMMENT')
-  return annotation.kind === 'PDF_TEXT_OR_REGION' && !annotation.anchor?.quote ? markTypes.filter(item => item.value === 'HIGHLIGHT') : markTypes.filter(item => item.value !== 'COMMENT')
+  return markTypes.filter(item => item.value !== 'COMMENT')
 }
 
 function fileOptionLabel(file) {
@@ -696,13 +698,11 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <span>{{files.length ? `${index+1} / ${files.length}` : '0 / 0'}}</span>
         <a-tooltip title="下一个文件（→）"><span><a-button shape="circle" :disabled="index>=files.length-1" @click="index+=1"><RightOutlined/></a-button></span></a-tooltip>
         <a-select v-if="files.length>1" v-model:value="index" style="min-width:220px" :options="files.map((item,fileIndex)=>({value:fileIndex,label:fileOptionLabel(item)}))"/>
-        <template v-if="renderType!=='PDF'">
-          <span class="review-toolbar-divider"></span>
-          <a-tooltip title="缩小作品"><a-button shape="circle" :disabled="contentZoom<=.6" @click="contentZoom=Math.max(.6,contentZoom-.1)"><ZoomOutOutlined/></a-button></a-tooltip>
-          <span>{{Math.round(contentZoom*100)}}%</span>
-          <a-tooltip title="放大作品"><a-button shape="circle" :disabled="contentZoom>=2" @click="contentZoom=Math.min(2,contentZoom+.1)"><ZoomInOutlined/></a-button></a-tooltip>
-          <a-tooltip title="恢复作品大小"><a-button shape="circle" @click="contentZoom=1"><ColumnWidthOutlined/></a-button></a-tooltip>
-        </template>
+        <span class="review-toolbar-divider"></span>
+        <a-tooltip title="缩小作品"><a-button shape="circle" :disabled="contentZoom<=.6" @click="contentZoom=Math.max(.6,contentZoom-.1)"><ZoomOutOutlined/></a-button></a-tooltip>
+        <span>{{Math.round(contentZoom*100)}}%</span>
+        <a-tooltip title="放大作品"><a-button shape="circle" :disabled="contentZoom>=2" @click="contentZoom=Math.min(2,contentZoom+.1)"><ZoomInOutlined/></a-button></a-tooltip>
+        <a-tooltip title="恢复作品大小"><a-button shape="circle" @click="contentZoom=1"><ColumnWidthOutlined/></a-button></a-tooltip>
       </a-space>
       <div v-if="mode==='TEACHER'&&(visiblePeerFeedbacks.length||feedback.grade)" class="review-score-summary">
         <div v-if="visiblePeerFeedbacks.length" class="review-score-group peer-scores"><strong>学生互评</strong><a-tag v-for="peer in visiblePeerFeedbacks" :key="peer.id" color="purple">{{peer.evaluator_name}}打分 {{peer.grade}}</a-tag></div>
@@ -723,7 +723,6 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <main ref="documentStage" class="review-document-stage">
           <a-spin v-if="loading" size="large" tip="正在加载文件"/>
           <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile&&allowDownload" type="primary" :loading="downloading" @click="downloadActiveFile"><DownloadOutlined/> {{activeFileIsMarkdown?'下载离线包':'下载原文件'}}</a-button></template></a-result>
-          <PdfDocumentViewer v-else-if="renderType==='PDF'&&binaryUrl" ref="documentViewer" :url="binaryUrl" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation" @layout="scheduleComposerPosition" @error="error=$event"/>
           <div v-else-if="renderType==='RICH_TEXT'&&richHtml" class="rich-document-scroll"><div class="review-scaled-content" :style="{zoom:`${contentZoom*100}%`}"><RichTextViewer ref="documentViewer" :html="richHtml" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation"/></div></div>
           <div v-else-if="renderType==='IMAGE'&&binaryUrl" class="review-image-scroll"><img class="review-image" :style="{width:`${contentZoom*100}%`,maxWidth:'none'}" :src="binaryUrl" :alt="activeFile?.name" @error="error='图片加载失败'"/></div>
         </main>
@@ -764,7 +763,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         </section>
         <div v-if="!editable&&feedback.comment" class="published-overall"><strong>{{mode==='PEER'?'互评总评':'教师总评'}}</strong><div v-html="feedback.comment"></div></div>
         <div v-if="editable" class="feedback-actions">
-          <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in (mode === 'PEER' && (gradeCap === 'B' || feedback.status) ? ['B','C','D','E'] : ['A','B','C','D','E'])" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
+          <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in ['A','B','C','D','E']" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
           <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'&&feedback.status" danger @click="emit('clear-feedback')">清除反馈</a-button><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button></div>
         </div>
       </aside>
