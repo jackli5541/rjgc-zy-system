@@ -15,7 +15,7 @@ from app.database import SessionLocal
 from app.main import app
 from app.models import AttendanceRecord, AttendanceSession
 from app.modules.attendance import service as attendance_service
-from app.modules.attendance.service import code_valid, current_code, process_due_attendance
+from app.modules.attendance.service import CODE_PERIOD_SECONDS, code_valid, current_code, process_due_attendance
 
 
 def login(account, password, role):
@@ -81,6 +81,7 @@ def test_attendance_check_in_correction_export_and_deduction():
     assert "attendance" not in student.get("/api/v1/menu-permissions").json()["enabled"]
     first = start(teacher, teacher_headers, class_id, "第一次")
     assert first["total"] == 1
+    assert datetime.fromisoformat(first["code_expires_at"]) - datetime.fromisoformat(first["started_at"]) == timedelta(seconds=120)
     assert teacher.get(f"/api/v1/classes/{class_id}/attendance-sessions").json()["items"][0]["pending"] == 1
     assert student.get(f"/api/v1/classes/{class_id}/attendance/current").json()["active"]["id"] == first["id"]
     assert student.get(f"/api/v1/attendance-sessions/{first['id']}").status_code == 403
@@ -208,12 +209,21 @@ def test_teacher_can_delete_attendance_session_and_its_scores():
 
 
 def test_previous_code_has_five_second_grace_period():
-    session = SimpleNamespace(code_secret=b"attendance-code-test-secret-1234")
-    boundary = datetime.fromtimestamp(30_000_000, timezone.utc)
+    started_at = datetime(2026, 9, 28, 7, 0, 37, tzinfo=timezone.utc)
+    session = SimpleNamespace(code_secret=b"attendance-code-test-secret-1234", started_at=started_at)
+    boundary = started_at + timedelta(seconds=CODE_PERIOD_SECONDS)
     previous_code = current_code(session, boundary - timedelta(seconds=1))
     assert previous_code != current_code(session, boundary)
     assert code_valid(session, previous_code, boundary + timedelta(seconds=4))
     assert not code_valid(session, previous_code, boundary + timedelta(seconds=5))
+
+
+def test_attendance_code_rotates_every_two_minutes():
+    started_at = datetime(2026, 9, 28, 7, 0, 37, tzinfo=timezone.utc)
+    session = SimpleNamespace(code_secret=b"attendance-code-test-secret-1234", started_at=started_at)
+    assert CODE_PERIOD_SECONDS == 120
+    assert current_code(session, started_at) == current_code(session, started_at + timedelta(seconds=119))
+    assert current_code(session, started_at + timedelta(seconds=119)) != current_code(session, started_at + timedelta(seconds=120))
 
 
 def test_check_in_does_not_wait_for_session_update_lock():

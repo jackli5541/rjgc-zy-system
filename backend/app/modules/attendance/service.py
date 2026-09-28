@@ -12,7 +12,7 @@ from app.core.utils import now
 from app.core.audit import audit
 from app.models import AttendanceRecord, AttendanceSession
 
-CODE_PERIOD_SECONDS = 30
+CODE_PERIOD_SECONDS = 120
 CODE_GRACE_SECONDS = 5
 STATUS_LABELS = {"PENDING": "未签到", "PRESENT": "出勤", "LATE": "迟到", "ABSENT": "缺勤", "LEAVE": "请假"}
 
@@ -21,8 +21,12 @@ def aware(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
+def code_elapsed_seconds(session: AttendanceSession, at: datetime) -> int:
+    return max(0, int((aware(at) - aware(session.started_at)).total_seconds()))
+
+
 def current_code(session: AttendanceSession, at: datetime) -> str:
-    step = int(at.timestamp()) // CODE_PERIOD_SECONDS
+    step = code_elapsed_seconds(session, at) // CODE_PERIOD_SECONDS
     digest = hmac.new(session.code_secret, step.to_bytes(8, "big"), hashlib.sha256).digest()
     offset = digest[-1] & 15
     value = int.from_bytes(digest[offset:offset + 4], "big") & 0x7fffffff
@@ -32,7 +36,7 @@ def current_code(session: AttendanceSession, at: datetime) -> str:
 def code_valid(session: AttendanceSession, code: str, at: datetime) -> bool:
     if hmac.compare_digest(current_code(session, at), code):
         return True
-    return int(at.timestamp()) % CODE_PERIOD_SECONDS < CODE_GRACE_SECONDS and hmac.compare_digest(
+    return code_elapsed_seconds(session, at) % CODE_PERIOD_SECONDS < CODE_GRACE_SECONDS and hmac.compare_digest(
         current_code(session, at - timedelta(seconds=CODE_PERIOD_SECONDS)), code
     )
 
@@ -89,7 +93,8 @@ def session_json(session: AttendanceSession, records: list[AttendanceRecord] | N
         data["leave"] = sum(item.status == "LEAVE" for item in records)
     if include_code and data["status"] == "ACTIVE":
         data["code"] = current_code(session, at)
-        data["code_expires_at"] = datetime.fromtimestamp((int(at.timestamp()) // CODE_PERIOD_SECONDS + 1) * CODE_PERIOD_SECONDS, timezone.utc).isoformat()
+        next_step = code_elapsed_seconds(session, at) // CODE_PERIOD_SECONDS + 1
+        data["code_expires_at"] = (aware(session.started_at) + timedelta(seconds=next_step * CODE_PERIOD_SECONDS)).isoformat()
     return data
 
 
