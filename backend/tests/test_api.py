@@ -20,7 +20,7 @@ from app.main import app
 from app.modules.members.service import parse_roster
 from app.grading import final_score
 from app.markdown_assets import extract_assets
-from app.models import Assignment, AuditLog, BackgroundJob, CapstoneAsset, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, Team, TeamMember, TeamRequest, TeachingMaterialAsset, User
+from app.models import Assignment, AuditLog, BackgroundJob, CapstoneAsset, FileObjectAsset, Grade, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, SubmissionWorkspace, Team, TeamMember, TeamRequest, TeachingMaterialAsset, User
 from app.worker import cleanup_archive_exports, process_archive_export, process_auto_review, process_due_campaign, process_oss_delete
 
 
@@ -437,6 +437,8 @@ def test_workspace_images_are_stored_separately_authorized_and_frozen_in_submiss
     with SessionLocal() as db:
         cleanup_job = db.scalar(select(BackgroundJob).where(BackgroundJob.kind == "OSS_DELETE"))
         assert cleanup_job and cleanup_job.status == "PENDING" and cleanup_job.payload["keys"]
+        assert db.scalar(select(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == UUID(assignment["id"]))) is None
+        assert db.scalar(select(SubmissionDocument).where(SubmissionDocument.id == UUID(document["id"]))) is None
         cleanup_job_id = cleanup_job.id
         cleanup_keys = cleanup_job.payload["keys"]
 

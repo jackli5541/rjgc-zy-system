@@ -233,6 +233,9 @@ def delete_assignment(aid: UUID, user: CsrfUser, db: Db):
         db.execute(delete(FileObjectAsset).where(FileObjectAsset.file_id.in_(file_ids)))
     db.execute(delete(SubmissionDocumentAsset).where(SubmissionDocumentAsset.document_id.in_(document_ids)))
     db.execute(delete(MarkdownAsset).where(MarkdownAsset.assignment_id == aid))
+    # 模型层去掉了 ondelete（SQL Server 多级联路径限制），在线文档与工作区须显式删除，且要早于其引用的附件
+    db.execute(delete(SubmissionDocument).where(SubmissionDocument.workspace_id.in_(workspace_ids)))
+    db.execute(delete(SubmissionWorkspace).where(SubmissionWorkspace.assignment_id == aid))
     db.execute(delete(FileObject).where(FileObject.assignment_id == aid))
     db.delete(assignment)
     if cleanup_job:
