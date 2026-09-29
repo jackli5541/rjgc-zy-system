@@ -1,11 +1,134 @@
 <script setup>
+import { computed, onBeforeUnmount, onMounted, provide, reactive, ref } from 'vue'
 import { api } from '../../../api'
 import AssignmentMaterials from './AssignmentMaterials.vue'
+import AiTeacherDrawer from './AiTeacherDrawer.vue'
 import OnlineMarkdownWorkspace from '../../../shared/components/OnlineMarkdownWorkspace.vue'
-import { ArrowLeftOutlined, CheckCircleOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, InboxOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, CheckCircleOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, InboxOutlined, MessageOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { useShellContext } from '../../../shellContext'
+import { aiTeacherActionLabel, aiTeacherAvatarUrl } from '../aiTeacherConfig'
 
 const { assignmentAttachments, assignmentDetailTab, assignmentDrawerAnimating, assignmentDrawerExpanded, assignmentDrawerResizing, assignmentDrawerWidth, assignmentIsUpdate, assignmentSubmitted, assignmentTypeLabel, boardFilter, boardQuery, boardTeamFilter, boardTeamOptions, canEditAssignment, canManageTeamSubmission, canSubmitAssignment, changeAssignmentDetailTab, classId, closeAssignment, closeAssignmentDrawer, deleteAssignment, deleteDraft, deleteSelectedMaterials, deletingMaterials, downloadAssignmentSubmissions, exportingAssignment, focusSubmissionStatus, formatTime, gradeSourceLabel, grades, gradingStatusColor, groupedBoard, materialTypeOptions, onlineWorkspace, onlineWorkspaceData, openAssignmentEdit, openFilePreview, openSubmissionDetail, publishAssignment, resizeAssignmentDrawer, retractAssignment, retypeMaterial, role, selectedAssignment, statusLabel, submissionBoardPane, submitAssignment, teacherSubmissionSummary, toggleAssignmentDrawerExpanded, uploadMaterialFile, uploadMaterialType } = useShellContext()
+const aiTeacherOpen = ref(false)
+const aiTeacherQuote = ref('')
+const aiTeacherQuoteSource = ref(null)
+const aiTeacherQuoteVersion = ref(0)
+const requirementSelection = ref(null)
+const FAB_SIZE = 52
+const FAB_MARGIN = 12
+const FAB_STORAGE_KEY = 'ai-teacher-floating-entry-position-v3'
+const workspaceStateRef = ref(null)
+const fabPosition = reactive({ left: 0, top: 0 })
+const fabDrag = { active: false, pointerId: null, startX: 0, startY: 0, originLeft: 0, originTop: 0, moved: false }
+const fabStyle = computed(() => ({ left: `${fabPosition.left}px`, top: `${fabPosition.top}px` }))
+let suppressFabClickUntil = 0
+
+function clampFab(left, top) {
+  fabPosition.left = Math.min(Math.max(FAB_MARGIN, left), Math.max(FAB_MARGIN, window.innerWidth - FAB_SIZE - FAB_MARGIN))
+  fabPosition.top = Math.min(Math.max(FAB_MARGIN, top), Math.max(FAB_MARGIN, window.innerHeight - FAB_SIZE - FAB_MARGIN))
+}
+
+function saveFabPosition() {
+  localStorage.setItem(FAB_STORAGE_KEY, JSON.stringify({ left: fabPosition.left, top: fabPosition.top }))
+}
+
+function restoreFabPosition() {
+  let saved
+  try { saved = JSON.parse(localStorage.getItem(FAB_STORAGE_KEY) || 'null') } catch (_) { /* ignore invalid layout */ }
+  const status = workspaceStateRef.value?.getBoundingClientRect()
+  const nearRequirements = window.innerWidth > 760 && status && status.bottom + FAB_SIZE + 20 < window.innerHeight
+  const defaultLeft = nearRequirements ? status.left + 24 : window.innerWidth - FAB_SIZE - 24
+  const defaultTop = nearRequirements ? status.bottom + 12 : window.innerHeight - FAB_SIZE - 24
+  const left = Number.isFinite(saved?.left) ? saved.left : defaultLeft
+  const top = Number.isFinite(saved?.top) ? saved.top : defaultTop
+  clampFab(left, top)
+}
+
+function startFabDrag(event) {
+  if (event.button !== 0) return
+  fabDrag.active = true
+  fabDrag.pointerId = event.pointerId
+  fabDrag.startX = event.clientX
+  fabDrag.startY = event.clientY
+  fabDrag.originLeft = fabPosition.left
+  fabDrag.originTop = fabPosition.top
+  fabDrag.moved = false
+  event.currentTarget.setPointerCapture?.(event.pointerId)
+  window.addEventListener('pointermove', moveFabDrag)
+  window.addEventListener('pointerup', stopFabDrag)
+  window.addEventListener('pointercancel', stopFabDrag)
+}
+
+function moveFabDrag(event) {
+  if (!fabDrag.active || event.pointerId !== fabDrag.pointerId) return
+  const dx = event.clientX - fabDrag.startX
+  const dy = event.clientY - fabDrag.startY
+  if (!fabDrag.moved && Math.hypot(dx, dy) < 5) return
+  fabDrag.moved = true
+  clampFab(fabDrag.originLeft + dx, fabDrag.originTop + dy)
+}
+
+function stopFabDrag(event) {
+  if (!fabDrag.active || (event?.pointerId != null && event.pointerId !== fabDrag.pointerId)) return
+  if (fabDrag.moved) {
+    saveFabPosition()
+    suppressFabClickUntil = Date.now() + 400
+  }
+  fabDrag.active = false
+  fabDrag.pointerId = null
+  window.removeEventListener('pointermove', moveFabDrag)
+  window.removeEventListener('pointerup', stopFabDrag)
+  window.removeEventListener('pointercancel', stopFabDrag)
+}
+
+function clickFab(event) {
+  if (event.detail !== 0 && Date.now() < suppressFabClickUntil) return
+  openAiTeacher()
+}
+
+function handleViewportResize() {
+  clampFab(fabPosition.left, fabPosition.top)
+  saveFabPosition()
+}
+function selectRequirement(event) {
+  if (role.value !== 'STUDENT') return
+  const selection = window.getSelection()
+  const text = selection?.toString().trim().slice(0, 1200)
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null
+  if (!text || !range || !event.currentTarget.contains(range.commonAncestorContainer)) {
+    requirementSelection.value = null
+    return
+  }
+  const rect = range.getBoundingClientRect()
+  requirementSelection.value = { text, left: Math.max(8, Math.min(rect.left, window.innerWidth - 124)), top: Math.max(8, rect.top - 38) }
+}
+function askRequirement() {
+  openAiTeacher(requirementSelection.value?.text || '', 'assignment')
+  requirementSelection.value = null
+}
+function openAiTeacher(quote = '', quoteSource = null) {
+  aiTeacherQuote.value = quote
+  aiTeacherQuoteSource.value = quoteSource
+  aiTeacherQuoteVersion.value += 1
+  aiTeacherOpen.value = true
+}
+provide('askAiTeacher', openAiTeacher)
+provide('aiTeacherAvatarUrl', aiTeacherAvatarUrl)
+function handleAiShortcut(event) {
+  if (role.value !== 'STUDENT' || event.key !== 'F3') return
+  event.preventDefault()
+  aiTeacherOpen.value = !aiTeacherOpen.value
+}
+onMounted(() => {
+  restoreFabPosition()
+  window.addEventListener('keydown', handleAiShortcut)
+  window.addEventListener('resize', handleViewportResize)
+})
+onBeforeUnmount(() => {
+  stopFabDrag()
+  window.removeEventListener('keydown', handleAiShortcut)
+  window.removeEventListener('resize', handleViewportResize)
+})
 </script>
 
 <template>
@@ -22,8 +145,8 @@ const { assignmentAttachments, assignmentDetailTab, assignmentDrawerAnimating, a
            <template v-if="role==='STUDENT'">
              <div class="student-assignment-content">
                <header class="student-workspace-intro">
-                 <div><span class="student-workspace-label">作业要求</span><div class="rich-text detail-description" v-html="selectedAssignment.description"></div></div>
-                 <div class="student-workspace-state" :class="{submitted:assignmentSubmitted,closed:!canEditAssignment&&!assignmentSubmitted}"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/><div><strong>{{assignmentSubmitted?'已提交':new Date(selectedAssignment.due_at)<=new Date()&&!selectedAssignment.allow_late?'已截止':'在线编写中'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · 可继续修改`:`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div>
+                 <div><span class="student-workspace-label">作业要求</span><div class="rich-text detail-description" v-html="selectedAssignment.description" @mouseup="selectRequirement" @keyup="selectRequirement"></div></div>
+                 <div class="student-workspace-side"><div ref="workspaceStateRef" class="student-workspace-state" :class="{submitted:assignmentSubmitted,closed:!canEditAssignment&&!assignmentSubmitted}"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/><div><strong>{{assignmentSubmitted?'已提交':new Date(selectedAssignment.due_at)<=new Date()&&!selectedAssignment.allow_late?'已截止':'在线编写中'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · 可继续修改`:`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div></div>
                </header>
                <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" :can-submit="canSubmitAssignment&&Boolean(onlineWorkspaceData?.documents?.length)" :submit-label="assignmentIsUpdate?'更新提交':'提交当前版本'" @ready="onlineWorkspaceData=$event" @submit="submitAssignment"/>
                <footer class="student-submit-bar">
@@ -76,4 +199,7 @@ const { assignmentAttachments, assignmentDetailTab, assignmentDrawerAnimating, a
         </section>
         </div>
         </Transition>
+        <Teleport to="body"><button v-if="role==='STUDENT'&&selectedAssignment&&!aiTeacherOpen" type="button" class="ai-teacher-fab" :style="fabStyle" :aria-label="aiTeacherActionLabel" :title="aiTeacherActionLabel" @pointerdown="startFabDrag" @click="clickFab"><img :src="aiTeacherAvatarUrl" alt="" draggable="false"></button></Teleport>
+        <Teleport to="body"><button v-if="requirementSelection" type="button" class="ai-requirement-selection" :style="{left:`${requirementSelection.left}px`,top:`${requirementSelection.top}px`}" @pointerdown.prevent @click="askRequirement"><MessageOutlined/> 问叶老师</button></Teleport>
+        <AiTeacherDrawer v-if="role==='STUDENT'&&selectedAssignment" :key="selectedAssignment.id" :open="aiTeacherOpen" :assignment="selectedAssignment" :quote="aiTeacherQuote" :quote-source="aiTeacherQuoteSource" :quote-version="aiTeacherQuoteVersion" @close="aiTeacherOpen=false"/>
 </template>
