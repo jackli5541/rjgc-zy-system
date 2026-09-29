@@ -4,6 +4,7 @@ import { DeleteOutlined, DownloadOutlined, EditOutlined, FileTextOutlined, KeyOu
 import { message } from 'ant-design-vue'
 import { api, exportArchive } from '../../../api'
 import { useResizableDrawer } from '../../../useHorizontalResize'
+import { formatBeijingTime } from '../../../shared/time'
 
 const props = defineProps({ student: Object, classId: String, writable: Boolean })
 const emit = defineEmits(['close', 'saved', 'reset-password', 'remove', 'preview'])
@@ -19,7 +20,7 @@ const { width: drawerWidth, resizing: drawerResizing, startResize: startDrawerRe
 const activeAssignments = ref([])
 const assignmentFilter = ref('ALL')
 let generation = 0
-const formatTime = value => value ? new Date(value).toLocaleString('zh-CN') : '-'
+const formatTime = value => formatBeijingTime(value)
 const sourceLabel = value => ({ TEACHER: '教师评分', PEER: '学生互评', SYSTEM: '系统判定' }[value] || '-')
 const completionRate = computed(() => data.value?.summary.total ? Math.round(data.value.summary.submitted / data.value.summary.total * 100) : 0)
 const visibleAssignments = computed(() => (data.value?.assignments || []).map((item,index) => ({...item, sequence:index+1})).filter(item => assignmentFilter.value === 'ALL' || (assignmentFilter.value === 'SUBMITTED' ? item.status === 'SUBMITTED' : item.status !== 'SUBMITTED')))

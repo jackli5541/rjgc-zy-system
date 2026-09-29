@@ -130,12 +130,14 @@ def correct_record(sid: UUID, student_id: UUID, data: AttendanceCorrection, user
     record = db.scalar(select(AttendanceRecord).where(AttendanceRecord.session_id == sid, AttendanceRecord.student_user_id == student_id).with_for_update())
     if not record: raise ApiError(404, "ATTENDANCE_RECORD_NOT_FOUND", "学生不在本次考勤名单")
     previous = {"status": record.status, "note": record.note}
-    record.status = data.status
-    record.note = data.note.strip() if data.note else None
-    record.source = "TEACHER"
+    if data.status is not None:
+        record.status = data.status
+        record.source = "TEACHER"
+        record.checked_in_at = (record.checked_in_at or now()) if data.status in {"PRESENT", "LATE"} else None
+    if "note" in data.model_fields_set:
+        record.note = data.note.strip() if data.note else None
     record.updated_by = user.id
-    record.checked_in_at = (record.checked_in_at or now()) if data.status in {"PRESENT", "LATE"} else None
-    audit(db, user, "ATTENDANCE_CORRECTED", "attendance_record", str(record.id), {"class_id": str(session.class_id), "session_id": str(sid), "before": previous, "after": {"status": data.status, "note": record.note}, "student_id": str(student_id)})
+    audit(db, user, "ATTENDANCE_CORRECTED", "attendance_record", str(record.id), {"class_id": str(session.class_id), "session_id": str(sid), "before": previous, "after": {"status": record.status, "note": record.note}, "student_id": str(student_id)})
     db.commit()
     return record_json(record)
 

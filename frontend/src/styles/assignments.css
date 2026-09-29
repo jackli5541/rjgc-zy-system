@@ -273,11 +273,11 @@ html.file-preview-open { overflow: hidden; }
 
 .editor-toolbar{display:flex;gap:6px;padding:8px;border-bottom:1px solid #e7ecf1;background:#f8fafc}
 
-.editor-shell .tiptap{min-height:150px;padding:12px 14px;outline:none}
+.editor-shell .tiptap{min-height:150px;padding:12px 14px;outline:none;font-synthesis:style}
 
 .editor-shell .tiptap p{margin:0 0 8px}
 
-.rich-text{color:#526579;line-height:1.7}
+.rich-text{color:#526579;line-height:1.7;font-synthesis:style}
 
 .rich-text pre{overflow:auto;padding:10px;border-radius:6px;background:#f3f6fa}
 

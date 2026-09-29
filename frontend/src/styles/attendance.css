@@ -32,8 +32,22 @@
 .attendance-session-row strong{color:#223744;font-size:14px}
 .attendance-session-row small{color:#83919b;font-size:12px;margin-top:4px}
 .attendance-mobile-records{display:none}
-.attendance-correction{display:grid;gap:15px}
-.attendance-correction label{display:grid;gap:6px;color:#576a75}
+.attendance-inline-status{display:flex;align-items:center;gap:12px;white-space:nowrap}
+.attendance-inline-status .ant-checkbox-wrapper{margin:0}
+.attendance-status-cell{justify-content:center}
+.attendance-status-present{color:#16803c}
+.attendance-status-late{color:#ad6800}
+.attendance-status-leave{color:#1677ff}
+.attendance-status-present .ant-checkbox-checked .ant-checkbox-inner{background-color:#16803c;border-color:#16803c}
+.attendance-status-late .ant-checkbox-checked .ant-checkbox-inner{background-color:#ad6800;border-color:#ad6800}
+.attendance-status-leave .ant-checkbox-checked .ant-checkbox-inner{background-color:#1677ff;border-color:#1677ff}
+@media(max-width:760px){.attendance-mobile-record>.attendance-inline-status{grid-column:1/-1;min-height:36px}}
+.attendance-inline-note{display:flex;align-items:center;gap:6px;min-width:0}
+.attendance-inline-note .ant-input{min-width:0;flex:1}
+.attendance-inline-note .ant-input:hover,.attendance-inline-note .ant-input:focus{background:#f3f7fa}
+.attendance-inline-note>span{flex:none;min-width:56px;font-size:12px;color:#738391}
+.attendance-inline-note .attendance-save-error{color:#cf1322}
+.attendance-mobile-record>.attendance-inline-note{grid-column:1/-1}
 .attendance-projection{position:fixed;inset:0;z-index:2000;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#f8fcfb;color:#143f40;text-align:center;padding:32px}
 .attendance-projection>span{font-size:clamp(20px,3vw,38px);font-weight:650}
 .attendance-projection>strong{font-size:clamp(90px,10vw,180px);line-height:1.3;letter-spacing:1.5vw;font-variant-numeric:tabular-nums}

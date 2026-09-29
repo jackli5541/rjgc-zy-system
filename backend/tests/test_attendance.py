@@ -74,6 +74,31 @@ def test_scheduled_attendance_rejects_invalid_start_time():
     assert teacher.get(path).json()["items"] == []
 
 
+def test_attendance_inline_updates_preserve_other_fields():
+    teacher, headers, student, student_headers, course, member = setup_class()
+    session = start(teacher, headers, course["id"], "行内编辑")
+    path = f"/api/v1/attendance-sessions/{session['id']}/records/{member['id']}"
+    assert teacher.put(path, json={"note": "备注"}).status_code == 403
+    assert student.put(path, headers=student_headers, json={"note": "备注"}).status_code == 403
+    noted = teacher.put(path, headers=headers, json={"note": "  待核实  "})
+    assert noted.status_code == 200, noted.text
+    assert noted.json()["status"] == "PENDING"
+    assert noted.json()["checked_in_at"] is None
+    assert noted.json()["source"] is None
+    assert noted.json()["note"] == "待核实"
+    present = teacher.put(path, headers=headers, json={"status": "PRESENT"}).json()
+    assert present["note"] == "待核实"
+    assert present["checked_in_at"] is not None
+    cleared = teacher.put(path, headers=headers, json={"note": ""}).json()
+    assert cleared["status"] == "PRESENT"
+    assert cleared["checked_in_at"] == present["checked_in_at"]
+    assert not cleared["note"]
+    assert teacher.put(path, headers=headers, json={"note": "a" * 501}).status_code == 422
+    assert teacher.put(path, headers=headers, json={"status": "UNKNOWN"}).status_code == 422
+    persisted = teacher.get(f"/api/v1/attendance-sessions/{session['id']}").json()["records"][0]
+    assert persisted["status"] == "PRESENT" and not persisted["note"]
+
+
 def test_attendance_check_in_correction_export_and_deduction():
     teacher, teacher_headers, student, student_headers, course, member = setup_class()
     class_id = course["id"]

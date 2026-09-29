@@ -1,16 +1,17 @@
 import { randomUUID } from '../../api'
 import { ref } from 'vue'
+import { beijingDateTimeToIso, formatBeijingTime, toBeijingDateTimeLocal } from '../time'
 
 export function useLabels(ctx) {
   const currentTime = ref(Date.now())
 
-  function iso(value) { return value ? new Date(value).toISOString() : null }
+  function iso(value) { return beijingDateTimeToIso(value) }
 
   function idempotencyKey() { return randomUUID() }
 
-  function localDateTime(value) { if (!value) return ''; const date = new Date(value); return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) }
+  function localDateTime(value) { return toBeijingDateTimeLocal(value) }
 
-  function formatTime(value) { return value ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '-' }
+  function formatTime(value) { return formatBeijingTime(value) }
 
   function assignmentCountdown(item) {
     const start = item.starts_at ? new Date(item.starts_at).getTime() : 0

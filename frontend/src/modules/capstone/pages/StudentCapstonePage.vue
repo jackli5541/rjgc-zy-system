@@ -4,6 +4,7 @@ import { message, Modal, Input } from 'ant-design-vue'
 import { DeleteOutlined, DownOutlined, EditOutlined, EyeOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, LockOutlined, PlusOutlined, TeamOutlined, UpOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { renderMarkdown } from '../../../markdownPreview'
+import { formatBeijingTime } from '../../../shared/time'
 import OnlineMarkdownWorkspace from '../../../shared/components/OnlineMarkdownWorkspace.vue'
 import RichTextViewer from '../../../shared/components/RichTextViewer.vue'
 import { useShellContext } from '../../../shellContext'
@@ -74,7 +75,7 @@ function jumpToStage(stageKey) {
 
 const dueLabel = computed(() => {
   if (!dueAt.value) return '教师尚未设置截止时间'
-  const text = new Date(dueAt.value).toLocaleString('zh-CN', { hour12: false })
+  const text = formatBeijingTime(dueAt.value)
   return locked.value ? `已于 ${text} 截止` : `截止时间：${text}`
 })
 

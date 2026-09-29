@@ -104,15 +104,16 @@ def peer_review_detail(aid: UUID, user: CurrentUser, db: Db):
         files = db.scalars(select(FileObject).join(VersionFile, VersionFile.file_id == FileObject.id).where(VersionFile.version_id == version.id)).all()
         claimed_review = peer_assessment_for_version(db, version.id)
         own_review = claimed_review if claimed_review and claimed_review.evaluator_id == user.id else None
-        was_peer_reviewed = bool(claimed_review and claimed_review.status == "PUBLISHED")
+        review_open = assignment.due_at > now()
+        can_edit = bool(own_review and review_open)
         candidates.append({
             "user_id": str(person.id), "name": person.display_name, "student_no": person.login_name,
             "submitted_at": version.submitted_at, "submission_version_id": str(version.id),
-            "grade_cap": "B" if version.grade_cap == "B" or was_peer_reviewed else None,
+            "grade_cap": None,
             "files": [file_json(file) for file in files],
             "review": assessment_json(db, own_review) if own_review else (peer_assessment_summary(db, claimed_review, user.id) if claimed_review else None),
-            "can_review": claimed_review is None or bool(own_review),
-            "can_edit": bool(own_review),
+            "can_review": bool(review_open and (claimed_review is None or can_edit)),
+            "can_edit": can_edit,
         })
     return {
         "assignment": assignment_json(assignment),
@@ -139,15 +140,16 @@ def save_peer_submission_assessment(aid: UUID, data: PeerSubmissionAssessmentIn,
     submitted = latest_personal_submission(db, aid, data.reviewee_id)
     if not submitted: raise ApiError(409, "REVIEWEE_NOT_SUBMITTED", "该组员尚未提交作业")
     _, version = submitted
+    if assignment.due_at <= now():
+        raise ApiError(409, "PEER_REVIEW_CLOSED", "作业已截止，不能提交或修改互评")
     lock_submission_version(db, version.id)
     item = peer_assessment_for_version(db, version.id)
     if item and item.evaluator_id != user.id:
         evaluator = db.get(User, item.evaluator_id)
         raise ApiError(409, "PEER_REVIEW_TAKEN", f"该作品已由{evaluator.display_name}评价，不能重复评价或修改")
-    was_peer_reviewed = bool(item and item.status == "PUBLISHED")
-    if data.grade == "A" and (version.grade_cap == "B" or was_peer_reviewed):
-        raise ApiError(409, "GRADE_CAP_EXCEEDED", "该作业已被互评，后续学生互评最高成绩为 B")
     updating = item is not None
+    if updating and assignment.due_at <= now():
+        raise ApiError(409, "PEER_REVIEW_UPDATE_CLOSED", "作业已截止，不能修改互评成绩")
     if item:
         item.grade, item.comment, item.status, item.published_at = data.grade, data.comment.strip(), "PUBLISHED", now()
         item.version += 1
@@ -179,8 +181,8 @@ def publish_peer_submission_feedback(version_id: UUID, data: SubmissionFeedbackI
         raise ApiError(409, "PEER_REVIEW_TAKEN", f"该作品已由{evaluator.display_name}评价，不能重复评价或修改")
     current_revision = item.version if item else 0
     if data.revision != current_revision: raise ApiError(409, "FEEDBACK_VERSION_CONFLICT", "反馈已在其他页面更新，请刷新后重试")
-    if data.grade == "A" and version.grade_cap == "B":
-        raise ApiError(409, "GRADE_CAP_EXCEEDED", "该作业已被互评，后续学生互评最高成绩为 B")
+    if assignment.due_at <= now():
+        raise ApiError(409, "PEER_REVIEW_CLOSED", "作业已截止，不能提交或修改互评")
     annotations = validate_feedback_annotations(db, version.id, data.annotations)
     comment = clean_html(data.comment)
     updating = item is not None

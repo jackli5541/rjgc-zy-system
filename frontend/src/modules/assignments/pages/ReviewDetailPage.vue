@@ -76,7 +76,7 @@ const pendingCount = computed(() => candidates.value.length - reviewedCount.valu
         <div class="peer-review-actions">
           <span v-if="selectedReviewCandidate.review">评价者：{{ selectedReviewCandidate.review.evaluator_name }} · 等级 {{ selectedReviewCandidate.review.grade }}<template v-if="selectedReviewCandidate.can_edit"> · 可继续修改</template></span>
           <span v-else>尚未完成评价</span>
-          <a-button type="primary" :disabled="!selectedReviewCandidate.files?.length || selectedReviewCandidate.can_review === false" @click="openPeerReviewDrawer(selectedReviewCandidate)">{{ selectedReviewCandidate.can_edit ? '修改评价' : selectedReviewCandidate.can_review === false ? '已由他人评价' : '开始评价' }}</a-button>
+          <a-button type="primary" :disabled="!selectedReviewCandidate.files?.length || selectedReviewCandidate.can_review === false" @click="openPeerReviewDrawer(selectedReviewCandidate)">{{ selectedReviewCandidate.can_edit ? '修改评价' : selectedReviewCandidate.review && selectedReviewCandidate.review.is_current_evaluator ? '截止后不可修改' : selectedReviewCandidate.can_review === false ? '已由他人评价' : '开始评价' }}</a-button>
         </div>
       </section>
     </div>
