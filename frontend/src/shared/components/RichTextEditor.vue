@@ -1,11 +1,11 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import { Node } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
 import { TableKit } from '@tiptap/extension-table'
-import { AudioOutlined, BlockOutlined, BoldOutlined, CodeOutlined, DeleteColumnOutlined, DeleteOutlined, DeleteRowOutlined, DeploymentUnitOutlined, InsertRowAboveOutlined, InsertRowBelowOutlined, InsertRowLeftOutlined, InsertRowRightOutlined, ItalicOutlined, LinkOutlined, MinusOutlined, OrderedListOutlined, PictureOutlined, RedoOutlined, StopOutlined, TableOutlined, UndoOutlined, UnorderedListOutlined } from '@ant-design/icons-vue'
+import { AudioOutlined, BlockOutlined, BoldOutlined, CodeOutlined, DeleteColumnOutlined, DeleteOutlined, DeleteRowOutlined, DeploymentUnitOutlined, InsertRowAboveOutlined, InsertRowBelowOutlined, InsertRowLeftOutlined, InsertRowRightOutlined, ItalicOutlined, LinkOutlined, MessageOutlined, MinusOutlined, OrderedListOutlined, PictureOutlined, RedoOutlined, StopOutlined, TableOutlined, UndoOutlined, UnorderedListOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { cleanupMermaidArtifacts, renderMermaid as renderMermaidSvg } from '../../mermaidRenderer'
 
@@ -14,6 +14,26 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true }, imageUpload: Function })
 const emit = defineEmits(['update:modelValue'])
+const askAiTeacher = inject('askAiTeacher', null)
+const aiTeacherAvatarUrl = inject('aiTeacherAvatarUrl', '')
+const selectionAction = ref(null)
+
+function selectedText() {
+  const selection = editor.value?.state.selection
+  return selection?.empty ? '' : editor.value.state.doc.textBetween(selection.from, selection.to, ' ').trim().slice(0, 1200)
+}
+
+function updateSelectionAction() {
+  if (!props.document || !askAiTeacher || !selectedText()) { selectionAction.value = null; return }
+  const browserSelection = window.getSelection()
+  const rect = browserSelection?.rangeCount ? browserSelection.getRangeAt(0).getBoundingClientRect() : null
+  selectionAction.value = rect?.width ? { left: Math.max(8, Math.min(rect.left, window.innerWidth - 124)), top: Math.max(8, rect.top - 38) } : null
+}
+
+function askAi() {
+  askAiTeacher?.(selectedText())
+  selectionAction.value = null
+}
 const speechSupported = ref(false)
 const listening = ref(false)
 const speechState = ref('idle')
@@ -235,7 +255,7 @@ const editor = useEditor({
   editorProps: { attributes: { 'data-placeholder': props.placeholder } },
   onCreate: ({ editor: instance }) => {
     instance.on('transaction', () => { editorVersion.value += 1 })
-    instance.on('selectionUpdate', () => { editorVersion.value += 1 })
+    instance.on('selectionUpdate', () => { editorVersion.value += 1; updateSelectionAction() })
     if (props.autofocus) instance.commands.focus('end')
   },
   onUpdate: ({ editor: instance }) => emit('update:modelValue', instance.getHTML())
@@ -487,6 +507,7 @@ async function insertMermaid() {
       <a-tooltip title="重做"><a-button size="small" :disabled="!editor.can().redo()" @click="editor.chain().focus().redo().run()"><RedoOutlined/></a-button></a-tooltip>
       <a-tooltip v-if="document" title="插入图片"><a-button size="small" :loading="imageLoading" @click="imageInput?.click()"><PictureOutlined/></a-button></a-tooltip>
       <a-tooltip v-if="document" title="插入 Mermaid 图表"><a-button size="small" @click="openMermaidEditor()"><DeploymentUnitOutlined/></a-button></a-tooltip>
+      <a-tooltip v-if="document&&askAiTeacher" title="问叶老师（可带入选中文字）"><a-button size="small" class="ai-teacher-toolbar-button" aria-label="问叶老师" @pointerdown.prevent @click="askAi"><img :src="aiTeacherAvatarUrl" alt="" draggable="false"></a-button></a-tooltip>
       <a-tooltip v-if="speechEnabled&&speechSupported" :title="listening?'停止语音输入':'语音输入'">
         <a-button size="small" :type="listening?'primary':'default'" :aria-pressed="listening" @click="toggleSpeechRecognition"><StopOutlined v-if="listening"/><AudioOutlined v-else/></a-button>
       </a-tooltip>
@@ -498,6 +519,7 @@ async function insertMermaid() {
     <input v-if="document" ref="imageInput" class="document-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" @change="insertImage">
     <div v-if="speechEnabled&&speechSupported&&listening&&interimText" class="speech-interim">正在识别：{{interimText}}</div>
     <EditorContent :editor="editor"/>
+    <Teleport to="body"><button v-if="selectionAction" type="button" class="ai-selection-action" :style="{left:`${selectionAction.left}px`,top:`${selectionAction.top}px`}" @pointerdown.prevent @click="askAi"><MessageOutlined/> 问叶老师</button></Teleport>
     <a-modal v-model:open="mermaidOpen" :title="editingMermaidPos===null?'插入 Mermaid 图表':'编辑 Mermaid 图表'" width="820px" :confirm-loading="mermaidRendering" :ok-text="editingMermaidPos===null?'插入图表':'保存修改'" cancel-text="取消" @ok="insertMermaid">
       <div class="mermaid-builder"><div><label>图表语法</label><a-textarea v-model:value="mermaidSource" :rows="12" spellcheck="false" @change="renderMermaid"/></div><div><label>预览</label><div class="mermaid-preview"><a-spin v-if="mermaidRendering"/><div v-else-if="mermaidSvg" v-html="mermaidSvg"></div><a-alert v-else type="error" :message="mermaidError||'暂无预览'"/></div></div></div>
     </a-modal>
@@ -514,6 +536,8 @@ async function insertMermaid() {
 .feedback-rich-editor.document{overflow:visible}.feedback-rich-editor.document>.feedback-editor-toolbar{position:sticky;z-index:14;top:120px;border:1px solid #dce3e7;border-radius:6px;box-shadow:0 3px 12px rgba(31,47,56,.12)}
 .feedback-rich-editor.document :deep(.mermaid-document-block){position:relative;display:block}.feedback-rich-editor.document :deep(.mermaid-document-preview){display:grid;min-height:136px;place-items:center}.feedback-rich-editor.document :deep(.mermaid-delete-button){position:absolute;z-index:2;top:8px;right:8px;display:grid;width:30px;height:30px;padding:0;place-items:center;border:1px solid #d8e0e4;border-radius:4px;color:#687983;background:#fff;box-shadow:0 1px 4px rgba(31,47,56,.1);font-size:21px;line-height:1;cursor:pointer}.feedback-rich-editor.document :deep(.mermaid-delete-button:hover),.feedback-rich-editor.document :deep(.mermaid-delete-button:focus){border-color:#d76b65;color:#b83e38;background:#fff6f5;outline:none}
 .document-image-input{display:none}
+.ai-teacher-toolbar-button :deep(span){display:grid;place-items:center}.ai-teacher-toolbar-button img{display:block;width:20px;height:20px;border-radius:50%;object-fit:cover}
+.ai-selection-action{position:fixed;z-index:980;padding:6px 10px;border:1px solid #bad5ce;border-radius:5px;background:#fff;color:#176f5b;box-shadow:0 3px 12px rgba(31,47,56,.18);cursor:pointer}
 .feedback-rich-editor.document :deep(.document-image-block){position:relative;width:max-content;max-width:100%;margin:22px auto}.feedback-rich-editor.document :deep(.document-image-block img){margin:0}.feedback-rich-editor.document :deep(.document-image-delete){position:absolute;z-index:2;top:8px;right:8px;display:grid;width:30px;height:30px;padding:0;place-items:center;border:1px solid #d8e0e4;border-radius:4px;color:#687983;background:#fff;box-shadow:0 1px 4px rgba(31,47,56,.14);font-size:21px;line-height:1;cursor:pointer}.feedback-rich-editor.document :deep(.document-image-delete:hover),.feedback-rich-editor.document :deep(.document-image-delete:focus){border-color:#d76b65;color:#b83e38;background:#fff6f5;outline:none}
 .feedback-rich-editor.document :deep(.document-image-block img){width:100%;height:auto}.feedback-rich-editor.document :deep(.document-image-resize){position:absolute;right:5px;bottom:5px;width:20px;height:20px;padding:0;border:0;border-right:3px solid #26816d;border-bottom:3px solid #26816d;background:transparent;cursor:nwse-resize}.feedback-rich-editor.document :deep(.document-image-resize:focus){outline:2px solid rgba(38,129,109,.25);outline-offset:2px}
 @media(max-width:760px){.feedback-rich-editor.document>.feedback-editor-toolbar{top:120px}}
