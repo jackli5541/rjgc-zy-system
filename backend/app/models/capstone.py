@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from uuid import UUID
 
 from app.database import Base
+from app.core.utils import now
 from app.models._base import ForeignKey, uuid_pk
 
 CAPSTONE_STAGES = ("PROPOSAL", "REQUIREMENTS", "DESIGN", "IMPLEMENTATION", "TESTING")
@@ -17,7 +18,7 @@ class CapstoneConfig(Base):
     class_id: Mapped[UUID] = mapped_column(ForeignKey("teaching_classes.id", ondelete="CASCADE"), primary_key=True)
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
 
 
 class CapstoneUnlock(Base):
@@ -25,7 +26,7 @@ class CapstoneUnlock(Base):
     class_id: Mapped[UUID] = mapped_column(ForeignKey("teaching_classes.id", ondelete="CASCADE"), primary_key=True)
     student_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
     unlocked_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    unlocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    unlocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
 
 
 class CapstoneDocumentTemplate(Base):
@@ -36,7 +37,7 @@ class CapstoneDocumentTemplate(Base):
     name: Mapped[str] = mapped_column(String(100))
     markdown_content: Mapped[str] = mapped_column(Text, default="")
     updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (UniqueConstraint("class_id", "stage", name="uq_capstone_template_class_stage"),)
 
 
@@ -53,8 +54,8 @@ class CapstoneDocument(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     template_id: Mapped[UUID | None] = mapped_column(ForeignKey("capstone_document_templates.id"))
     updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
 
 
 class CapstoneAsset(Base):
@@ -69,7 +70,7 @@ class CapstoneAsset(Base):
     sha256: Mapped[str] = mapped_column(String(64))
     width: Mapped[int] = mapped_column(Integer)
     height: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
 
 
 class CapstoneStageGrade(Base):
@@ -82,7 +83,7 @@ class CapstoneStageGrade(Base):
     comment: Mapped[str] = mapped_column(Text, default="")
     graded_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (UniqueConstraint("class_id", "student_user_id", "stage", name="uq_capstone_grade"),)
 
 
@@ -92,4 +93,4 @@ class CapstoneModuleAssignment(Base):
     student_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
     module_name: Mapped[str] = mapped_column(String(120), default="")
     updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from uuid import UUID
 
 from app.database import Base
+from app.core.utils import now
 from app.models._base import ForeignKey, uuid_pk
 
 class TeachingClass(Base):
@@ -22,7 +23,7 @@ class TeachingClass(Base):
     topic_public: Mapped[bool] = mapped_column(Boolean, default=False)
     invite_requires_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
 
 
 class ClassMember(Base):
@@ -32,7 +33,7 @@ class ClassMember(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(16), default="STUDENT")
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
-    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
     __table_args__ = (UniqueConstraint("class_id", "user_id", name="uq_class_member"),)
 
 
@@ -42,7 +43,7 @@ class ClassJoinRequest(Base):
     class_id: Mapped[UUID] = mapped_column(ForeignKey("teaching_classes.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -60,7 +61,7 @@ class Team(Base):
     open_recruitment: Mapped[bool] = mapped_column(Boolean, default=True)
     max_members: Mapped[int] = mapped_column(Integer, default=5)
     version: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
 
 
 Index("uq_team_name", Team.class_id, Team.normalized_name, unique=True, mssql_where=Team.status == "ACTIVE")
@@ -74,7 +75,7 @@ class TeamMember(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(16), default="MEMBER")
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
-    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
 
 
 Index("uq_active_team_member", TeamMember.class_id, TeamMember.user_id, unique=True, mssql_where=TeamMember.status == "ACTIVE")
@@ -90,7 +91,7 @@ class TeamRequest(Base):
     kind: Mapped[str] = mapped_column(String(16), default="APPLICATION")
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -105,5 +106,5 @@ class Topic(Base):
     review_status: Mapped[str] = mapped_column(String(16), default="PENDING")
     review_reason: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, default=1)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (UniqueConstraint("class_id", "normalized_name", name="uq_topic_name"),)

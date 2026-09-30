@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from uuid import UUID
 
 from app.database import Base
+from app.core.utils import now
 from app.models._base import ForeignKey, uuid_pk
 
 class GradeCoefficient(Base):
@@ -18,7 +19,7 @@ class GradeCoefficient(Base):
     published_value: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     version: Mapped[int] = mapped_column(Integer, default=1)
     updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (UniqueConstraint("assignment_id", "team_id", name="uq_grade_coefficient_assignment_team"),)
 
 
@@ -35,7 +36,7 @@ class Grade(Base):
     score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
     version: Mapped[int] = mapped_column(Integer, default=1)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (UniqueConstraint("assignment_id", "subject_user_id", name="uq_personal_grade"),)
 
 
@@ -51,4 +52,4 @@ class GradeRevision(Base):
     coefficient: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     score: Mapped[Decimal] = mapped_column(Numeric(5, 2))
     reason: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())

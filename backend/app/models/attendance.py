@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from uuid import UUID
 
 from app.database import Base
+from app.core.utils import now
 from app.models._base import ForeignKey, uuid_pk
 
 class AttendanceSession(Base):
@@ -39,5 +40,5 @@ class AttendanceRecord(Base):
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     failed_window_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (UniqueConstraint("session_id", "student_user_id", name="uq_attendance_record_student"),)

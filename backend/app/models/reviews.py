@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from uuid import UUID
 
 from app.database import Base
+from app.core.utils import now
 from app.models._base import ForeignKey, uuid_pk
 
 class ReviewCampaign(Base):
@@ -37,7 +38,7 @@ class ReviewAssignment(Base):
     submission_version_id: Mapped[UUID | None] = mapped_column(ForeignKey("submission_versions.id"))
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
     skip_reason: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
     __table_args__ = (
         UniqueConstraint("campaign_id", "reviewer_id", name="uq_review_assignment_reviewer"),
     )
@@ -59,8 +60,8 @@ class PeerReview(Base):
     comment: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="VALID")
     invalid_reason: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
 
 
 Index("uq_valid_peer_review", PeerReview.campaign_id, PeerReview.reviewer_id, PeerReview.reviewee_id, unique=True, mssql_where=PeerReview.status == "VALID")
