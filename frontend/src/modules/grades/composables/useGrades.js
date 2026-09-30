@@ -5,6 +5,11 @@ export function useGrades(ctx) {
   const grades = ref([])
 
   const gradeAssignments = ref([])
+  const overviewItems = ref([])
+  const overviewLoading = ref(false)
+  const gradeAssignmentsLoading = ref(false)
+  let loadGeneration = 0
+  let loadedClassId = null
 
   const selectedGradeAssignmentId = ref('')
 
@@ -20,12 +25,39 @@ export function useGrades(ctx) {
   }
 
   async function loadGradesView(isCurrent, { background = false } = {}) {
-      const gradeData = ctx.role.value === 'TEACHER' ? await api(`/grades/assignments?class_id=${ctx.classId.value}`) : await api(`/grades?class_id=${ctx.classId.value}`)
-      if (!isCurrent()) return
-      if (ctx.role.value === 'TEACHER') gradeAssignments.value = gradeData.items
-      else grades.value = gradeData.items
-    
+    const generation = ++loadGeneration
+    const classId = ctx.classId.value
+    const teacher = ctx.role.value === 'TEACHER'
+    const current = () => generation === loadGeneration && isCurrent()
+    if (!teacher) {
+      const data = await api(`/grades?class_id=${classId}`)
+      if (current()) grades.value = data.items
+      return
+    }
+    if (loadedClassId !== classId) {
+      overviewItems.value = []
+      gradeAssignments.value = []
+      selectedGradeAssignmentId.value = ''
+      loadedClassId = classId
+    }
+    overviewLoading.value = true
+    gradeAssignmentsLoading.value = true
+    ctx.loadedViewKeys.add(ctx.pageKey.value)
+    const load = async (path, items, busy) => {
+      try {
+        const data = await api(path)
+        if (current()) items.value = data.items
+      } finally {
+        if (generation === loadGeneration) busy.value = false
+      }
+    }
+    const results = await Promise.allSettled([
+      load(`/grades/assignments?class_id=${classId}`, gradeAssignments, gradeAssignmentsLoading),
+      load(`/classes/${classId}/grade-overview`, overviewItems, overviewLoading)
+    ])
+    const failure = results.find(result => result.status === 'rejected')
+    if (current() && failure) throw failure.reason
   }
 
-  return { grades, gradeAssignments, selectedGradeAssignmentId, studentGradeSummary, studentLatestGrade, downloadExport, loadGradesView }
+  return { grades, gradeAssignments, gradeAssignmentsLoading, overviewItems, overviewLoading, selectedGradeAssignmentId, studentGradeSummary, studentLatestGrade, downloadExport, loadGradesView }
 }

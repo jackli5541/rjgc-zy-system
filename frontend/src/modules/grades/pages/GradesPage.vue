@@ -1,29 +1,14 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { DatabaseOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, FormOutlined, InboxOutlined, TeamOutlined, TrophyOutlined, UserOutlined } from '@ant-design/icons-vue'
-import { api, exportArchive } from '../../../api'
+import { exportArchive } from '../../../api'
 import { useShellContext } from '../../../shellContext'
 import { formatBeijingTime } from '../../../shared/time'
 
-const { role, classId, activeClasses, grades, gradeAssignments, selectedGradeAssignmentId, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback } = useShellContext()
+const { role, classId, activeClasses, grades, gradeAssignments, gradeAssignmentsLoading, overviewItems, overviewLoading, selectedGradeAssignmentId, statusLabel, gradeSourceLabel, downloadExport, openStudentFeedback } = useShellContext()
 const className = computed(() => activeClasses.value.find(item => item.id === classId.value)?.name || '')
 const gradesTab = ref('overview')
-const overviewItems = ref([])
-const overviewLoading = ref(false)
-async function loadGradeOverview() {
-  if (role.value !== 'TEACHER' || !classId.value) { overviewItems.value = []; return }
-  overviewLoading.value = true
-  try {
-    const data = await api(`/classes/${classId.value}/grade-overview`)
-    overviewItems.value = data.items
-  } catch (error) {
-    message.error(error.message || '成绩总览加载失败')
-  } finally {
-    overviewLoading.value = false
-  }
-}
-watch([role, classId], loadGradeOverview, { immediate: true })
 function gradeTagColor(grade) {
   if (grade === 'A' || grade === 'B') return 'green'
   if (grade === 'C') return 'blue'
@@ -50,6 +35,7 @@ const classSummary = computed(() => {
 
 const summaryCaption = computed(() => {
   const { studentCount, scored } = classSummary.value
+  if (overviewLoading.value && !studentCount) return '正在加载成绩'
   if (!studentCount) return '当前教学班暂无学生'
   if (!scored) return `${studentCount} 名学生，暂无人可结算综合成绩（分项数据未齐）`
   return `均分 / 及格率 / 优秀率按已结算综合成绩的 ${scored} 人计算，共 ${studentCount} 人`
@@ -118,7 +104,7 @@ async function downloadAssignmentFiles() {
 
         <a-tab-pane key="export">
           <template #tab><span><DownloadOutlined/> 单次作业导出</span></template>
-          <div class="export-toolbar"><a-select v-model:value="selectedGradeAssignmentId" allow-clear placeholder="选择个人作业" :options="gradeAssignments.map(item=>({value:item.id,label:item.title}))"/></div>
+          <div class="export-toolbar"><a-select v-model:value="selectedGradeAssignmentId" :loading="gradeAssignmentsLoading" allow-clear placeholder="选择个人作业" :options="gradeAssignments.map(item=>({value:item.id,label:item.title}))"/></div>
           <div v-if="selectedGradeAssignmentId" class="assignment-export-actions">
             <div class="assignment-export-status"><FileTextOutlined/><div><strong>{{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.title}}</strong><span>已提交 {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.submitted || 0}} / {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.total || 0}} · 已评分 {{gradeAssignments.find(item=>item.id===selectedGradeAssignmentId)?.graded || 0}}</span></div></div>
             <a-space wrap><a-button @click="downloadExport('grades')"><TrophyOutlined/> 成绩明细 XLSX</a-button><a-button @click="downloadExport('grades','csv')"><DownloadOutlined/> CSV</a-button><a-button type="primary" ghost @click="downloadAssignmentFiles"><InboxOutlined/> 学生作业原文件 ZIP</a-button></a-space>
