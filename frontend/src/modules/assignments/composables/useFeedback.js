@@ -50,6 +50,18 @@ export function useFeedback(ctx) {
     }
   }
 
+  function handlePeerFeedbackUpdated({ assessmentId, feedback, removedId }) {
+    const peer = ctx.selectedSubmission.value?.peer_feedbacks?.find(item => item.id === assessmentId)
+    if (!peer) return
+    peer.teacher_feedbacks ||= []
+    if (removedId) peer.teacher_feedbacks = peer.teacher_feedbacks.filter(item => item.id !== removedId)
+    else if (feedback) {
+      const index = peer.teacher_feedbacks.findIndex(item => item.id === feedback.id)
+      if (index >= 0) peer.teacher_feedbacks.splice(index, 1, feedback)
+      else peer.teacher_feedbacks.push(feedback)
+    }
+  }
+
   async function clearTeacherGrade() {
     try {
       const path = ctx.selectedAssignment.value.submitter_type === 'TEAM'
@@ -98,5 +110,5 @@ export function useFeedback(ctx) {
     ctx.selectedSubmission.value = null
   }
 
-  return { filePreview, openAssessmentDrawer, changeReviewTarget, handleExternalReviewTarget, handleFeedbackPublished, clearTeacherGrade, openFilePreview, openPortfolioFilePreview, closeFilePreview }
+  return { filePreview, openAssessmentDrawer, changeReviewTarget, handleExternalReviewTarget, handleFeedbackPublished, handlePeerFeedbackUpdated, clearTeacherGrade, openFilePreview, openPortfolioFilePreview, closeFilePreview }
 }

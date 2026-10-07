@@ -58,6 +58,7 @@ class Notification(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(32))
     title: Mapped[str] = mapped_column(String(180))
+    content: Mapped[str | None] = mapped_column(Text)
     object_type: Mapped[str | None] = mapped_column(String(32))
     object_id: Mapped[str | None] = mapped_column(String(64))
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

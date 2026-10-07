@@ -8,6 +8,8 @@
 
 .notification-item strong{color:#33465a;font-size:13px;font-weight:500}
 
+.notification-item .notification-content{margin:6px 0 0;color:#5d6d7d;font-size:12px;line-height:1.55;white-space:pre-wrap}
+
 .notification-item span{margin-top:4px;color:#8b97a4;font-size:11px}
 
 .notification-dot{width:7px;height:7px;flex:0 0 auto;margin-top:6px;border-radius:50%;background:#d7dee5}

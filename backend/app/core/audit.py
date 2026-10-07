@@ -58,8 +58,8 @@ def audit(db: Session, user: User | None, action: str, kind: str, oid: str, chan
         publish_event(db, user_id=user.id, scopes=["audit"], resource_type=kind, resource_id=oid, source_client_id=request_client_id.get())
 
 
-def notify(db: Session, uid: UUID, kind: str, title: str, object_type: str | None = None, object_id: str | None = None):
-    db.add(Notification(user_id=uid, kind=kind, title=title, object_type=object_type, object_id=object_id))
+def notify(db: Session, uid: UUID, kind: str, title: str, object_type: str | None = None, object_id: str | None = None, content: str | None = None):
+    db.add(Notification(user_id=uid, kind=kind, title=title, content=content, object_type=object_type, object_id=object_id))
     scopes = ["notifications"]
     if kind.startswith("TEAM_") or kind == "TOPIC_REQUIRED": scopes.extend(["teams", "members", "dashboard"])
     if kind.startswith("REVIEW_"): scopes.extend(["reviews", "dashboard"])

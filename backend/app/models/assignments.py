@@ -194,3 +194,20 @@ class SubmissionAnnotation(Base):
             ondelete="CASCADE",
         ),
     )
+
+
+class PeerAssessmentFeedback(Base):
+    __tablename__ = "peer_assessment_feedbacks"
+    id: Mapped[UUID] = uuid_pk()
+    assessment_id: Mapped[UUID] = mapped_column(ForeignKey("submission_assessments.id", ondelete="CASCADE"), index=True)
+    annotation_id: Mapped[UUID | None] = mapped_column(ForeignKey("submission_annotations.id", ondelete="CASCADE"), index=True)
+    target_type: Mapped[str] = mapped_column(String(16))
+    category: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str] = mapped_column(Text)
+    draft_category: Mapped[str | None] = mapped_column(String(32))
+    draft_reason: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="DRAFT", index=True)
+    teacher_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
