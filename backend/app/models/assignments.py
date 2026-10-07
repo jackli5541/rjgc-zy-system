@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from uuid import UUID
 
 from app.database import Base
+from app.core.utils import now
 from app.models._base import ForeignKey, ForeignKeyConstraint, uuid_pk
 
 class Assignment(Base):
@@ -27,7 +28,7 @@ class Assignment(Base):
     auto_review_error: Mapped[str | None] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(16), default="DRAFT")
     version: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
 
 
 class FileObject(Base):
@@ -46,7 +47,7 @@ class FileObject(Base):
     preview_storage_path: Mapped[str | None] = mapped_column(String(255))
     preview_error: Mapped[str | None] = mapped_column(String(500))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
 
 
 class Submission(Base):
@@ -72,7 +73,7 @@ class SubmissionVersion(Base):
     submission_id: Mapped[UUID] = mapped_column(ForeignKey("submissions.id", ondelete="CASCADE"), index=True)
     version_no: Mapped[int] = mapped_column(Integer)
     submitted_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
     member_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     is_late: Mapped[bool] = mapped_column(Boolean, default=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(80))
@@ -95,8 +96,8 @@ class SubmissionWorkspace(Base):
     assignment_id: Mapped[UUID] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True)
     owner_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
     owner_team_id: Mapped[UUID | None] = mapped_column(ForeignKey("teams.id"), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
 
 
 Index("uq_personal_submission_workspace", SubmissionWorkspace.assignment_id, SubmissionWorkspace.owner_user_id, unique=True, mssql_where=SubmissionWorkspace.owner_user_id.is_not(None))
@@ -116,8 +117,8 @@ class SubmissionDocument(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_workspace_document_name"),)
 
 
@@ -135,7 +136,7 @@ class MarkdownAsset(Base):
     width: Mapped[int] = mapped_column(Integer)
     height: Mapped[int] = mapped_column(Integer)
     orphaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
 
 
 class SubmissionDocumentAsset(Base):
@@ -164,8 +165,8 @@ class SubmissionAssessment(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     draft_payload: Mapped[dict | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (
         UniqueConstraint("submission_version_id", "evaluator_id", "kind", name="uq_submission_assessment_evaluator"),
     )
@@ -184,8 +185,8 @@ class SubmissionAnnotation(Base):
     anchor: Mapped[dict] = mapped_column(JSON)
     comment: Mapped[str] = mapped_column(Text, default="")
     position: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), onupdate=now)
     __table_args__ = (
         ForeignKeyConstraint(
             ["submission_version_id", "file_id"],

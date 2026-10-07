@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import { CheckCircleFilled, CloudSyncOutlined, CodeOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { api, exportArchive } from '../../api'
@@ -18,6 +18,10 @@ const props = defineProps({
   submitLabel: { type: String, default: '提交当前版本' },
 })
 const emit = defineEmits(['ready', 'preview-criteria', 'submit'])
+const parentAskAiTeacher = inject('askAiTeacher', null)
+if (parentAskAiTeacher) provide('askAiTeacher', quote => {
+  parentAskAiTeacher(quote, 'workspace')
+})
 const resourceBase = computed(() => props.basePath || `/assignments/${props.assignmentId}/workspace`)
 const loading = ref(false)
 const documentLoading = ref(false)

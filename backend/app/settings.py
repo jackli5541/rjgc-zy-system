@@ -25,6 +25,27 @@ class Settings(BaseSettings):
     markdown_asset_orphan_hours: int = 24
     export_archive_hours: int = 24
     frontend_dist: Path = PROJECT_ROOT / "frontend" / "dist"
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    ai_teacher_enabled: bool = False
+    ai_provider: str = "openai_compatible"
+    ai_base_url: str = "http://localhost:11434/v1"
+    ai_api_key: str = "local-dev"
+    ai_chat_model: str = "qwen2.5:7b-instruct"
+    ai_embedding_model: str = "bge-m3"
+    ai_rerank_model: str = ""
+    ai_request_timeout_seconds: int = 60
+    ai_teacher_max_history: int = 12
+    ai_teacher_max_context_chars: int = 12000
+    # 900 tokens frequently truncates Markdown explanations before the model
+    # reaches a natural conclusion. Keep a bounded default for low-bandwidth
+    # deployments; operators can tune this with AI_TEACHER_MAX_OUTPUT_TOKENS.
+    ai_teacher_max_output_tokens: int = 1600
+    ai_teacher_max_concurrent_per_worker: int = 4
+    ai_teacher_max_quote_chars: int = 1200
+    # Load the repository-level environment regardless of whether the API is
+    # started from the repository root or from backend/.
+    model_config = SettingsConfigDict(
+        env_file=(PROJECT_ROOT / ".env", PROJECT_ROOT / "backend" / ".env"),
+        extra="ignore",
+    )
 
 settings = Settings()

@@ -21,6 +21,7 @@ from app.modules.assignments import reviews as assignment_reviews
 from app.modules.assignments import router as assignments_router
 from app.modules.assignments import submissions as assignment_submissions
 from app.modules.assignments import workspace as assignment_workspace
+from app.modules.ai_teacher import router as ai_teacher_router
 from app.modules.attendance import router as attendance_router
 from app.modules.capstone import router as capstone_router
 from app.modules.grades import exports as grade_exports
@@ -88,6 +89,7 @@ app.include_router(materials_router.router)
 app.include_router(assignment_files.router)
 app.include_router(assignment_submissions.router)
 app.include_router(assignment_reviews.router)
+app.include_router(ai_teacher_router.router)
 app.include_router(grades_router.router)
 app.include_router(attendance_router.router)
 app.include_router(grade_exports.router)

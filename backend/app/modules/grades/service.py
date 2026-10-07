@@ -149,6 +149,6 @@ CHINA_TZ = timezone(timedelta(hours=8))
 
 def export_cell(value):
     if isinstance(value, datetime):
-        localized = value.astimezone(CHINA_TZ) if value.tzinfo else value
+        localized = (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).astimezone(CHINA_TZ)
         return localized.strftime("%Y-%m-%d %H:%M:%S")
     return value

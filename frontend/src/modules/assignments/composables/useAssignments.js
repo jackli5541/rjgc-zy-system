@@ -108,10 +108,11 @@ export function useAssignments(ctx) {
     const descriptionText = descriptionEditor.value?.getText().trim() || ''
     if (!descriptionText) return message.warning('请填写作业说明')
     if (!assignmentForm.due_at) return message.warning('请选择截止时间')
-    if (assignmentForm.submitter_type === 'TEAM' && new Date(assignmentForm.due_at) <= new Date() && (publishRequested || (assignmentForm.id && ctx.selectedAssignment.value?.status === 'PUBLISHED'))) return message.warning('小组作业截止时间必须晚于当前时间')
-    if (assignmentForm.starts_at && new Date(assignmentForm.starts_at) >= new Date(assignmentForm.due_at)) return message.warning('开始时间必须早于截止时间')
+    const dueAt = new Date(ctx.iso(assignmentForm.due_at))
+    if (assignmentForm.submitter_type === 'TEAM' && dueAt <= new Date() && (publishRequested || (assignmentForm.id && ctx.selectedAssignment.value?.status === 'PUBLISHED'))) return message.warning('小组作业截止时间必须晚于当前时间')
+    if (assignmentForm.starts_at && new Date(ctx.iso(assignmentForm.starts_at)) >= dueAt) return message.warning('开始时间必须早于截止时间')
     if (assignmentForm.auto_review_enabled) {
-      if (!assignmentForm.auto_review_due_at || new Date(assignmentForm.auto_review_due_at) <= new Date(assignmentForm.due_at)) return message.warning('互评截止时间必须晚于作业截止时间')
+      if (!assignmentForm.auto_review_due_at || new Date(ctx.iso(assignmentForm.auto_review_due_at)) <= dueAt) return message.warning('互评截止时间必须晚于作业截止时间')
       if (!assignmentForm.auto_review_criteria_text.trim() && (!assignmentForm.id || !reviewCriteriaFiles.value.length)) return message.warning('自动互评标准文字和附件至少提供一种')
     }
     if (assignmentForm.id) {

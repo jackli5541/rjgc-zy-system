@@ -9,6 +9,19 @@ sessionStorage.setItem('coursework-client-id', apiClientId)
 
 export function setCsrfToken(value) { csrfToken = value || '' }
 
+export async function apiStream(path, body, signal) {
+  const response = await fetch(`/api/v1${path}`, {
+    method: 'POST', credentials: 'include', signal,
+    headers: { 'Content-Type': 'application/json', 'X-Client-ID': apiClientId, 'X-CSRF-Token': csrfToken },
+    body: JSON.stringify(body)
+  })
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}))
+    throw new Error(data.message || data.detail?.message || `请求失败（${response.status}）`)
+  }
+  return response.body.getReader()
+}
+
 export async function exportArchive(path) {
   const job = await api(path, { method: 'POST' })
   for (let attempt = 0; attempt < 300; attempt += 1) {
