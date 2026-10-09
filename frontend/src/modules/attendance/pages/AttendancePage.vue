@@ -18,7 +18,7 @@ const rosterKeyword = ref('')
 const rosterStatus = ref('')
 const filteredRecords = computed(() => filterAttendanceRecords(selectedAttendance.value?.records, rosterKeyword.value, rosterStatus.value))
 const statusSaving = reactive({})
-const attendanceStatusColumns = [{ value: 'PRESENT', label: '出勤' }, { value: 'LATE', label: '迟到' }, { value: 'LEAVE', label: '请假' }]
+const attendanceStatusColumns = [{ value: 'PRESENT', label: '出勤' }, { value: 'LATE', label: '迟到' }, { value: 'LEAVE', label: '请假' }, { value: 'ABSENT', label: '缺勤' }]
 function setStatusSaving(key, saving) { statusSaving[key] = saving }
 const codeSeconds = computed(() => selectedAttendance.value?.code_expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.code_expires_at) - nowMs.value) / 1000)) : 0)
 const sessionSeconds = computed(() => selectedAttendance.value?.expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.expires_at) - nowMs.value) / 1000)) : 0)

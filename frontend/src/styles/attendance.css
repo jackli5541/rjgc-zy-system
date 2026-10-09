@@ -42,9 +42,11 @@
 .attendance-status-present{color:#16803c}
 .attendance-status-late{color:#ad6800}
 .attendance-status-leave{color:#1677ff}
+.attendance-status-absent{color:#cf1322}
 .attendance-status-present .ant-checkbox-checked .ant-checkbox-inner{background-color:#16803c;border-color:#16803c}
 .attendance-status-late .ant-checkbox-checked .ant-checkbox-inner{background-color:#ad6800;border-color:#ad6800}
 .attendance-status-leave .ant-checkbox-checked .ant-checkbox-inner{background-color:#1677ff;border-color:#1677ff}
+.attendance-status-absent .ant-checkbox-checked .ant-checkbox-inner{background-color:#cf1322;border-color:#cf1322}
 @media(max-width:760px){.attendance-mobile-record>.attendance-inline-status{grid-column:1/-1;min-height:36px}}
 .attendance-inline-note{display:flex;align-items:center;gap:6px;min-width:0}
 .attendance-inline-note .ant-input{min-width:0;flex:1}
