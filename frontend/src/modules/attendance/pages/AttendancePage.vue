@@ -1,24 +1,27 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { CheckCircleOutlined, ClockCircleOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons-vue'
+import { ClockCircleOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { beijingDateTimeToIso, formatBeijingDate, formatBeijingTime } from '../../../shared/time'
 import { useShellContext } from '../../../shellContext'
 import AttendanceRecordField from '../components/AttendanceRecordField.vue'
+import { filterAttendanceRecords } from '../records'
+import AttendanceProjection from '../components/AttendanceProjection.vue'
 
 const { classId, session, attendanceSessions, selectedAttendance, activeAttendance, loadAttendanceView, selectAttendance } = useShellContext()
 const form = reactive({ title: '', duration_minutes: 15, start_mode: 'NOW', started_at: '' })
 const creating = ref(false)
 const nowMs = ref(Date.now())
 const projecting = ref(false)
+const rosterKeyword = ref('')
+const rosterStatus = ref('')
+const filteredRecords = computed(() => filterAttendanceRecords(selectedAttendance.value?.records, rosterKeyword.value, rosterStatus.value))
 const statusSaving = reactive({})
 const attendanceStatusColumns = [{ value: 'PRESENT', label: '出勤' }, { value: 'LATE', label: '迟到' }, { value: 'LEAVE', label: '请假' }]
 function setStatusSaving(key, saving) { statusSaving[key] = saving }
 const codeSeconds = computed(() => selectedAttendance.value?.code_expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.code_expires_at) - nowMs.value) / 1000)) : 0)
 const sessionSeconds = computed(() => selectedAttendance.value?.expires_at ? Math.max(0, Math.ceil((Date.parse(selectedAttendance.value.expires_at) - nowMs.value) / 1000)) : 0)
-const checkedInStudents = computed(() => (selectedAttendance.value?.records || []).filter(record => ['PRESENT', 'LATE'].includes(record.status)))
-const avatarText = name => (name || '?').trim().slice(0, 1)
 const dateTime = value => formatBeijingTime(value, '—')
 let tick
 let refresh
@@ -114,6 +117,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => { clearInterval(tick); clearInterval(refresh); window.removeEventListener('keydown', escape) })
 watch(classId, () => { selectedAttendance.value = null; projecting.value = false; reload() })
+watch(() => selectedAttendance.value?.id, () => { rosterKeyword.value = ''; rosterStatus.value = '' })
 </script>
 
 <template>
@@ -145,7 +149,15 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
   </section>
 
   <section v-if="selectedAttendance" class="attendance-roster"><div class="attendance-section-title"><h2>{{selectedAttendance.title}} · 学生记录</h2><span>出勤 {{selectedAttendance.present}} · 迟到 {{selectedAttendance.late}} · 请假 {{selectedAttendance.leave}} · {{selectedAttendance.status==='ACTIVE'?'未签到':'缺勤'}} {{selectedAttendance.status==='ACTIVE'?selectedAttendance.pending:selectedAttendance.absent}}</span></div>
-    <a-table class="attendance-desktop-table" :data-source="selectedAttendance.records || []" row-key="student_id" size="small" :pagination="{pageSize:20}" :scroll="{x:680}">
+    <div class="attendance-roster-filters">
+      <a-input v-model:value="rosterKeyword" allow-clear placeholder="搜索姓名或学号" aria-label="搜索考勤姓名或学号"/>
+      <div class="attendance-roster-status-filters" role="group" aria-label="筛选考勤状态">
+        <a-button v-for="status in attendanceStatusColumns" :key="status.value" :type="rosterStatus===status.value?'primary':'default'" :aria-pressed="rosterStatus===status.value" @click="rosterStatus=rosterStatus===status.value?'':status.value">{{status.label}}</a-button>
+      </div>
+      <a-button @click="rosterKeyword=''; rosterStatus=''">重置筛选</a-button>
+      <span>显示 {{filteredRecords.length}} / {{selectedAttendance.records?.length || 0}} 人</span>
+    </div>
+    <a-table class="attendance-desktop-table" :data-source="filteredRecords" row-key="student_id" size="small" :pagination="{pageSize:20}" :scroll="{x:680}">
       <a-table-column title="学号" data-index="student_no" :width="150"/><a-table-column title="姓名" data-index="student_name" :width="130"/>
       <a-table-column v-for="status in attendanceStatusColumns" :key="status.value" :width="76" align="center">
         <template #title><span :class="`attendance-status-${status.value.toLowerCase()}`">{{status.label}}</span></template>
@@ -155,32 +167,16 @@ watch(classId, () => { selectedAttendance.value = null; projecting.value = false
       <a-table-column title="备注" :width="260"><template #default="{record}"><AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-note`" :record="record" :session-id="selectedAttendance.id" field="note" @saved="recordSaved"/></template></a-table-column>
     </a-table>
     <div class="attendance-mobile-records">
-      <article v-for="record in selectedAttendance.records || []" :key="record.student_id" class="attendance-mobile-record">
+      <article v-for="record in filteredRecords" :key="record.student_id" class="attendance-mobile-record">
         <div><strong>{{record.student_name}}</strong><small>{{record.student_no}}</small></div>
         <AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-status`" :record="record" :session-id="selectedAttendance.id" field="status" :busy="statusSaving[`${selectedAttendance.id}-${record.student_id}`]" @saving="setStatusSaving" @saved="recordSaved"/>
         <span>签到：{{dateTime(record.checked_in_at)}}</span>
         <AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-note`" :record="record" :session-id="selectedAttendance.id" field="note" @saved="recordSaved"/>
       </article>
-      <a-empty v-if="!selectedAttendance.records?.length" description="暂无学生记录"/>
+      <a-empty v-if="!filteredRecords.length" description="暂无符合条件的学生记录"/>
     </div>
   </section>
 
 
-  <div v-if="projecting && selectedAttendance?.status==='ACTIVE'" class="attendance-projection" role="dialog" aria-modal="true" aria-label="考勤投屏">
-    <button type="button" class="attendance-projection-close" aria-label="关闭投屏" @click="projecting=false">×</button>
-    <span>{{session.context?.current_class?.name}} · {{selectedAttendance.title}}</span>
-    <strong>{{selectedAttendance.code || '------'}}</strong>
-    <div class="attendance-projection-time">{{codeSeconds}} 秒后更新</div>
-    <div class="attendance-projection-foot"><span><CheckCircleOutlined/> 已签到 {{selectedAttendance.present + selectedAttendance.late}} / {{selectedAttendance.total}}</span><span>剩余 {{Math.ceil(sessionSeconds / 60)}} 分钟</span></div>
-    <div class="attendance-projection-attendees">
-      <div class="attendance-projection-attendees-title">已签到同学</div>
-      <div v-if="checkedInStudents.length" class="attendance-projection-attendees-list">
-        <div v-for="record in checkedInStudents" :key="record.student_id" class="attendance-projection-attendee" :class="{late:record.status==='LATE'}" :title="`${record.student_name}${record.status==='LATE'?' · 迟到':''}`">
-          <span class="attendance-projection-avatar">{{avatarText(record.student_name)}}</span>
-          <span class="attendance-projection-name">{{record.student_name}}</span>
-        </div>
-      </div>
-      <div v-else class="attendance-projection-attendees-empty">等待同学签到</div>
-    </div>
-  </div>
+  <AttendanceProjection v-if="projecting && selectedAttendance?.status==='ACTIVE'" :attendance="selectedAttendance" :class-name="session.context?.current_class?.name" :code-seconds="codeSeconds" :session-seconds="sessionSeconds" @close="projecting=false"/>
 </template>

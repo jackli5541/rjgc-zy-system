@@ -18,6 +18,10 @@ def clean_html(value: str) -> str:
     return re.sub(r'<a\s+([^>]*href="(?:https?://|mailto:)[^"]+"[^>]*)>', lambda match: f'<a {match.group(1)} target="_blank" rel="noopener noreferrer">', cleaned)
 
 
+def html_to_text(value: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(bleach.clean(value, tags=[], strip=True))).strip()
+
+
 def render_description(value: str) -> str:
     if re.search(r"</?[a-zA-Z][^>]*>", value):
         return clean_html(value)

@@ -6,7 +6,7 @@ from app.models._base import ForeignKey, ForeignKeyConstraint, uuid_pk
 from app.models.system import AuditLog, BackgroundJob, ImportBatch, LoginSession, Notification, RealtimeEvent, RoleMenuPermission, User
 from app.models.members import ClassJoinRequest, ClassMember, TeachingClass, Team, TeamMember, TeamRequest, Topic
 from app.models.materials import TeachingMaterial, TeachingMaterialAsset, TeachingMaterialFolder
-from app.models.assignments import Assignment, FileObject, FileObjectAsset, MarkdownAsset, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, SubmissionWorkspace, VersionFile
+from app.models.assignments import Assignment, FileObject, FileObjectAsset, MarkdownAsset, PeerAssessmentFeedback, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, SubmissionWorkspace, VersionFile
 from app.models.reviews import PeerReview, ReviewAssignment, ReviewCampaign
 from app.models.grades import Grade, GradeCoefficient, GradeRevision
 from app.models.capstone import CAPSTONE_STAGES, CapstoneAsset, CapstoneConfig, CapstoneDocument, CapstoneDocumentTemplate, CapstoneModuleAssignment, CapstoneStageGrade, CapstoneUnlock
@@ -44,6 +44,7 @@ __all__ = [
     "LoginSession",
     "MarkdownAsset",
     "Notification",
+    "PeerAssessmentFeedback",
     "PeerReview",
     "RealtimeEvent",
     "ReviewAssignment",

@@ -7,15 +7,15 @@ from sqlalchemy.orm import aliased
 from uuid import UUID
 
 from app.grading import finalize_campaign
-from app.models import Assignment, ClassMember, FileObject, Grade, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAssessment, SubmissionVersion, Team, TeamMember, User, VersionFile
+from app.models import Assignment, ClassMember, FileObject, Grade, PeerAssessmentFeedback, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionVersion, Team, TeamMember, User, VersionFile
 from app.core.audit import audit, notify
 from app.core.deps import CsrfUser, CurrentUser, Db, membership, require_class, require_team, require_writable_class, teacher, user_class
 from app.core.errors import ApiError
-from app.core.html import clean_html
+from app.core.html import clean_html, html_to_text
 from app.core.schemas import ReasonIn
 from app.core.utils import now
-from app.modules.assignments.schemas import AllocatedCampaignIn, PeerSubmissionAssessmentIn, ReviewIn, SubmissionFeedbackIn
-from app.modules.assignments.service import assessment_json, assignment_json, feedback_json, file_json, latest_personal_submission, lock_submission_version, own_submission, peer_assessment_for_version, peer_assessment_summary, peer_feedback_context, replace_feedback_annotations, require_peer_review_submission, submission_grade_result, validate_feedback_annotations, writable_teacher_classes
+from app.modules.assignments.schemas import AllocatedCampaignIn, PeerAssessmentFeedbackIn, PeerAssessmentFeedbackUpdateIn, PeerSubmissionAssessmentIn, ReviewIn, SubmissionFeedbackIn
+from app.modules.assignments.service import assessment_json, assignment_json, feedback_json, file_json, latest_personal_submission, lock_submission_version, own_submission, peer_assessment_feedbacks, peer_assessment_for_version, peer_assessment_summary, peer_feedback_context, replace_feedback_annotations, require_peer_review_submission, submission_grade_result, validate_feedback_annotations, writable_teacher_classes
 
 router = APIRouter()
 
@@ -196,6 +196,109 @@ def publish_peer_submission_feedback(version_id: UUID, data: SubmissionFeedbackI
     audit(db, user, "PEER_ASSESSMENT_UPDATED" if updating else "PEER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(submission_item.owner_user_id), "annotation_count": len(annotations)})
     db.commit(); db.refresh(item)
     return {**feedback_json(db, item), "updated": updating, "result": submission_grade_result(db, version)}
+
+
+FEEDBACK_TARGET_LABELS = {"GRADE": "评分", "COMMENT": "总体评语", "ANNOTATION": "文内批注"}
+FEEDBACK_CATEGORY_LABELS = {
+    "MISUNDERSTANDING": "理解有误",
+    "INSUFFICIENT_BASIS": "评价依据不足",
+    "INAPPROPRIATE_WORDING": "表述不当",
+    "OTHER": "其他",
+}
+
+
+@router.post("/api/v1/submission-assessments/{assessment_id}/teacher-feedback", status_code=201)
+def create_peer_assessment_feedback(assessment_id: UUID, data: PeerAssessmentFeedbackIn, user: CsrfUser, db: Db):
+    teacher(user)
+    assessment = db.get(SubmissionAssessment, assessment_id)
+    if not assessment or assessment.kind != "PEER":
+        raise ApiError(404, "PEER_ASSESSMENT_NOT_FOUND", "互评记录不存在")
+    assignment = db.get(Assignment, assessment.assignment_id)
+    if not assignment or not user_class(db, user, assignment.class_id):
+        raise ApiError(404, "PEER_ASSESSMENT_NOT_FOUND", "互评记录不存在")
+    require_writable_class(db, user, assignment.class_id)
+    annotation_id = data.annotation_id
+    if data.target_type == "ANNOTATION":
+        valid_annotation = annotation_id and db.scalar(select(SubmissionAnnotation.id).where(SubmissionAnnotation.id == annotation_id, SubmissionAnnotation.assessment_id == assessment.id))
+        if not valid_annotation:
+            raise ApiError(422, "PEER_FEEDBACK_TARGET_INVALID", "文内批注不属于该互评")
+    elif annotation_id:
+        raise ApiError(422, "PEER_FEEDBACK_TARGET_INVALID", "只有文内批注需要指定批注")
+    reason = clean_html(data.reason)
+    if not html_to_text(reason):
+        raise ApiError(422, "PEER_FEEDBACK_REASON_REQUIRED", "请填写教师理由")
+    feedback = PeerAssessmentFeedback(
+        assessment_id=assessment.id,
+        annotation_id=annotation_id,
+        target_type=data.target_type,
+        category=data.category,
+        reason=reason,
+        teacher_id=user.id,
+    )
+    db.add(feedback)
+    db.flush()
+    audit(db, user, "PEER_ASSESSMENT_FEEDBACK_CREATED", "peer_assessment_feedback", str(feedback.id), {"assessment_id": str(assessment.id), "target_type": data.target_type, "annotation_id": str(annotation_id) if annotation_id else None, "category": data.category})
+    db.commit()
+    return {"feedback": peer_assessment_feedbacks(db, assessment.id, True)[-1]}
+
+
+@router.put("/api/v1/peer-assessment-feedback/{feedback_id}")
+def update_peer_assessment_feedback(feedback_id: UUID, data: PeerAssessmentFeedbackUpdateIn, user: CsrfUser, db: Db):
+    teacher(user)
+    feedback = db.get(PeerAssessmentFeedback, feedback_id)
+    if not feedback or feedback.revoked_at or feedback.teacher_id != user.id:
+        raise ApiError(404, "PEER_ASSESSMENT_FEEDBACK_NOT_FOUND", "可修改的教师反馈不存在")
+    assessment = db.get(SubmissionAssessment, feedback.assessment_id)
+    assignment = db.get(Assignment, assessment.assignment_id) if assessment else None
+    if not assignment or not user_class(db, user, assignment.class_id):
+        raise ApiError(404, "PEER_ASSESSMENT_FEEDBACK_NOT_FOUND", "可修改的教师反馈不存在")
+    require_writable_class(db, user, assignment.class_id)
+    reason = clean_html(data.reason)
+    if not html_to_text(reason):
+        raise ApiError(422, "PEER_FEEDBACK_REASON_REQUIRED", "请填写教师理由")
+    if feedback.status == "PUBLISHED":
+        feedback.draft_category, feedback.draft_reason = data.category, reason
+    else:
+        feedback.category, feedback.reason = data.category, reason
+    audit(db, user, "PEER_ASSESSMENT_FEEDBACK_UPDATED", "peer_assessment_feedback", str(feedback.id), {"assessment_id": str(assessment.id)})
+    db.commit()
+    items = peer_assessment_feedbacks(db, assessment.id, True)
+    return {"feedback": next(item for item in items if item["id"] == str(feedback.id))}
+
+
+@router.delete("/api/v1/peer-assessment-feedback/{feedback_id}", status_code=204)
+def revoke_peer_assessment_feedback(feedback_id: UUID, user: CsrfUser, db: Db):
+    teacher(user)
+    feedback = db.get(PeerAssessmentFeedback, feedback_id)
+    if not feedback or feedback.revoked_at or feedback.teacher_id != user.id:
+        raise ApiError(404, "PEER_ASSESSMENT_FEEDBACK_NOT_FOUND", "教师反馈不存在")
+    assessment = db.get(SubmissionAssessment, feedback.assessment_id)
+    assignment = db.get(Assignment, assessment.assignment_id) if assessment else None
+    if not assignment or not user_class(db, user, assignment.class_id):
+        raise ApiError(404, "PEER_ASSESSMENT_FEEDBACK_NOT_FOUND", "教师反馈不存在")
+    require_writable_class(db, user, assignment.class_id)
+    feedback.revoked_at = now()
+    audit(db, user, "PEER_ASSESSMENT_FEEDBACK_REVOKED", "peer_assessment_feedback", str(feedback.id), {"assessment_id": str(assessment.id)})
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.delete("/api/v1/peer-assessment-feedback/{feedback_id}/draft")
+def discard_peer_assessment_feedback_draft(feedback_id: UUID, user: CsrfUser, db: Db):
+    teacher(user)
+    feedback = db.get(PeerAssessmentFeedback, feedback_id)
+    if not feedback or feedback.revoked_at or feedback.teacher_id != user.id or feedback.status != "PUBLISHED" or feedback.draft_reason is None:
+        raise ApiError(404, "PEER_ASSESSMENT_FEEDBACK_DRAFT_NOT_FOUND", "待发布修改不存在")
+    assessment = db.get(SubmissionAssessment, feedback.assessment_id)
+    assignment = db.get(Assignment, assessment.assignment_id) if assessment else None
+    if not assignment or not user_class(db, user, assignment.class_id):
+        raise ApiError(404, "PEER_ASSESSMENT_FEEDBACK_DRAFT_NOT_FOUND", "待发布修改不存在")
+    require_writable_class(db, user, assignment.class_id)
+    feedback.draft_category, feedback.draft_reason = None, None
+    audit(db, user, "PEER_ASSESSMENT_FEEDBACK_DRAFT_DISCARDED", "peer_assessment_feedback", str(feedback.id), {"assessment_id": str(assessment.id)})
+    db.commit()
+    items = peer_assessment_feedbacks(db, assessment.id, True)
+    return {"feedback": next(item for item in items if item["id"] == str(feedback.id))}
 
 
 @router.post("/api/v1/review-campaigns", status_code=201)

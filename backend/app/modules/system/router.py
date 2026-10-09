@@ -181,7 +181,7 @@ def notifications(user: CurrentUser, db: Db):
         if item.object_type == "team" and item.object_id: return f"/teams?team={item.object_id}"
         if item.object_type == "assignment" and item.object_id: return f"/assignments/{item.object_id}?tab=submission"
         return None
-    return {"items": [{"id": str(x.id), "title": x.title, "kind": x.kind, "object_type": x.object_type, "object_id": x.object_id, "link": link(x), "read": bool(x.read_at), "created_at": x.created_at} for x in items], "unread": sum(not x.read_at for x in items)}
+    return {"items": [{"id": str(x.id), "title": x.title, "content": x.content, "kind": x.kind, "object_type": x.object_type, "object_id": x.object_id, "link": link(x), "read": bool(x.read_at), "created_at": x.created_at} for x in items], "unread": sum(not x.read_at for x in items)}
 
 
 @router.post("/api/v1/notifications/read", status_code=204)

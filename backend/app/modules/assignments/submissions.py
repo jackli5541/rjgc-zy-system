@@ -14,7 +14,7 @@ from app.core.files import BASE64_IMAGE_PATTERN
 from app.core.html import clean_html
 from app.core.utils import now
 from app.modules.assignments.schemas import SubmissionAssessmentIn, SubmissionFeedbackIn
-from app.modules.assignments.service import annotation_json, assert_submission_update_allowed, assessment_json, assessment_payload, build_submission_grade_result, check_source_images, displayed_submission_grade_result, document_is_criteria, feedback_context, feedback_json, file_json, latest_personal_submission, markdown_asset_ids, missing_submission_grade_result, own_submission, remove_file_asset_links, save_submission_feedback, submission_grade_result, sync_document_assets
+from app.modules.assignments.service import annotation_json, assert_submission_update_allowed, assessment_json, assessment_payload, build_submission_grade_result, check_source_images, displayed_submission_grade_result, document_is_criteria, feedback_context, feedback_json, file_json, latest_personal_submission, markdown_asset_ids, missing_submission_grade_result, own_submission, publish_peer_assessment_feedbacks, remove_file_asset_links, save_submission_feedback, submission_grade_result, sync_document_assets
 
 router = APIRouter()
 
@@ -144,7 +144,7 @@ def save_teacher_submission_assessment(aid: UUID, student_id: UUID, data: Submis
     else:
         item = SubmissionAssessment(assignment_id=aid, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=student_id, kind="TEACHER", grade=data.grade, comment=clean_html(data.comment), status="PUBLISHED", published_at=now())
         db.add(item)
-    db.flush(); audit(db, user, "TEACHER_ASSESSMENT_UPDATED" if updating else "TEACHER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(student_id)}); db.commit()
+    db.flush(); publish_peer_assessment_feedbacks(db, version.id, user); audit(db, user, "TEACHER_ASSESSMENT_UPDATED" if updating else "TEACHER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(student_id)}); db.commit()
     return {**assessment_json(db, item), "updated": updating, "result": submission_grade_result(db, version)}
 
 
@@ -265,7 +265,7 @@ def submission_board(aid: UUID, user: CurrentUser, db: Db):
             annotations_by_assessment.setdefault(annotation.assessment_id, []).append(annotation_json(annotation))
 
     def serialize_assessment(item: SubmissionAssessment) -> dict:
-        return assessment_payload(item, evaluator_names[item.evaluator_id], annotations_by_assessment.get(item.id, []))
+        return assessment_payload(db, item, evaluator_names[item.evaluator_id], annotations_by_assessment.get(item.id, []), True)
 
     items = []
     for owner_id, owner_name, student_no, team_id, team_name in owners:

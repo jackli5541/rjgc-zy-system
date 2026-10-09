@@ -64,6 +64,18 @@ class PeerSubmissionAssessmentIn(SubmissionAssessmentIn):
     reviewee_id: UUID
 
 
+class PeerAssessmentFeedbackIn(BaseModel):
+    target_type: Literal["GRADE", "COMMENT", "ANNOTATION"]
+    annotation_id: UUID | None = None
+    category: Literal["MISUNDERSTANDING", "INSUFFICIENT_BASIS", "INAPPROPRIATE_WORDING", "OTHER"]
+    reason: str = Field(min_length=1, max_length=20000)
+
+
+class PeerAssessmentFeedbackUpdateIn(BaseModel):
+    category: Literal["MISUNDERSTANDING", "INSUFFICIENT_BASIS", "INAPPROPRIATE_WORDING", "OTHER"]
+    reason: str = Field(min_length=1, max_length=20000)
+
+
 class AssignmentUpdateIn(BaseModel):
     class_id: UUID | None = None
     title: str | None = Field(None, min_length=2, max_length=100); description: str | None = Field(None, min_length=1, max_length=5000); starts_at: datetime | None = None; due_at: datetime | None = None; allow_late: bool | None = None; submitter_type: Literal["TEAM", "INDIVIDUAL"] | None = None; kind: Literal["ASSIGNMENT", "EXPERIMENT"] | None = None; version: int

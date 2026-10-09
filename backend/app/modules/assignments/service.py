@@ -8,11 +8,11 @@ from sqlalchemy.orm import Session, load_only
 from uuid import UUID
 
 from app import storage
-from app.models import Assignment, ClassMember, FileObject, FileObjectAsset, MarkdownAsset, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, SubmissionWorkspace, TeachingClass, Team, TeamMember, User, VersionFile
+from app.models import Assignment, ClassMember, FileObject, FileObjectAsset, MarkdownAsset, PeerAssessmentFeedback, PeerReview, ReviewAssignment, ReviewCampaign, Submission, SubmissionAnnotation, SubmissionAssessment, SubmissionDocument, SubmissionDocumentAsset, SubmissionVersion, SubmissionWorkspace, TeachingClass, Team, TeamMember, User, VersionFile
 from app.core.audit import audit, notify
 from app.core.deps import membership, require_class, require_team, require_writable_class, teacher, user_class
 from app.core.errors import ApiError
-from app.core.html import clean_html, render_description
+from app.core.html import clean_html, html_to_text, render_description
 from app.core.utils import decode_text_file, now
 from app.modules.assignments.schemas import AssignmentFields, SubmissionAnnotationIn, SubmissionFeedbackIn
 
@@ -406,13 +406,34 @@ def require_peer_review_submission(db: Session, assignment_id: UUID, user_id: UU
     return submitted
 
 
-def assessment_payload(item: SubmissionAssessment, evaluator_name: str, annotations: list[dict]) -> dict:
+def peer_assessment_feedbacks(db: Session, assessment_id: UUID, include_drafts: bool = False) -> list[dict]:
+    filters = [PeerAssessmentFeedback.assessment_id == assessment_id, PeerAssessmentFeedback.revoked_at.is_(None)]
+    if not include_drafts:
+        filters.append(PeerAssessmentFeedback.status == "PUBLISHED")
+    rows = db.execute(
+        select(PeerAssessmentFeedback, User.display_name)
+        .join(User, User.id == PeerAssessmentFeedback.teacher_id)
+        .where(*filters)
+        .order_by(PeerAssessmentFeedback.created_at)
+    ).all()
+    return [{
+        "id": str(item.id), "target_type": item.target_type, "annotation_id": str(item.annotation_id) if item.annotation_id else None,
+        "category": item.draft_category if include_drafts and item.draft_reason is not None else item.category,
+        "reason": item.draft_reason if include_drafts and item.draft_reason is not None else item.reason,
+        "status": "DRAFT" if include_drafts and item.draft_reason is not None else item.status,
+        "published_status": item.status, "has_draft": item.draft_reason is not None,
+        "teacher_name": teacher_name, "created_at": item.created_at, "updated_at": item.updated_at,
+    } for item, teacher_name in rows]
+
+
+def assessment_payload(db: Session, item: SubmissionAssessment, evaluator_name: str, annotations: list[dict], include_feedback_drafts: bool = False) -> dict:
     return {
         "id": str(item.id), "kind": item.kind, "grade": item.grade, "comment": item.comment, "comment_html": item.comment,
         "status": item.status, "version": item.version, "published_at": item.published_at,
         "evaluator_id": str(item.evaluator_id), "evaluator_name": evaluator_name,
         "subject_user_id": str(item.subject_user_id), "submission_version_id": str(item.submission_version_id),
         "annotations": annotations,
+        "teacher_feedbacks": peer_assessment_feedbacks(db, item.id, include_feedback_drafts) if item.kind == "PEER" else [],
         "created_at": item.created_at, "updated_at": item.updated_at,
     }
 
@@ -423,7 +444,7 @@ def peer_assessment_summary(db: Session, item: SubmissionAssessment, current_use
         "id": str(item.id), "grade": item.grade, "status": item.status, "revision": item.version,
         "published_at": item.published_at, "evaluator_id": str(item.evaluator_id),
         "evaluator_name": evaluator.display_name, "is_current_evaluator": item.evaluator_id == current_user_id,
-        "comment": "", "annotations": [], "has_draft": False,
+        "comment": "", "annotations": [], "teacher_feedbacks": peer_assessment_feedbacks(db, item.id), "has_draft": False,
     }
 
 
@@ -447,7 +468,37 @@ def lock_submission_version(db: Session, version_id: UUID) -> None:
 
 def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
     evaluator = db.get(User, item.evaluator_id)
-    return assessment_payload(item, evaluator.display_name, assessment_annotations(db, item.id))
+    return assessment_payload(db, item, evaluator.display_name, assessment_annotations(db, item.id))
+
+
+def publish_peer_assessment_feedbacks(db: Session, submission_version_id: UUID, teacher_user: User) -> int:
+    rows = db.scalars(
+        select(PeerAssessmentFeedback)
+        .join(SubmissionAssessment, SubmissionAssessment.id == PeerAssessmentFeedback.assessment_id)
+        .where(
+            SubmissionAssessment.submission_version_id == submission_version_id,
+            SubmissionAssessment.kind == "PEER",
+            PeerAssessmentFeedback.teacher_id == teacher_user.id,
+            or_(PeerAssessmentFeedback.status == "DRAFT", PeerAssessmentFeedback.draft_reason.is_not(None)),
+            PeerAssessmentFeedback.revoked_at.is_(None),
+        )
+    ).all()
+    for feedback in rows:
+        assessment = db.get(SubmissionAssessment, feedback.assessment_id)
+        assignment = db.get(Assignment, assessment.assignment_id)
+        reviewer = db.get(User, assessment.evaluator_id)
+        reviewee = db.get(User, assessment.subject_user_id)
+        if feedback.draft_reason is not None:
+            feedback.category, feedback.reason = feedback.draft_category, feedback.draft_reason
+            feedback.draft_category, feedback.draft_reason = None, None
+        feedback.status = "PUBLISHED"
+        target_label = {"GRADE": "评分", "COMMENT": "总体评语", "ANNOTATION": "文内批注"}[feedback.target_type]
+        category_label = {"MISUNDERSTANDING": "理解有误", "INSUFFICIENT_BASIS": "评价依据不足", "INAPPROPRIATE_WORDING": "表述不当", "OTHER": "其他"}[feedback.category]
+        content = f"问题类型：{category_label}\n教师理由：{html_to_text(feedback.reason)}"
+        notify(db, assessment.evaluator_id, "REVIEW_FEEDBACK_FLAGGED", f"{teacher_user.display_name}指出你对{reviewee.display_name}《{assignment.title}》的{target_label}存在问题", "peer_assessment_feedback", str(feedback.id), f"{content}\n无需重新评价。")
+        notify(db, assessment.subject_user_id, "REVIEW_FEEDBACK_FLAGGED", f"{teacher_user.display_name}指出{reviewer.display_name}对你《{assignment.title}》的{target_label}存在问题", "peer_assessment_feedback", str(feedback.id), f"{content}\n该反馈用于澄清评价内容，你无需操作。")
+        audit(db, teacher_user, "PEER_ASSESSMENT_FEEDBACK_PUBLISHED", "peer_assessment_feedback", str(feedback.id), {"assessment_id": str(assessment.id)})
+    return len(rows)
 
 
 GRADE_POINTS = {"A": 5, "B": 4, "C": 3, "D": 2, "E": 1}
@@ -550,7 +601,7 @@ def assessment_annotations(db: Session, assessment_id: UUID) -> list[dict]:
 
 def feedback_json(db: Session, item: SubmissionAssessment | None, include_draft: bool = False) -> dict:
     if not item:
-        return {"status": None, "revision": 0, "grade": None, "comment": "", "annotations": [], "published_at": None, "has_draft": False}
+        return {"status": None, "revision": 0, "grade": None, "comment": "", "annotations": [], "teacher_feedbacks": [], "published_at": None, "has_draft": False}
     published = {"grade": item.grade, "comment": item.comment, "annotations": assessment_annotations(db, item.id)}
     draft = item.draft_payload if include_draft and item.draft_payload else None
     payload = draft or published
@@ -559,6 +610,7 @@ def feedback_json(db: Session, item: SubmissionAssessment | None, include_draft:
         "published_status": item.status, "revision": item.version, "published_at": item.published_at,
         "has_draft": bool(draft), "grade": payload["grade"], "comment": payload.get("comment", ""),
         "annotations": payload.get("annotations", []),
+        "teacher_feedbacks": peer_assessment_feedbacks(db, item.id) if item.kind == "PEER" else [],
     }
 
 
@@ -647,6 +699,8 @@ def save_submission_feedback(version_id: UUID, data: SubmissionFeedbackIn, user:
         item.version += 1
         replace_feedback_annotations(db, item, annotations, user)
     action = "TEACHER_FEEDBACK_PUBLISHED" if publish else "TEACHER_FEEDBACK_DRAFT_SAVED"
+    if publish:
+        publish_peer_assessment_feedbacks(db, version.id, user)
     audit(db, user, action, "submission_assessment", str(item.id), {"submission_version_id": str(version.id), "annotation_count": len(annotations)})
     db.commit(); db.refresh(item)
     return {**feedback_json(db, item, True), "result": submission_grade_result(db, version)}

@@ -2,7 +2,7 @@
 import FileReviewDrawer from './FileReviewDrawer.vue'
 import { useShellContext } from '../../../shellContext'
 
-const { changeReviewTarget, clearTeacherGrade, closeFilePreview, filePreview, fileReviewDrawer, fileReviewExpanded, gradingCriteriaFiles, handleExternalReviewTarget, handleFeedbackPublished, peerReviewExpanded, reviewTask, role, selectedAssignment, selectedCampaign, selectedSubmission, updateFileReviewExpanded } = useShellContext()
+const { changeReviewTarget, clearTeacherGrade, closeFilePreview, filePreview, fileReviewDrawer, fileReviewExpanded, gradingCriteriaFiles, handleExternalReviewTarget, handleFeedbackPublished, handlePeerFeedbackUpdated, peerReviewExpanded, reviewTask, role, selectedAssignment, selectedCampaign, selectedSubmission, updateFileReviewExpanded } = useShellContext()
 </script>
 
 <template>
@@ -30,6 +30,7 @@ const { changeReviewTarget, clearTeacherGrade, closeFilePreview, filePreview, fi
       @close="closeFilePreview"
       @update:expanded="updateFileReviewExpanded"
       @feedback-published="handleFeedbackPublished"
+      @peer-feedback-updated="handlePeerFeedbackUpdated"
       @clear-feedback="clearTeacherGrade"
       @target-change="changeReviewTarget"
       @external-target="handleExternalReviewTarget"
