@@ -9,7 +9,7 @@ const note = ref(props.record.note || '')
 const saving = ref(false)
 const dirty = ref(false)
 const feedback = ref('')
-const options = [{ value: 'PRESENT', label: '出勤' }, { value: 'LATE', label: '迟到' }, { value: 'LEAVE', label: '请假' }]
+const options = [{ value: 'PRESENT', label: '出勤' }, { value: 'LATE', label: '迟到' }, { value: 'LEAVE', label: '请假' }, { value: 'ABSENT', label: '缺勤' }]
 let timer
 watch(() => props.record.note, value => { if (!dirty.value && !saving.value) note.value = value || '' })
 
