@@ -1,4 +1,5 @@
 <script setup>
+import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { ArrowLeftOutlined, DownloadOutlined, EyeOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
@@ -15,7 +16,7 @@ async function exportClass() {
 </script>
 
 <template>
-  <div class="page-title detail-title"><div><div class="eyebrow">教学班详情</div><h1>{{session.context?.current_class?.name}}</h1><p>{{session.context?.current_class?.semester}}</p></div><a-button @click="closeClassDetail"><ArrowLeftOutlined/> 返回教学班列表</a-button></div>
+  <div class="page-title detail-title"><div><div class="eyebrow">教学班详情</div><h1>{{session.context?.current_class?.name}}</h1><AnimatedIntroText>{{session.context?.current_class?.semester}}</AnimatedIntroText></div><a-button @click="closeClassDetail"><ArrowLeftOutlined/> 返回教学班列表</a-button></div>
   <a-card class="panel-card" :bordered="false">
     <div class="card-toolbar class-portfolio-toolbar"><div><strong>{{session.context?.current_class?.name}}成员</strong><span class="class-member-caption">{{session.context?.current_class?.semester}}</span></div><a-space wrap>
       <a-input-search v-model:value="memberQuery" allow-clear placeholder="搜索学号、姓名或小组" style="width:240px;max-width:100%"/>

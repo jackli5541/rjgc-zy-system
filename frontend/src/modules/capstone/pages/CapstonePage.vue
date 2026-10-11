@@ -1,4 +1,5 @@
 <script setup>
+import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { FileMarkdownOutlined, LockOutlined, UnlockOutlined } from '@ant-design/icons-vue'
@@ -139,8 +140,7 @@ watch(classId, loadReviewStudents)
     <header class="page-title capstone-title">
       <div>
         <div class="eyebrow">贯穿16周的个人应用项目</div>
-        <h1>大作业管理</h1>
-        <p>审批共同选题和个人模块，跟踪每名学生的应用过程并独立验收。</p>
+        <h1>大作业管理</h1><AnimatedIntroText>审批共同选题和个人模块，跟踪每名学生的应用过程并独立验收。</AnimatedIntroText>
       </div>
     </header>
 

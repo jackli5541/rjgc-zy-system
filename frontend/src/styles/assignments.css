@@ -2,9 +2,9 @@ html.file-preview-open { overflow: hidden; }
 
 .assignment-row .ant-card-body::before, .assignment-row .ant-card-body::after { display: none; }
 
-.assignment-row { margin-bottom:12px;border:1px solid #e5ebf1!important;border-radius:8px!important;cursor:pointer;transition:border-color .18s,box-shadow .18s }
+.assignment-row { margin-bottom:12px;border:1px solid #e5ebf1!important;border-radius:8px!important;cursor:pointer;transition:transform .2s ease,border-color .18s,box-shadow .2s ease }
 
-.assignment-row:hover{border-color:#accce5!important;box-shadow:0 5px 18px rgba(25,74,113,.06)}
+.assignment-row:hover{transform:translateY(-3px);border-color:#e5ebf1!important;box-shadow:0 10px 26px rgba(22,40,59,.1),0 3px 8px rgba(22,40,59,.04)}
 
 .assignment-row .ant-card-body{display:grid;grid-template-columns:52px minmax(0,1fr) 190px;align-items:center;gap:18px;padding:20px 22px}
 
@@ -19,6 +19,24 @@ html.file-preview-open { overflow: hidden; }
 .assignment-main>p{margin:7px 0;color:#748293;font-size:12px}
 
 .assignment-meta{display:flex;gap:20px;color:#8b96a3;font-size:11px}
+
+/* Student cards use a stronger visual hierarchy: title, deadline and state are easy to scan. */
+.assignment-student-row{border-radius:12px!important;background:#fff;box-shadow:0 2px 8px rgba(28,62,91,.05)}
+.assignment-student-row .ant-card-body{min-height:116px;grid-template-columns:56px minmax(0,1fr) 220px;padding:22px 24px;gap:20px}
+.assignment-student-row .assignment-icon{width:52px;height:52px;border-radius:14px;color:#1769aa;background:#eaf3fb;font-size:23px}
+.assignment-student-row .assignment-main{min-width:0}
+.assignment-student-row .assignment-heading{gap:10px}
+.assignment-student-row .assignment-heading h3{color:#183b5b;font-size:17px;font-weight:700;line-height:1.35}
+.assignment-student-row .rich-text.compact{margin:7px 0 10px;color:#6d7f90;line-height:1.5}
+.assignment-student-row .assignment-due{display:flex;align-items:center;gap:7px;color:#526b80;font-size:12px;font-weight:600}
+.assignment-student-row .assignment-due>span{color:#94a2af;font-weight:500}
+.assignment-student-row .assignment-end{gap:9px;padding-left:18px;border-left:1px solid #edf1f4}
+.assignment-student-row .assignment-countdown{font-size:16px;font-weight:700}
+.assignment-student-row .assignment-tags{gap:6px}
+.assignment-student-row .student-status-tag{margin:0;font-weight:600;border-radius:999px}
+.assignment-student-row .student-status-tag.completed{color:#287b4b;background:#e9f8ed;border-color:#b9ddc6}
+.assignment-student-row .student-status-tag.overdue{font-weight:600}
+.assignment-student-row:hover{box-shadow:0 10px 26px rgba(22,40,59,.1),0 3px 8px rgba(22,40,59,.04)}
 
 .assignment-end{display:flex;align-items:flex-end;flex-direction:column;gap:8px;text-align:right}
 
@@ -148,6 +166,9 @@ html.file-preview-open { overflow: hidden; }
   .assignment-tags,.assignment-entry-actions{justify-content:flex-start}
   .assignment-entry-actions .ant-btn{padding:0 5px}
   .assignment-heading{align-items:flex-start;flex-wrap:wrap}
+  .assignment-student-row .ant-card-body{min-height:0;padding:17px 16px;gap:12px}
+  .assignment-student-row .assignment-end{padding:12px 0 0;border-top:1px solid #edf1f4;border-left:0}
+  .assignment-student-row .assignment-heading h3{font-size:15px}
   .assignment-meta{flex-direction:column;gap:4px}
   .review-card-body{grid-template-columns:1fr;gap:15px}
   .review-actions{text-align:left}
@@ -630,6 +651,15 @@ html.file-preview-open { overflow: hidden; }
 .assignment-row:has(.assignment-entry-actions) .ant-card-body{grid-template-columns:52px minmax(0,1fr) minmax(390px,430px)}
 
 .assignment-tags{flex-wrap:wrap}
+
+@media (min-width:1400px) {
+  .assignment-row:has(.assignment-entry-actions) .ant-card-body{grid-template-columns:52px minmax(0,1fr) 660px}
+  .assignment-end:has(.assignment-progress){display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:24px;row-gap:8px;align-items:center}
+  .assignment-end:has(.assignment-progress) .assignment-progress{grid-column:1;grid-row:1/4;align-self:center}
+  .assignment-end:has(.assignment-progress) .assignment-countdown{grid-column:2;grid-row:1}
+  .assignment-end:has(.assignment-progress) .assignment-tags{grid-column:2;grid-row:2;justify-content:flex-end}
+  .assignment-end:has(.assignment-progress) .assignment-entry-actions{grid-column:2;grid-row:3}
+}
 
 .student-workspace-side{display:flex;align-items:flex-end;gap:10px;flex-direction:column}
 

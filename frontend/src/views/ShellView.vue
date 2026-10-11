@@ -259,6 +259,7 @@ watch(() => route.query.tab, tab => {
 })
 
 watch(() => route.path, () => { ctx.memberDetail.value = null; if (view.value !== 'assignment-detail') ctx.openedSubmissionPreview.value = '' })
+watch(() => route.path, path => { if (path !== '/teams') ctx.closeTeamDrawer() })
 
 watch(() => session.teamGate, required => { clearInterval(gateTimer); gateTimer = required ? setInterval(pollGate, 10000) : undefined })
 

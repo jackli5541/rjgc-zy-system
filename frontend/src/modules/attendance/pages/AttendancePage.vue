@@ -1,4 +1,5 @@
 <script setup>
+import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { ClockCircleOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons-vue'
@@ -121,7 +122,7 @@ watch(() => selectedAttendance.value?.id, () => { rosterKeyword.value = ''; rost
 </script>
 
 <template>
-  <div class="page-title attendance-heading"><div><h1>考勤管理</h1><p>{{session.context?.current_class?.semester}} · {{session.context?.current_class?.name}}</p></div><a-button @click="exportClass"><DownloadOutlined/> 导出本学期 XLSX</a-button></div>
+  <div class="page-title attendance-heading"><div><h1>考勤管理</h1><AnimatedIntroText>{{session.context?.current_class?.semester}} · {{session.context?.current_class?.name}}</AnimatedIntroText></div><a-button @click="exportClass"><DownloadOutlined/> 导出本学期 XLSX</a-button></div>
 
   <section class="attendance-start">
     <div class="attendance-section-title"><h2>发起考勤</h2><span v-if="activeAttendance">本班已有进行中或待开始的考勤</span></div>

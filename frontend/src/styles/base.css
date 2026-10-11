@@ -81,7 +81,9 @@ button, input, textarea { letter-spacing: 0; }
 
 .top-nav button.active { color: #176b78; font-weight: 600; }
 
-.top-nav button.active::after { content: ''; position: absolute; right: 18px; bottom: 0; left: 18px; height: 3px; border-radius: 3px 3px 0 0; background: #176b78; }
+.top-nav { position: relative; }
+
+.nav-underline { position: absolute; left: 0; bottom: 0; height: 3px; border-radius: 3px 3px 0 0; background: #176b78; pointer-events: none; transition: transform .26s ease-out, width .26s ease-out; }
 
 .top-nav button:focus-visible { outline: 2px solid #1769aa; outline-offset: -3px; border-radius: 5px; }
 
@@ -110,6 +112,16 @@ button, input, textarea { letter-spacing: 0; }
 .page-title h1 { margin: 3px 0 4px; color: #152536; font-size: 28px; line-height: 1.25; letter-spacing: 0; }
 
 .page-title p { margin: 0; color: #778698; }
+
+.page-title .eyebrow { animation: page-intro-enter 220ms ease-out both; }
+.page-title h1 { animation: page-intro-enter 280ms ease-out 70ms both; }
+@keyframes page-intro-enter {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-title .eyebrow, .page-title h1 { animation: none; }
+}
 
 .eyebrow { color: #1769aa; font-size: 12px; font-weight: 700; }
 
@@ -355,7 +367,6 @@ button, input, textarea { letter-spacing: 0; }
 
 .assignment-row.task-completed .assignment-heading .ant-tag{border-color:#b9ddc6;background:#e5f6eb;color:#267448;font-weight:600}
 
-.assignment-row.task-completed .assignment-end::before{content:'✓ 已完成';align-self:flex-end;padding:4px 9px;border:1px solid #c1e3cb;border-radius:999px;background:#e9f8ed;color:#2d7d4e;font-size:12px;font-weight:600;line-height:1.2}
 
 .assignment-row.task-completed:hover{border-color:#81c49b!important;box-shadow:inset 4px 0 #2f8f5b,0 6px 18px rgba(45,126,77,.1)}
 

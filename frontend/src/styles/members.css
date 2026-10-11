@@ -1,5 +1,16 @@
 .team-export-button.ant-btn{border-color:#b5cdd1;background:#f0f7f7;color:#176b78;border-radius:6px;box-shadow:0 1px 2px rgba(22,40,59,.04)}
 
+.team-request-secondary{margin-top:20px;border:1px solid #e5ebf1;border-radius:8px;background:#fff}
+.team-request-secondary summary{padding:16px 20px;color:#536579;font-size:13px;cursor:pointer}
+.team-request-secondary summary span{margin-left:12px;color:#8a97a4;font-size:12px}
+.team-request-body{padding:0 20px 16px}
+.team-request-loading,.team-request-empty{padding:20px;color:#7e8c9a;font-size:12px}
+.team-portfolio-inline{display:block;overflow:hidden;margin-bottom:20px;border:1px solid #e5ebf1;border-radius:8px;background:#fff}
+.team-portfolio-inline .team-portfolio-section{padding-inline:24px}
+.team-portfolio-inline>.ant-skeleton{padding:24px}
+.team-portfolio-inline .team-drawer-section-title{margin-bottom:12px}
+@media(max-width:640px){.team-portfolio-inline .team-portfolio-section{padding-inline:16px}}
+
 .team-export-button.ant-btn:hover{border-color:#176b78;background:#e5f1f1;color:#125864}
 
 .teacher-team-actions:has(.team-export-button){padding:12px 16px}
@@ -60,7 +71,7 @@
 
 .team-card { border: 1px solid #e5ebf1 !important; border-radius: 8px !important; transition: transform .18s, box-shadow .18s; }
 
-.team-card:hover { transform: translateY(-2px); box-shadow:0 8px 24px rgba(21,50,79,.08) }
+.team-card:hover { transform: translateY(-3px); border-color:#e5ebf1!important; box-shadow:0 10px 26px rgba(22,40,59,.1),0 3px 8px rgba(22,40,59,.04) }
 
 .team-card-top { display:flex;align-items:center;justify-content:space-between }
 
@@ -78,7 +89,8 @@
 
 .teacher-team-card{min-width:0;overflow:hidden;border:1px solid #e5ebf1;border-radius:8px;background:#fff;box-shadow:0 2px 10px rgba(22,40,59,.03);transition:border-color .18s,box-shadow .18s}
 
-.teacher-team-card:hover{border-color:#accce5;box-shadow:0 5px 18px rgba(25,74,113,.07)}
+.teacher-team-card{transition:transform .2s ease,border-color .18s,box-shadow .2s ease}
+.teacher-team-card:hover{transform:translateY(-3px);border-color:#e5ebf1;box-shadow:0 10px 26px rgba(22,40,59,.1),0 3px 8px rgba(22,40,59,.04)}
 
 .teacher-team-open{display:flex;flex-direction:column;gap:18px;width:100%;min-height:190px;padding:20px 22px;border:0;background:transparent;text-align:left;font:inherit;cursor:pointer}
 

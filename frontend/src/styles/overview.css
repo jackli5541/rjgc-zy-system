@@ -1,5 +1,16 @@
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
 
+.overview-page :is(.stat-card, .student-focus, .panel-card, .completion-chart-panel) { transition: transform .24s ease-out, box-shadow .24s ease-out; }
+
+@media (hover: hover) and (pointer: fine) {
+  .overview-page :is(.stat-card, .student-focus, .panel-card, .completion-chart-panel):hover { transform: translateY(-3px); box-shadow: 0 10px 26px rgba(22,40,59,.1), 0 3px 8px rgba(22,40,59,.04); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overview-page :is(.stat-card, .student-focus, .panel-card, .completion-chart-panel) { transition: none; }
+  .overview-page :is(.stat-card, .student-focus, .panel-card, .completion-chart-panel):hover { transform: none; }
+}
+
 .stat-card { min-height: 132px; display: flex; align-items: flex-start; gap: 16px; padding: 22px; border: 1px solid #e8edf3; border-radius: 8px; background: #fff; box-shadow: 0 2px 9px rgba(16,41,67,.035); }
 
 .stat-icon { width: 42px; height: 42px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; font-size: 20px; }

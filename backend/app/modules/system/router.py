@@ -175,13 +175,28 @@ def download_export_job(job_id: UUID, user: CurrentUser, db: Db):
 
 
 @router.get("/api/v1/notifications")
-def notifications(user: CurrentUser, db: Db):
-    items = db.scalars(select(Notification).where(Notification.user_id == user.id, Notification.kind != "SUBMISSION_RESUBMITTED").order_by(Notification.created_at.desc()).limit(100)).all()
+def notifications(user: CurrentUser, db: Db, history: bool = False, offset: int = Query(0, ge=0)):
+    query = select(Notification).where(Notification.user_id == user.id, Notification.kind != "SUBMISSION_RESUBMITTED")
+    ordered = query.order_by(Notification.created_at.desc(), Notification.id.desc())
+    unread = db.scalar(select(func.count()).select_from(query.where(Notification.read_at.is_(None)).subquery())) or 0
+    read_query = ordered.where(Notification.read_at.is_not(None))
+    if history:
+        read_items = db.scalars(read_query.offset(offset).limit(6)).all()
+        items = read_items[:5]
+        next_offset = offset + len(items)
+        has_more = len(read_items) > 5
+    else:
+        items = list(db.scalars(ordered.where(Notification.read_at.is_(None))).all())
+        read_limit = max(0, 5 - len(items))
+        read_items = db.scalars(read_query.limit(read_limit + 1)).all()
+        items.extend(read_items[:read_limit])
+        next_offset = min(len(read_items), read_limit)
+        has_more = len(read_items) > read_limit
     def link(item: Notification) -> str | None:
         if item.object_type == "team" and item.object_id: return f"/teams?team={item.object_id}"
         if item.object_type == "assignment" and item.object_id: return f"/assignments/{item.object_id}?tab=submission"
         return None
-    return {"items": [{"id": str(x.id), "title": x.title, "content": x.content, "kind": x.kind, "object_type": x.object_type, "object_id": x.object_id, "link": link(x), "read": bool(x.read_at), "created_at": x.created_at} for x in items], "unread": sum(not x.read_at for x in items)}
+    return {"items": [{"id": str(x.id), "title": x.title, "content": x.content, "kind": x.kind, "object_type": x.object_type, "object_id": x.object_id, "link": link(x), "read": bool(x.read_at), "created_at": x.created_at} for x in items], "unread": unread, "next_offset": next_offset, "has_more": has_more}
 
 
 @router.post("/api/v1/notifications/read", status_code=204)

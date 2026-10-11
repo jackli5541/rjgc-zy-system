@@ -1,4 +1,5 @@
 <script setup>
+import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message, Modal, Input } from 'ant-design-vue'
 import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, MoreOutlined, UploadOutlined, VideoCameraOutlined } from '@ant-design/icons-vue'
@@ -197,7 +198,7 @@ onBeforeUnmount(() => htmlResizeObserver?.disconnect())
   <section class="teaching-materials-page" @click="clearContext">
     <input ref="uploadInput" class="teaching-material-upload-input" type="file" accept=".md,.html,.htm,.mp4" @change="handleUpload">
     <header class="page-title teaching-materials-title">
-      <div><div class="eyebrow">课程资源</div><h1>教学资料</h1><p>文件目录（右击操作）</p></div>
+      <div><div class="eyebrow">课程资源</div><h1>教学资料</h1><AnimatedIntroText>文件目录（右击操作）</AnimatedIntroText></div>
       <a-tag v-if="canManage" color="blue">教师管理</a-tag><a-tag v-else>只读查看</a-tag>
     </header>
     <a-alert v-if="error" type="error" show-icon :message="error" class="teaching-materials-alert" />
