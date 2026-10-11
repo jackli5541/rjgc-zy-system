@@ -8,6 +8,7 @@ import { TableKit } from '@tiptap/extension-table'
 import { AudioOutlined, BlockOutlined, BoldOutlined, CodeOutlined, DeleteColumnOutlined, DeleteOutlined, DeleteRowOutlined, DeploymentUnitOutlined, InsertRowAboveOutlined, InsertRowBelowOutlined, InsertRowLeftOutlined, InsertRowRightOutlined, ItalicOutlined, LinkOutlined, MessageOutlined, MinusOutlined, OrderedListOutlined, PictureOutlined, RedoOutlined, StopOutlined, TableOutlined, UndoOutlined, UnorderedListOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { cleanupMermaidArtifacts, renderMermaid as renderMermaidSvg } from '../../mermaidRenderer'
+import MediaLightbox from './MediaLightbox.vue'
 
 let activeSpeechStop = null
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -39,11 +40,42 @@ const listening = ref(false)
 const speechState = ref('idle')
 const interimText = ref('')
 const mermaidOpen = ref(false)
+const mermaidPreviewOpen = ref(false)
+const mermaidPreviewSvg = ref('')
+const imagePreviewSrc = ref('')
+const imagePreviewAlt = ref('')
 const mermaidSource = ref('flowchart LR\n  A[开始] --> B[处理]\n  B --> C[完成]')
 const mermaidSvg = ref('')
 const mermaidError = ref('')
 const mermaidRendering = ref(false)
+const mermaidBuilderScale = ref(1)
+const mermaidBuilderOffset = ref({ x: 0, y: 0 })
+const mermaidBuilderDragging = ref(false)
+const mermaidBuilderViewport = ref(null)
+let mermaidBuilderPointer = null
 const editingMermaidPos = ref(null)
+function openMermaidPreview(svg) { mermaidPreviewSvg.value = svg; imagePreviewSrc.value = ''; mermaidPreviewOpen.value = true }
+function openImagePreview(src, alt = '图片预览') { imagePreviewSrc.value = src; imagePreviewAlt.value = alt; mermaidPreviewSvg.value = ''; mermaidPreviewOpen.value = true }
+function closeMermaidPreview() { mermaidPreviewOpen.value = false; mermaidPreviewSvg.value = ''; imagePreviewSrc.value = ''; imagePreviewAlt.value = '' }
+function zoomMermaidBuilder(amount) { mermaidBuilderScale.value = Math.min(3, Math.max(.5, mermaidBuilderScale.value + amount)) }
+function resetMermaidBuilder() { mermaidBuilderScale.value = 1; mermaidBuilderOffset.value = { x: 0, y: 0 } }
+function startMermaidBuilderDrag(event) {
+  if (event.button !== 0 || !mermaidSvg.value) return
+  mermaidBuilderPointer = { id: event.pointerId, x: event.clientX - mermaidBuilderOffset.value.x, y: event.clientY - mermaidBuilderOffset.value.y }
+  mermaidBuilderDragging.value = true
+  mermaidBuilderViewport.value?.setPointerCapture(event.pointerId)
+}
+function moveMermaidBuilderDrag(event) {
+  if (mermaidBuilderPointer?.id !== event.pointerId) return
+  mermaidBuilderOffset.value = { x: event.clientX - mermaidBuilderPointer.x, y: event.clientY - mermaidBuilderPointer.y }
+}
+function endMermaidBuilderDrag(event) {
+  if (mermaidBuilderPointer?.id !== event.pointerId) return
+  mermaidBuilderPointer = null
+  mermaidBuilderDragging.value = false
+  if (mermaidBuilderViewport.value?.hasPointerCapture(event.pointerId)) mermaidBuilderViewport.value.releasePointerCapture(event.pointerId)
+}
+
 const imageInput = ref(null)
 const imageLoading = ref(false)
 const lastSpeechRange = ref(null)
@@ -79,13 +111,18 @@ const MermaidBlock = Node.create({
       dom.title = '点击编辑图表，按 Delete 删除'
       const preview = document.createElement('div')
       preview.className = 'mermaid-document-preview'
+      const zoomButton = document.createElement('button')
+      zoomButton.type = 'button'
+      zoomButton.className = 'mermaid-zoom-button'
+      zoomButton.textContent = '放大查看'
+      zoomButton.setAttribute('aria-label', '放大查看 Mermaid 图表')
       const deleteButton = document.createElement('button')
       deleteButton.type = 'button'
       deleteButton.className = 'mermaid-delete-button'
       deleteButton.setAttribute('aria-label', '删除 Mermaid 图表')
       deleteButton.title = '删除图表'
       deleteButton.textContent = '删除'
-      dom.append(preview, deleteButton)
+      dom.append(preview, zoomButton, deleteButton)
       let currentNode = node
       let renderVersion = 0
 
@@ -100,12 +137,14 @@ const MermaidBlock = Node.create({
         }
       }
       const edit = () => openMermaidEditor(currentNode.attrs.source, getPos())
+      const zoom = () => { const svg = preview.querySelector('svg'); if (svg) openMermaidPreview(svg.outerHTML) }
       const remove = () => {
         const position = getPos()
         nodeEditor.view.dispatch(nodeEditor.state.tr.delete(position, position + currentNode.nodeSize))
         nodeEditor.commands.focus()
       }
-      dom.addEventListener('click', edit)
+      dom.addEventListener('click', event => { if (!event.target.closest('button')) edit() })
+      zoomButton.addEventListener('click', event => { event.stopPropagation(); zoom() })
       deleteButton.addEventListener('click', event => { event.stopPropagation(); remove() })
       dom.addEventListener('keydown', event => {
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); edit() }
@@ -165,6 +204,11 @@ const EditableImage = Image.extend({
       deleteButton.setAttribute('aria-label', '删除图片')
       deleteButton.title = '删除图片'
       deleteButton.textContent = '删除'
+      const zoomButton = document.createElement('button')
+      zoomButton.type = 'button'
+      zoomButton.className = 'document-image-zoom'
+      zoomButton.textContent = '放大查看'
+      zoomButton.setAttribute('aria-label', '放大查看图片')
       const widthHandle = document.createElement('button')
       widthHandle.type = 'button'
       widthHandle.className = 'document-image-resize resize-width'
@@ -192,6 +236,8 @@ const EditableImage = Image.extend({
         nodeEditor.commands.focus()
       }
       applyNode(node)
+      zoomButton.addEventListener('click', event => { event.stopPropagation(); openImagePreview(image.currentSrc || image.src, image.alt) })
+      image.addEventListener('click', event => { event.stopPropagation(); openImagePreview(image.currentSrc || image.src, image.alt) })
       deleteButton.addEventListener('click', event => { event.stopPropagation(); remove() })
       const bindResize = (handle, axis) => handle.addEventListener('pointerdown', event => {
         event.preventDefault()
@@ -233,7 +279,7 @@ const EditableImage = Image.extend({
       bindResize(widthHandle, 'width')
       bindResize(heightHandle, 'height')
       bindResize(cornerHandle, 'both')
-      dom.append(image, resizeFrame, deleteButton, widthHandle, heightHandle, cornerHandle)
+      dom.append(image, resizeFrame, zoomButton, deleteButton, widthHandle, heightHandle, cornerHandle)
       return {
         dom,
         update: nextNode => {
@@ -242,7 +288,7 @@ const EditableImage = Image.extend({
           applyNode(nextNode)
           return true
         },
-        stopEvent: event => [deleteButton, widthHandle, heightHandle, cornerHandle].includes(event.target)
+        stopEvent: event => [zoomButton, deleteButton, widthHandle, heightHandle, cornerHandle].includes(event.target)
       }
     }
   }
@@ -520,8 +566,9 @@ async function insertMermaid() {
     <div v-if="speechEnabled&&speechSupported&&listening&&interimText" class="speech-interim">正在识别：{{interimText}}</div>
     <EditorContent :editor="editor"/>
     <Teleport to="body"><button v-if="selectionAction" type="button" class="ai-selection-action" :style="{left:`${selectionAction.left}px`,top:`${selectionAction.top}px`}" @pointerdown.prevent @click="askAi"><MessageOutlined/> 问叶老师</button></Teleport>
+    <MediaLightbox v-if="mermaidPreviewOpen" :svg="mermaidPreviewSvg" :src="imagePreviewSrc" :alt="imagePreviewAlt" @close="closeMermaidPreview"/>
     <a-modal v-model:open="mermaidOpen" :title="editingMermaidPos===null?'插入 Mermaid 图表':'编辑 Mermaid 图表'" width="820px" :confirm-loading="mermaidRendering" :ok-text="editingMermaidPos===null?'插入图表':'保存修改'" cancel-text="取消" @ok="insertMermaid">
-      <div class="mermaid-builder"><div><label>图表语法</label><a-textarea v-model:value="mermaidSource" :rows="12" spellcheck="false" @change="renderMermaid"/></div><div><label>预览</label><div class="mermaid-preview"><a-spin v-if="mermaidRendering"/><div v-else-if="mermaidSvg" v-html="mermaidSvg"></div><a-alert v-else type="error" :message="mermaidError||'暂无预览'"/></div></div></div>
+      <div class="mermaid-builder"><div><label>图表语法</label><a-textarea v-model:value="mermaidSource" :rows="12" spellcheck="false" @change="renderMermaid"/></div><div><label>预览</label><div class="mermaid-preview-toolbar"><button type="button" @click="zoomMermaidBuilder(-.2)">−</button><span>{{Math.round(mermaidBuilderScale*100)}}%</span><button type="button" @click="zoomMermaidBuilder(.2)">＋</button><button type="button" @click="resetMermaidBuilder">恢复大小</button></div><div ref="mermaidBuilderViewport" class="mermaid-preview" :class="{ dragging: mermaidBuilderDragging }" @pointerdown="startMermaidBuilderDrag" @pointermove="moveMermaidBuilderDrag" @pointerup="endMermaidBuilderDrag" @pointercancel="endMermaidBuilderDrag"><a-spin v-if="mermaidRendering"/><div v-else-if="mermaidSvg" class="mermaid-preview-content" :style="{transform:'translate('+mermaidBuilderOffset.x+'px, '+mermaidBuilderOffset.y+'px) scale('+mermaidBuilderScale+')'}" v-html="mermaidSvg"></div><a-alert v-else type="error" :message="mermaidError||'暂无预览'"/></div></div></div>
     </a-modal>
   </div>
 </template>
@@ -532,14 +579,14 @@ async function insertMermaid() {
 .feedback-rich-editor.document :deep(.tiptap){min-height:560px;padding:48px 64px 72px;color:#27353d;font-size:15px;line-height:1.8}.feedback-rich-editor.document :deep(.tiptap h1){margin:0 0 26px;color:#182932;font-size:30px;line-height:1.3}.feedback-rich-editor.document :deep(.tiptap h2){margin:34px 0 14px;color:#22363f;font-size:21px;line-height:1.4}.feedback-rich-editor.document :deep(.tiptap p){margin:0 0 14px}.feedback-rich-editor.document :deep(.tiptap blockquote){margin:18px 0;padding:10px 16px;border-left:3px solid #25866f;background:#f3f8f6;color:#53666e}.feedback-rich-editor.document :deep(.tiptap pre){overflow:auto;padding:14px;background:#f4f6f8;border-radius:4px}@media(max-width:760px){.feedback-rich-editor.document :deep(.tiptap){min-height:440px;padding:28px 20px}.feedback-editor-toolbar{padding-right:6px}.feedback-editor-toolbar-end{margin-left:5px;padding-left:6px}}
 .feedback-rich-editor.document :deep(.tableWrapper){margin:18px 0;overflow-x:auto}.feedback-rich-editor.document :deep(table){width:100%;min-width:520px;border-collapse:collapse;table-layout:fixed}.feedback-rich-editor.document :deep(th),.feedback-rich-editor.document :deep(td){min-width:90px;padding:8px 10px;border:1px solid #cfd8e1;vertical-align:top}.feedback-rich-editor.document :deep(th){background:#f5f7f8;color:#263943;font-weight:600;text-align:center}.feedback-rich-editor.document :deep(th p),.feedback-rich-editor.document :deep(td p){margin:0}
 .feedback-rich-editor.document :deep(.tiptap img){display:block;max-width:100%;height:auto;margin:22px auto;border:1px solid #e1e6e9;border-radius:4px}
-.feedback-rich-editor.document :deep(.mermaid-document-block){display:grid;place-items:center;min-height:180px;margin:22px 0;padding:22px;overflow:auto;border:1px solid #d8e2e5;border-radius:6px;background:#fbfcfc;cursor:pointer;transition:border-color .15s,box-shadow .15s}.feedback-rich-editor.document :deep(.mermaid-document-block:hover),.feedback-rich-editor.document :deep(.mermaid-document-block:focus){border-color:#75aa9d;box-shadow:0 0 0 2px rgba(37,134,111,.1);outline:none}.feedback-rich-editor.document :deep(.mermaid-document-block svg){display:block;max-width:100%;height:auto}.feedback-rich-editor.document :deep(.mermaid-document-loading){color:#75858d;font-size:13px}.feedback-rich-editor.document :deep(.mermaid-document-error){color:#b34f49;font-size:13px}
-.mermaid-builder{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:18px}.mermaid-builder label{display:block;margin-bottom:7px;color:#40535f;font-size:12px;font-weight:600}.mermaid-preview{display:grid;place-items:center;min-height:286px;overflow:auto;border:1px solid #dce3e7;border-radius:6px;background:#f8fafb;padding:14px}.mermaid-preview :deep(svg){display:block;max-width:100%;height:auto}@media(max-width:760px){.mermaid-builder{grid-template-columns:1fr}.mermaid-preview{min-height:220px}}
+.feedback-rich-editor.document :deep(.mermaid-document-block){display:grid;place-items:center;min-height:180px;margin:22px 0;padding:22px;overflow:auto;border:1px solid #d8e2e5;border-radius:6px;background:#fbfcfc;cursor:pointer;transition:border-color .15s,box-shadow .15s}.feedback-rich-editor.document :deep(.mermaid-document-block:hover),.feedback-rich-editor.document :deep(.mermaid-document-block:focus){border-color:#75aa9d;box-shadow:0 0 0 2px rgba(37,134,111,.1);outline:none}.feedback-rich-editor.document :deep(.mermaid-document-block svg){display:block;width:100%;max-width:100%;height:auto;min-height:180px}.feedback-rich-editor.document :deep(.mermaid-document-loading){color:#75858d;font-size:13px}.feedback-rich-editor.document :deep(.mermaid-document-error){color:#b34f49;font-size:13px}
+.mermaid-builder{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:18px}.mermaid-builder label{display:block;margin-bottom:7px;color:#40535f;font-size:12px;font-weight:600}.mermaid-preview{display:grid;place-items:center;min-height:286px;overflow:auto;border:1px solid #dce3e7;border-radius:6px;background:#f8fafb;padding:14px}.mermaid-preview-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-bottom:6px}.mermaid-preview-toolbar button{padding:3px 8px;border:1px solid #d8e0e4;border-radius:4px;background:#fff;cursor:pointer}.mermaid-preview-toolbar span{min-width:44px;text-align:center;font-size:12px}.mermaid-preview :deep(svg){display:block;max-width:100%;height:auto}.mermaid-preview-content{transform-origin:center center;user-select:none}.mermaid-preview{height:clamp(280px,48vh,540px);min-height:0;overflow:hidden;cursor:grab;touch-action:none}.mermaid-preview.dragging{cursor:grabbing}.mermaid-preview :deep(svg){user-select:none}@media(max-width:760px){.mermaid-builder{grid-template-columns:1fr}.mermaid-preview{min-height:220px}}
 .feedback-rich-editor.document{overflow:visible}.feedback-rich-editor.document>.feedback-editor-toolbar{position:sticky;z-index:14;top:120px;border:1px solid #dce3e7;border-radius:6px;box-shadow:0 3px 12px rgba(31,47,56,.12)}
-.feedback-rich-editor.document :deep(.mermaid-document-block){position:relative;display:block}.feedback-rich-editor.document :deep(.mermaid-document-preview){display:grid;min-height:136px;place-items:center}.feedback-rich-editor.document :deep(.mermaid-delete-button){position:absolute;z-index:2;top:8px;right:8px;display:grid;width:30px;height:30px;padding:0;place-items:center;border:1px solid #d8e0e4;border-radius:4px;color:#687983;background:#fff;box-shadow:0 1px 4px rgba(31,47,56,.1);font-size:21px;line-height:1;cursor:pointer}.feedback-rich-editor.document :deep(.mermaid-delete-button:hover),.feedback-rich-editor.document :deep(.mermaid-delete-button:focus){border-color:#d76b65;color:#b83e38;background:#fff6f5;outline:none}
+.feedback-rich-editor.document :deep(.mermaid-document-block){position:relative;display:block}.feedback-rich-editor.document :deep(.mermaid-document-preview){display:block;min-height:136px;max-width:100%;overflow:auto}.feedback-rich-editor.document :deep(.mermaid-zoom-button){position:absolute;z-index:2;top:8px;right:54px;height:28px;padding:0 9px;border:0;border-radius:4px;opacity:0;color:#fff;background:rgba(34,48,57,.78);font-size:12px;cursor:pointer}.feedback-rich-editor.document :deep(.mermaid-document-block:hover .mermaid-zoom-button){opacity:1}.feedback-rich-editor.document :deep(.mermaid-delete-button){position:absolute;z-index:2;top:8px;right:8px;display:grid;width:30px;height:30px;padding:0;place-items:center;border:1px solid #d8e0e4;border-radius:4px;color:#687983;background:#fff;box-shadow:0 1px 4px rgba(31,47,56,.1);font-size:21px;line-height:1;cursor:pointer}.feedback-rich-editor.document :deep(.mermaid-delete-button:hover),.feedback-rich-editor.document :deep(.mermaid-delete-button:focus){border-color:#d76b65;color:#b83e38;background:#fff6f5;outline:none}
 .document-image-input{display:none}
 .ai-teacher-toolbar-button :deep(span){display:grid;place-items:center}.ai-teacher-toolbar-button img{display:block;width:20px;height:20px;border-radius:50%;object-fit:cover}
 .ai-selection-action{position:fixed;z-index:980;padding:6px 10px;border:1px solid #bad5ce;border-radius:5px;background:#fff;color:#176f5b;box-shadow:0 3px 12px rgba(31,47,56,.18);cursor:pointer}
-.feedback-rich-editor.document :deep(.document-image-block){position:relative;width:max-content;max-width:100%;margin:22px auto}.feedback-rich-editor.document :deep(.document-image-block img){margin:0}.feedback-rich-editor.document :deep(.document-image-delete){position:absolute;z-index:2;top:8px;right:8px;display:grid;width:30px;height:30px;padding:0;place-items:center;border:1px solid #d8e0e4;border-radius:4px;color:#687983;background:#fff;box-shadow:0 1px 4px rgba(31,47,56,.14);font-size:21px;line-height:1;cursor:pointer}.feedback-rich-editor.document :deep(.document-image-delete:hover),.feedback-rich-editor.document :deep(.document-image-delete:focus){border-color:#d76b65;color:#b83e38;background:#fff6f5;outline:none}
+.feedback-rich-editor.document :deep(.document-image-block){position:relative;width:max-content;max-width:100%;margin:22px auto}.feedback-rich-editor.document :deep(.document-image-block img){margin:0}.feedback-rich-editor.document :deep(.document-image-zoom){position:absolute;z-index:3;top:8px;right:54px;height:28px;padding:0 9px;border:0;border-radius:4px;opacity:0;color:#fff;background:rgba(34,48,57,.78);font-size:12px;cursor:pointer}.feedback-rich-editor.document :deep(.document-image-block:hover .document-image-zoom){opacity:1}.feedback-rich-editor.document :deep(.document-image-delete){position:absolute;z-index:2;top:8px;right:8px;display:grid;width:30px;height:30px;padding:0;place-items:center;border:1px solid #d8e0e4;border-radius:4px;color:#687983;background:#fff;box-shadow:0 1px 4px rgba(31,47,56,.14);font-size:21px;line-height:1;cursor:pointer}.feedback-rich-editor.document :deep(.document-image-delete:hover),.feedback-rich-editor.document :deep(.document-image-delete:focus){border-color:#d76b65;color:#b83e38;background:#fff6f5;outline:none}
 .feedback-rich-editor.document :deep(.document-image-block img){width:100%;height:auto}.feedback-rich-editor.document :deep(.document-image-resize){position:absolute;right:5px;bottom:5px;width:20px;height:20px;padding:0;border:0;border-right:3px solid #26816d;border-bottom:3px solid #26816d;background:transparent;cursor:nwse-resize}.feedback-rich-editor.document :deep(.document-image-resize:focus){outline:2px solid rgba(38,129,109,.25);outline-offset:2px}
 @media(max-width:760px){.feedback-rich-editor.document>.feedback-editor-toolbar{top:120px}}
 .feedback-rich-editor.document :deep(.mermaid-document-block),.feedback-rich-editor.document :deep(.mermaid-document-block:hover),.feedback-rich-editor.document :deep(.mermaid-document-block:focus){padding:0;border-color:transparent;background:transparent;box-shadow:none}.feedback-rich-editor.document :deep(.mermaid-delete-button){top:6px;right:6px;width:auto;height:28px;padding:0 9px;border:0;border-radius:4px;opacity:0;color:#fff;background:rgba(34,48,57,.78);box-shadow:none;font-size:12px;transition:opacity .15s}.feedback-rich-editor.document :deep(.mermaid-document-block:hover .mermaid-delete-button),.feedback-rich-editor.document :deep(.mermaid-document-block:focus-within .mermaid-delete-button){opacity:1}.feedback-rich-editor.document :deep(.mermaid-delete-button:hover),.feedback-rich-editor.document :deep(.mermaid-delete-button:focus){color:#fff;background:#b84b45}
