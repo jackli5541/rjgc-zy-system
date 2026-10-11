@@ -1,11 +1,13 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { cleanupMermaidArtifacts, renderMermaid } from '../../mermaidRenderer'
+import MediaLightbox from './MediaLightbox.vue'
 
 const props = defineProps({ html: { type: String, default: '' }, annotations: { type: Array, default: () => [] }, editable: Boolean, selectedAnnotationId: { type: String, default: '' } })
 const emit = defineEmits(['selection', 'select'])
 const root = ref(null)
 const highlights = ref([])
+const lightbox = ref({ open: false, svg: '', src: '', alt: '' })
 const blockSelector = 'p,h1,h2,h3,h4,li,blockquote,pre,td,th'
 let mermaidRenderVersion = 0
 let highlightFrame = 0
@@ -29,6 +31,22 @@ async function renderMermaidBlocks() {
     }
   }))
 }
+
+
+function openLightbox(event) {
+  const selection = window.getSelection()
+  if (selection && !selection.isCollapsed && selection.toString().trim()) return
+  if (event.target.closest?.('button, a, input, textarea, select')) return
+  const block = event.target.closest?.('pre.mermaid-rendered-block')
+  const image = event.target.closest?.('.rich-document-content img')
+  if (block) {
+    const svg = block.querySelector('svg')
+    if (svg) lightbox.value = { open: true, svg: svg.outerHTML, src: '', alt: '' }
+  } else if (image) {
+    lightbox.value = { open: true, svg: '', src: image.currentSrc || image.src, alt: image.alt || '图片预览' }
+  }
+}
+function closeLightbox() { lightbox.value = { open: false, svg: '', src: '', alt: '' } }
 
 function assignBlocks() {
   root.value?.querySelectorAll(blockSelector).forEach((element, index) => { element.dataset.annotationBlock = `b${index}` })
@@ -182,22 +200,29 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="rich-document" @mouseup="createFromSelection">
+  <div ref="root" class="rich-document" @mouseup="createFromSelection" @click="openLightbox">
     <div class="rich-document-content" v-html="html"></div>
     <template v-for="highlight in highlights" :key="highlight.id">
       <button v-for="(rect,index) in highlight.rects" :key="`${highlight.id}-${index}`" type="button" class="rich-annotation-highlight" :class="[`mark-${highlight.markType.toLowerCase()}`,`color-${highlight.color.toLowerCase()}`,{selected:selectedAnnotationId===highlight.id}]" :data-annotation-id="index===0?highlight.id:null" :style="{left:`${rect.left}px`,top:`${rect.top}px`,width:`${rect.width}px`,height:`${rect.height}px`}" :title="highlight.markType==='COMMENT'?'查看批注':'查看标记'" @click.stop="selectExisting(highlight.id,$event)"/>
       <button v-if="highlight.markType==='COMMENT'" type="button" class="rich-comment-bubble" :class="[`color-${highlight.color.toLowerCase()}`,{selected:selectedAnnotationId===highlight.id}]" :data-comment-annotation-id="highlight.id" :style="{left:`${highlight.bubble.left}px`,top:`${highlight.bubble.top}px`}" :aria-label="`查看第 ${highlight.ordinal} 条批注`" @click.stop="selectExisting(highlight.id,$event,true)">{{highlight.ordinal}}</button>
     </template>
+    <MediaLightbox
+      v-if="lightbox.open"
+      :svg="lightbox.svg"
+      :src="lightbox.src"
+      :alt="lightbox.alt"
+      @close="closeLightbox"
+    />
   </div>
 </template>
 
 <style scoped>
 .rich-document{font-synthesis:style}
-.rich-document{position:relative;width:min(860px,100%);min-height:100%;margin:0 auto;padding:42px 56px;overflow:hidden;isolation:isolate;background:#fff;box-shadow:0 1px 4px rgba(27,45,63,.12);color:#233446;line-height:1.75}.rich-document-content{position:relative;z-index:1;min-width:0;contain:layout paint}.rich-document :deep(h1),.rich-document :deep(h2),.rich-document :deep(h3){margin:1.3em 0 .55em;color:#17283a}.rich-document :deep(p){margin:.8em 0}.rich-document :deep(table){width:100%;border-collapse:collapse}.rich-document :deep(th),.rich-document :deep(td){padding:8px 10px;border:1px solid #cfd8e1}.rich-document :deep(pre){overflow:auto;padding:14px;border-radius:6px;background:#f3f6f8}.rich-document :deep(img){max-width:100%;height:auto}.rich-document :deep(input[type=checkbox]){margin-right:7px}.rich-annotation-highlight{position:absolute;z-index:2;padding:0;border:0;border-radius:2px;background:transparent;cursor:pointer;mix-blend-mode:multiply}.rich-annotation-highlight.color-yellow{--mark:#f6bd16;--mark-bg:rgba(246,189,22,.34)}.rich-annotation-highlight.color-green{--mark:#52a339;--mark-bg:rgba(82,163,57,.27)}.rich-annotation-highlight.color-red{--mark:#e24a4a;--mark-bg:rgba(226,74,74,.24)}.rich-annotation-highlight.color-blue{--mark:#3182ce;--mark-bg:rgba(49,130,206,.24)}.rich-annotation-highlight.mark-highlight,.rich-annotation-highlight.mark-comment{background:var(--mark-bg)}.rich-annotation-highlight.mark-underline{box-shadow:inset 0 -3px 0 var(--mark)}.rich-annotation-highlight.mark-strikethrough:after{position:absolute;top:50%;right:0;left:0;height:2px;background:var(--mark);content:''}.rich-annotation-highlight.selected{outline:2px solid var(--mark);outline-offset:2px;animation:annotation-pulse .8s ease}.rich-comment-bubble{position:absolute;z-index:4;display:grid;width:22px;height:22px;place-items:center;transform:translateY(-50%);border:2px solid #fff;border-radius:50%;color:#fff;background:#1677ff;box-shadow:0 1px 5px rgba(22,59,96,.3);font-size:11px;cursor:pointer}.rich-comment-bubble.selected{background:#0958d9;outline:3px solid rgba(22,119,255,.2)}@keyframes annotation-pulse{50%{filter:brightness(1.22)}}@media(max-width:760px){.rich-document{padding:26px 22px}}
+.rich-document{position:relative;width:min(860px,100%);min-height:100%;margin:0 auto;padding:42px 56px;overflow:hidden;isolation:isolate;background:#fff;box-shadow:0 1px 4px rgba(27,45,63,.12);color:#233446;line-height:1.75}.rich-document-content{position:relative;z-index:1;min-width:0;contain:layout paint}.rich-document :deep(h1),.rich-document :deep(h2),.rich-document :deep(h3){margin:1.3em 0 .55em;color:#17283a}.rich-document :deep(p){margin:.8em 0}.rich-document :deep(table){width:100%;border-collapse:collapse}.rich-document :deep(th),.rich-document :deep(td){padding:8px 10px;border:1px solid #cfd8e1}.rich-document :deep(pre){overflow:auto;padding:14px;border-radius:6px;background:#f3f6f8}.rich-document :deep(img){max-width:100%;height:auto;cursor:zoom-in}.rich-document :deep(input[type=checkbox]){margin-right:7px}.rich-annotation-highlight{position:absolute;z-index:2;padding:0;border:0;border-radius:2px;background:transparent;cursor:pointer;mix-blend-mode:multiply}.rich-annotation-highlight.color-yellow{--mark:#f6bd16;--mark-bg:rgba(246,189,22,.34)}.rich-annotation-highlight.color-green{--mark:#52a339;--mark-bg:rgba(82,163,57,.27)}.rich-annotation-highlight.color-red{--mark:#e24a4a;--mark-bg:rgba(226,74,74,.24)}.rich-annotation-highlight.color-blue{--mark:#3182ce;--mark-bg:rgba(49,130,206,.24)}.rich-annotation-highlight.mark-highlight,.rich-annotation-highlight.mark-comment{background:var(--mark-bg)}.rich-annotation-highlight.mark-underline{box-shadow:inset 0 -3px 0 var(--mark)}.rich-annotation-highlight.mark-strikethrough:after{position:absolute;top:50%;right:0;left:0;height:2px;background:var(--mark);content:''}.rich-annotation-highlight.selected{outline:2px solid var(--mark);outline-offset:2px;animation:annotation-pulse .8s ease}.rich-comment-bubble{position:absolute;z-index:4;display:grid;width:22px;height:22px;place-items:center;transform:translateY(-50%);border:2px solid #fff;border-radius:50%;color:#fff;background:#1677ff;box-shadow:0 1px 5px rgba(22,59,96,.3);font-size:11px;cursor:pointer}.rich-comment-bubble.selected{background:#0958d9;outline:3px solid rgba(22,119,255,.2)}@keyframes annotation-pulse{50%{filter:brightness(1.22)}}@media(max-width:760px){.rich-document{padding:26px 22px}}
 .rich-annotation-highlight.selected{z-index:3;outline:0}.rich-comment-bubble.selected{z-index:5}
 .rich-annotation-highlight.color-purple{--mark:#8b5cf6;--mark-bg:rgba(139,92,246,.27)}.rich-comment-bubble.color-purple{background:#7c3aed}.rich-comment-bubble.color-purple.selected{background:#6d28d9;outline-color:rgba(139,92,246,.22)}
 .rich-annotation-highlight.mark-comment{pointer-events:none}
 .rich-document :deep(pre.mermaid-rendered-block){display:grid;place-items:center;min-height:160px;padding:20px;overflow:auto;border:1px solid #dce4e7;background:#fbfcfc}.rich-document :deep(pre.mermaid-rendered-block svg){display:block;max-width:100%;height:auto}.rich-document :deep(pre.mermaid-render-error){color:#b34f49;text-align:center}
-.rich-document{width:min(980px,100%);padding:48px 64px 72px;color:#27353d;font-size:15px;line-height:1.8}.rich-document :deep(h1){margin:0 0 26px;color:#182932;font-size:30px;line-height:1.3}.rich-document :deep(h2){margin:34px 0 14px;color:#22363f;font-size:21px;line-height:1.4}.rich-document :deep(p){margin:0 0 14px}.rich-document :deep(blockquote){margin:18px 0;padding:10px 16px;border-left:3px solid #25866f;background:#f3f8f6;color:#53666e}.rich-document :deep(pre){overflow:auto;padding:14px;border-radius:4px;background:#f4f6f8}.rich-document :deep(img){display:block;max-width:100%;margin:22px auto;border:0;border-radius:0}.rich-document :deep(pre.mermaid-rendered-block){min-height:136px;padding:0;border:0;background:transparent}
+.rich-document{width:min(980px,100%);padding:48px 64px 72px;color:#27353d;font-size:15px;line-height:1.8}.rich-document :deep(h1){margin:0 0 26px;color:#182932;font-size:30px;line-height:1.3}.rich-document :deep(h2){margin:34px 0 14px;color:#22363f;font-size:21px;line-height:1.4}.rich-document :deep(p){margin:0 0 14px}.rich-document :deep(blockquote){margin:18px 0;padding:10px 16px;border-left:3px solid #25866f;background:#f3f8f6;color:#53666e}.rich-document :deep(pre){overflow:auto;padding:14px;border-radius:4px;background:#f4f6f8}.rich-document :deep(img){display:block;max-width:100%;margin:22px auto;border:0;border-radius:0}.rich-document :deep(pre.mermaid-rendered-block){min-height:136px;padding:20px;overflow:auto;border:1px solid #dce4e7;border-radius:6px;background:#fbfcfc;cursor:zoom-in}.rich-document :deep(pre.mermaid-rendered-block svg){display:block;width:max-content;max-width:none;height:auto;margin:0 auto}
 @media(max-width:760px){.rich-document{padding:28px 20px}}
 </style>
