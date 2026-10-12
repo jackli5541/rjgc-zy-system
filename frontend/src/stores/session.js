@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { api, setCsrfToken } from '../api'
 
 const teacherClassKey = userId => `coursework:last-teacher-class:${userId}`
+let menuPromise
+let classesPromise
 
 export const useSessionStore = defineStore('session', {
   state: () => ({ user: null, context: null, classes: [], menuPermissions: null, ready: false }),
@@ -27,6 +29,8 @@ export const useSessionStore = defineStore('session', {
       this.menuPermissions = null
       this.ready = true
       setCsrfToken('')
+      menuPromise = undefined
+      classesPromise = undefined
     },
     async restore() {
       try {
@@ -34,7 +38,9 @@ export const useSessionStore = defineStore('session', {
         this.user = data.user
         setCsrfToken(data.csrf_token)
         await Promise.all([this.refreshClasses(), this.refreshMenuPermissions()])
-      } catch { this.clear() }
+      } catch (error) {
+        if (error.status === 401) this.clear()
+      }
       finally { this.ready = true }
     },
     async login(payload) {
@@ -44,18 +50,28 @@ export const useSessionStore = defineStore('session', {
       await Promise.all([this.refreshClasses(), this.refreshMenuPermissions()])
     },
     async refreshMenuPermissions() {
-      const data = await api('/menu-permissions')
-      this.menuPermissions = data.enabled
-      return data
+      if (menuPromise) return menuPromise
+      menuPromise = api('/menu-permissions?view=enabled').then(data => {
+        this.menuPermissions = data.enabled
+        return data
+      }).finally(() => { menuPromise = undefined })
+      return menuPromise
     },
-    async refreshClasses(preferredId) {
-      const data = await api('/classes')
-      this.classes = data.items
-      const remembered = this.user?.role === 'TEACHER' ? localStorage.getItem(teacherClassKey(this.user.id)) : null
-      const requested = preferredId || this.context?.current_class?.id || remembered
-      const id = this.classes.some(item => item.id === requested) ? requested : this.classes[0]?.id
-      this.context = await api(`/classes/current/context${id ? `?class_id=${id}` : ''}`)
-      if (this.user?.role === 'TEACHER' && this.context?.current_class?.id) localStorage.setItem(teacherClassKey(this.user.id), this.context.current_class.id)
+    async refreshClasses(preferredId, { full = false } = {}) {
+      const key = `${full ? 'full' : 'selector'}:${preferredId || ''}`
+      if (classesPromise?.key === key) return classesPromise.promise
+      const promise = (async () => {
+        const data = await api(full ? '/classes' : '/classes?view=selector')
+        this.classes = data.items
+        const remembered = this.user?.role === 'TEACHER' ? localStorage.getItem(teacherClassKey(this.user.id)) : null
+        const requested = preferredId || this.context?.current_class?.id || remembered
+        const id = this.classes.some(item => item.id === requested) ? requested : this.classes[0]?.id
+        this.context = await api(`/classes/current/context?view=bootstrap${id ? `&class_id=${id}` : ''}`)
+        if (this.user?.role === 'TEACHER' && this.context?.current_class?.id) localStorage.setItem(teacherClassKey(this.user.id), this.context.current_class.id)
+      })()
+      classesPromise = { key, promise }
+      promise.then(() => { if (classesPromise?.promise === promise) classesPromise = undefined }, () => { if (classesPromise?.promise === promise) classesPromise = undefined })
+      return promise
     },
     async refreshContext() { if (this.user) await this.refreshClasses(this.classId) },
     async logout() {

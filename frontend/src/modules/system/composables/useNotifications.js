@@ -10,17 +10,22 @@ export function useNotifications(ctx) {
   const notificationsLoading = ref(false)
   let historyOffset = 0
   let refreshVersion = 0
+  let loadingPromise
 
   async function loadNotifications() {
+    if (loadingPromise) return loadingPromise
     const version = ++refreshVersion
     if (!ctx.classId.value) { notifications.value = []; notificationsHasMore.value = false; return }
-    try {
+    loadingPromise = (async () => { try {
       const noticeData = await api('/notifications')
       if (version !== refreshVersion) return
       notifications.value = noticeData.items
       notificationsHasMore.value = noticeData.has_more
       historyOffset = noticeData.next_offset
     } catch (_) { /* Notification refresh must not block page navigation or completed actions. */ }
+    finally { loadingPromise = undefined }
+    })()
+    return loadingPromise
   }
 
   async function loadNotificationHistory() {

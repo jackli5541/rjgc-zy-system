@@ -17,7 +17,7 @@ from app.modules.members.service import class_json
 router = APIRouter()
 
 @router.get("/api/v1/classes")
-def classes(user: CurrentUser, db: Db):
+def classes(user: CurrentUser, db: Db, view: Literal['full', 'selector'] = Query('full')):
     q = select(TeachingClass).where(TeachingClass.teacher_id == user.id) if user.role == "TEACHER" else select(TeachingClass).join(ClassMember).where(ClassMember.user_id == user.id, ClassMember.status == "ACTIVE")
     courses = db.scalars(q.order_by(
         TeachingClass.semester.desc(),
@@ -25,6 +25,8 @@ def classes(user: CurrentUser, db: Db):
         TeachingClass.created_at.desc(),
         TeachingClass.id.desc(),
     )).all()
+    if view == 'selector':
+        return {"items": [{"id": str(course.id), "semester": course.semester, "name": course.name, "status": course.status} for course in courses], "total": len(courses)}
     if not courses: return {"items": [], "total": 0}
     class_ids = [x.id for x in courses]
     member_counts = dict(db.execute(select(ClassMember.class_id, func.count()).where(ClassMember.class_id.in_(class_ids), ClassMember.status == "ACTIVE").group_by(ClassMember.class_id)).all())
@@ -87,9 +89,16 @@ def decide_class_join_request(cid: UUID, rid: UUID, decision: Literal["APPROVED"
 
 
 @router.get("/api/v1/classes/current/context")
-def context(user: CurrentUser, db: Db, class_id: UUID | None = Query(None)):
+def context(user: CurrentUser, db: Db, class_id: UUID | None = Query(None), view: Literal['full', 'bootstrap'] = Query('full')):
     course = user_class(db, user, class_id); m = membership(db, course.id, user.id) if course and user.role == "STUDENT" else None
-    return {"user": {"id": str(user.id), "account": user.login_name, "name": user.display_name, "role": user.role}, "current_class": class_json(course) if course else None, "team_membership": None if not m else {"team_id": str(m[1].id), "team_name": m[1].name, "role": m[0].role}, "team_gate_required": bool(course and user.role == "STUDENT" and not m), "permissions": {"manage_class": user.role == "TEACHER", "access_coursework": user.role == "TEACHER" or bool(m)}}
+    payload = {"current_class": class_json(course) if course else None, "team_membership": None if not m else {"team_id": str(m[1].id), "team_name": m[1].name, "role": m[0].role}, "team_gate_required": bool(course and user.role == "STUDENT" and not m), "permissions": {"manage_class": user.role == "TEACHER", "access_coursework": user.role == "TEACHER" or bool(m)}}
+    if view == 'bootstrap':
+        if payload['current_class']:
+            fields = ('id', 'course', 'semester', 'name', 'status', 'team_deadline', 'topic_public', 'version')
+            payload['current_class'] = {field: payload['current_class'][field] for field in fields}
+    else:
+        payload['user'] = {"id": str(user.id), "account": user.login_name, "name": user.display_name, "role": user.role}
+    return payload
 
 
 @router.patch("/api/v1/classes/{cid}")

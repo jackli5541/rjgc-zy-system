@@ -115,7 +115,9 @@ def password(data: PasswordIn, user: CsrfUser, db: Db):
 
 
 @router.get("/api/v1/menu-permissions")
-def menu_permissions(user: CurrentUser, db: Db):
+def menu_permissions(user: CurrentUser, db: Db, view: Literal['full', 'enabled'] = Query('full')):
+    if view == 'enabled':
+        return {"enabled": menu_permissions_by_role(db)[user.role]}
     return menu_permissions_payload(db, user)
 
 

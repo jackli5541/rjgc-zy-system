@@ -71,10 +71,11 @@ function toggleFolder(folder) {
 async function selectFile(file) {
   selected.value = file; content.value = ''; htmlDocument.value = ''; contentLoading.value = true
   try {
-    if (file.media_type === 'VIDEO') return
-    if (file.media_type === 'MARKDOWN') content.value = await loadMarkdownPreview(file.content_url)
+    const { url } = await api(`/teaching-materials/files/${file.id}/content-url`)
+    if (file.media_type === 'VIDEO') { selected.value = { ...file, content_url: url }; return }
+    if (file.media_type === 'MARKDOWN') content.value = await loadMarkdownPreview(url)
     else {
-      const response = await fetch(file.content_url, { credentials: 'include' })
+      const response = await fetch(url)
       if (!response.ok) throw new Error('文件加载失败')
       // Teacher-uploaded HTML is rendered in an opaque-origin sandbox. Scripts
       // can initialise the document UI, but cannot access the parent app.
