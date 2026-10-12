@@ -422,12 +422,12 @@ async function loadFile() {
         throw new Error('仅支持 Markdown 文档在线预览')
       }
     } else if (renderType.value === 'IMAGE') {
-      const response = await fetch(`/api/v1/files/${file.id}/preview`, { credentials: 'include' })
-      if (!response.ok) throw new Error('图片加载失败')
-      const url = URL.createObjectURL(await response.blob())
+      const { url } = await api(`/files/${file.id}/preview-url`)
       if (sequence === loadSequence) binaryUrl.value = url
-      else URL.revokeObjectURL(url)
-    } else binaryUrl.value = `/api/v1/files/${file.id}/preview`
+    } else {
+      const { url } = await api(`/files/${file.id}/preview-url`)
+      if (sequence === loadSequence) binaryUrl.value = url
+    }
   } catch (loadError) { if (sequence === loadSequence) error.value = loadError.message || '文件预览加载失败' }
   finally { if (sequence === loadSequence) loading.value = false }
 }

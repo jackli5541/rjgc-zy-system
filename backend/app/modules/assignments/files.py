@@ -264,26 +264,22 @@ def preview_file(fid: UUID, user: CurrentUser, db: Db):
         try: source = decode_text_file(storage.get_object_bytes(file.storage_path))
         except UnicodeDecodeError: raise ApiError(422, "MARKDOWN_ENCODING_INVALID", "Markdown 文件编码无法识别")
         return PlainTextResponse(source, media_type="text/markdown; charset=utf-8")
-    if suffix in {".docx", ".pptx", ".xlsx"}:
-        try:
-            stream = storage.get_object_stream(file.storage_path)
-        except NoSuchKey:
-            raise ApiError(404, "FILE_MISSING", "文件存储不可用")
-        return StreamingResponse(stream, media_type=file.detected_mime, headers={"Content-Disposition": "inline"})
-    try:
-        stream = storage.get_object_stream(file.storage_path)
-    except NoSuchKey:
+    if not storage.object_exists(file.storage_path):
         raise ApiError(404, "FILE_MISSING", "文件存储不可用")
-    return StreamingResponse(stream, media_type=file.detected_mime, headers={"Content-Disposition": "inline"})
+    expires = max(60, min(settings.oss_preview_url_ttl_seconds, 900))
+    disposition = 'attachment' if file.detected_mime == 'image/svg+xml' else 'inline'
+    params = {"response-content-disposition": content_disposition(file.original_name, disposition)}
+    return RedirectResponse(storage.sign_get_url(file.storage_path, expires, params), status_code=302, headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/api/v1/files/{fid}/preview-url")
 def preview_file_url(fid: UUID, user: CurrentUser, db: Db):
     file = require_file_access(db, user, fid)
-    if Path(file.storage_path).suffix.lower() != ".md":
-        raise ApiError(422, "FILE_PREVIEW_TYPE_INVALID", "仅 Markdown 文件支持前端直接预览")
+    if not storage.object_exists(file.storage_path):
+        raise ApiError(404, "FILE_MISSING", "文件存储不可用")
     expires = max(60, min(settings.oss_preview_url_ttl_seconds, 900))
-    params = {"response-content-disposition": content_disposition(file.original_name, "inline")}
+    disposition = 'attachment' if file.detected_mime == 'image/svg+xml' else 'inline'
+    params = {"response-content-disposition": content_disposition(file.original_name, disposition)}
     return {"url": storage.sign_get_url(file.storage_path, expires, params), "expires_in": expires}
 
 

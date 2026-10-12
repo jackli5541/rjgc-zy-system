@@ -227,9 +227,25 @@ def teaching_material_content(file_id: UUID, user: CurrentUser, db: Db, download
     if not material or not material.active:
         raise ApiError(404, "MATERIAL_FILE_NOT_FOUND", "文件不存在")
     require_class(db, user, material.class_id)
-    media_type = {"MARKDOWN": "text/markdown", "HTML": "text/html", "VIDEO": "video/mp4"}[material.media_type]
+    if not storage.object_exists(material.storage_path):
+        raise ApiError(404, "MATERIAL_FILE_MISSING", "文件存储不可用")
     disposition = "attachment" if download else "inline"
-    return StreamingResponse(storage.get_object_stream(material.storage_path), media_type=media_type, headers={"Content-Disposition": content_disposition(material.original_name, disposition)})
+    expires = max(60, min(settings.oss_preview_url_ttl_seconds, 900))
+    params = {"response-content-disposition": content_disposition(material.original_name, disposition)}
+    return RedirectResponse(storage.sign_get_url(material.storage_path, expires, params), status_code=302, headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/api/v1/teaching-materials/files/{file_id}/content-url")
+def teaching_material_content_url(file_id: UUID, user: CurrentUser, db: Db, download: bool = Query(False)):
+    material = db.get(TeachingMaterial, file_id)
+    if not material or not material.active:
+        raise ApiError(404, "MATERIAL_FILE_NOT_FOUND", "文件不存在")
+    require_class(db, user, material.class_id)
+    if not storage.object_exists(material.storage_path):
+        raise ApiError(404, "MATERIAL_FILE_MISSING", "文件存储不可用")
+    expires = max(60, min(settings.oss_preview_url_ttl_seconds, 900))
+    params = {"response-content-disposition": content_disposition(material.original_name, "attachment" if download else "inline")}
+    return {"url": storage.sign_get_url(material.storage_path, expires, params), "expires_in": expires}
 
 
 @router.get("/api/v1/teaching-material-assets/{asset_id}/content")

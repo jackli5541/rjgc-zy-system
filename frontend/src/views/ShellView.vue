@@ -1,31 +1,31 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { ApartmentOutlined, BookOutlined, CalendarOutlined, ControlOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
 import { api, apiClientId } from '../api'
 import ShellHeader from '../shared/components/ShellHeader.vue'
-import AssignmentsPage from '../modules/assignments/pages/AssignmentsPage.vue'
-import CapstonePage from '../modules/capstone/pages/CapstonePage.vue'
-import StudentCapstonePage from '../modules/capstone/pages/StudentCapstonePage.vue'
-import ClassDetailPage from '../modules/members/pages/ClassDetailPage.vue'
-import ClassesPage from '../modules/members/pages/ClassesPage.vue'
-import GradesPage from '../modules/grades/pages/GradesPage.vue'
-import OverviewPage from '../modules/overview/pages/OverviewPage.vue'
-import ReviewDetailPage from '../modules/assignments/pages/ReviewDetailPage.vue'
-import ReviewsPage from '../modules/assignments/pages/ReviewsPage.vue'
-import RoleMenuPage from '../modules/system/pages/RoleMenuPage.vue'
-import SystemPage from '../modules/system/pages/SystemPage.vue'
-import TeachingMaterialsPage from '../modules/materials/pages/TeachingMaterialsPage.vue'
-import AttendancePage from '../modules/attendance/pages/AttendancePage.vue'
-import StudentAttendanceModal from '../modules/attendance/components/StudentAttendanceModal.vue'
-import TeamsPage from '../modules/members/pages/TeamsPage.vue'
-import AssignmentDetailDrawer from '../modules/assignments/components/AssignmentDetailDrawer.vue'
-import AssignmentFormModal from '../modules/assignments/components/AssignmentFormModal.vue'
-import AssignmentReviewDrawer from '../modules/assignments/components/AssignmentReviewDrawer.vue'
-import MemberModals from '../modules/members/components/MemberModals.vue'
-import TeamDrawer from '../modules/members/components/TeamDrawer.vue'
-import SystemModals from '../modules/system/components/SystemModals.vue'
+const AssignmentsPage = defineAsyncComponent(() => import('../modules/assignments/pages/AssignmentsPage.vue'))
+const CapstonePage = defineAsyncComponent(() => import('../modules/capstone/pages/CapstonePage.vue'))
+const StudentCapstonePage = defineAsyncComponent(() => import('../modules/capstone/pages/StudentCapstonePage.vue'))
+const ClassDetailPage = defineAsyncComponent(() => import('../modules/members/pages/ClassDetailPage.vue'))
+const ClassesPage = defineAsyncComponent(() => import('../modules/members/pages/ClassesPage.vue'))
+const GradesPage = defineAsyncComponent(() => import('../modules/grades/pages/GradesPage.vue'))
+const OverviewPage = defineAsyncComponent(() => import('../modules/overview/pages/OverviewPage.vue'))
+const ReviewDetailPage = defineAsyncComponent(() => import('../modules/assignments/pages/ReviewDetailPage.vue'))
+const ReviewsPage = defineAsyncComponent(() => import('../modules/assignments/pages/ReviewsPage.vue'))
+const RoleMenuPage = defineAsyncComponent(() => import('../modules/system/pages/RoleMenuPage.vue'))
+const SystemPage = defineAsyncComponent(() => import('../modules/system/pages/SystemPage.vue'))
+const TeachingMaterialsPage = defineAsyncComponent(() => import('../modules/materials/pages/TeachingMaterialsPage.vue'))
+const AttendancePage = defineAsyncComponent(() => import('../modules/attendance/pages/AttendancePage.vue'))
+const StudentAttendanceModal = defineAsyncComponent(() => import('../modules/attendance/components/StudentAttendanceModal.vue'))
+const TeamsPage = defineAsyncComponent(() => import('../modules/members/pages/TeamsPage.vue'))
+const AssignmentDetailDrawer = defineAsyncComponent(() => import('../modules/assignments/components/AssignmentDetailDrawer.vue'))
+const AssignmentFormModal = defineAsyncComponent(() => import('../modules/assignments/components/AssignmentFormModal.vue'))
+const AssignmentReviewDrawer = defineAsyncComponent(() => import('../modules/assignments/components/AssignmentReviewDrawer.vue'))
+const MemberModals = defineAsyncComponent(() => import('../modules/members/components/MemberModals.vue'))
+const TeamDrawer = defineAsyncComponent(() => import('../modules/members/components/TeamDrawer.vue'))
+const SystemModals = defineAsyncComponent(() => import('../modules/system/components/SystemModals.vue'))
 import { useLabels } from '../shared/composables/useLabels'
 import { useDashboard } from '../modules/overview/composables/useDashboard'
 import { useClasses } from '../modules/members/composables/useClasses'
@@ -59,7 +59,10 @@ let realtimeSource
 let realtimeTimer
 let safetyTimer
 let realtimeDirty = false
+let skipNextSyncRequired = false
 const pendingRealtimeScopes = new Set()
+const bootstrapCompleted = ref(false)
+const realtimeReady = ref(false)
 
 const role = computed(() => session.user?.role)
 const classId = computed(() => session.classId)
@@ -147,6 +150,7 @@ async function loadView({ silent = false, background = false } = {}) {
   if (!silent) loading.value = true
   try {
     if (!classId.value) return
+    if (view.value === 'classes') await session.refreshClasses(classId.value, { full: true })
     const loader = viewLoaders[view.value]
     if (loader) await loader(isCurrent, { background })
   } catch (e) { if (!background) message.error(e.message) }
@@ -208,9 +212,19 @@ async function flushRealtimeRefresh() {
 
 function scheduleRealtimeRefresh(scopes = ['current_view', 'notifications']) {
   scopes.forEach(scope => pendingRealtimeScopes.add(scope))
+  if (!bootstrapCompleted.value) return
   if (document.hidden) { realtimeDirty = true; return }
   clearTimeout(realtimeTimer)
   realtimeTimer = setTimeout(flushRealtimeRefresh, 500)
+}
+
+function handleRealtimeSyncRequired() {
+  realtimeReady.value = true
+  if (skipNextSyncRequired) {
+    skipNextSyncRequired = false
+    return
+  }
+  scheduleRealtimeRefresh()
 }
 
 function handleRealtimeEvent(event) {
@@ -229,9 +243,10 @@ function connectRealtime() {
   realtimeSource?.close()
   realtimeSource = undefined
   if (!session.user || !classId.value) return
+  skipNextSyncRequired = !bootstrapCompleted.value
   realtimeSource = new EventSource(`/api/v1/events?class_id=${encodeURIComponent(classId.value)}`)
   realtimeSource.addEventListener('invalidate', handleRealtimeEvent)
-  realtimeSource.addEventListener('sync_required', handleRealtimeEvent)
+  realtimeSource.addEventListener('sync_required', handleRealtimeSyncRequired)
   realtimeSource.addEventListener('auth_expired', () => window.dispatchEvent(new CustomEvent('auth-expired')))
 }
 
@@ -268,13 +283,16 @@ watch(classId, () => { ctx.memberDetail.value = null; connectRealtime() })
 watch(ctx.assignmentDrawerExpanded, value => localStorage.setItem(ctx.DRAWER_EXPANDED_STORAGE_KEY, String(value)))
 
 onMounted(async () => {
+  connectRealtime()
   await Promise.all([loadView(), ctx.loadNotifications()])
+  bootstrapCompleted.value = true
+  if (pendingRealtimeScopes.size) flushRealtimeRefresh()
   if (session.teamGate) gateTimer = setInterval(pollGate, 10000)
   clockTimer = setInterval(() => { ctx.currentTime.value = Date.now() }, 30000)
   window.addEventListener('focus', pollGate)
   window.addEventListener('resize', ctx.syncAssignmentDrawerToViewport)
   document.addEventListener('visibilitychange', handleVisibilitySync)
-  connectRealtime(); startSafetyRefresh()
+  startSafetyRefresh()
 })
 
 onBeforeUnmount(() => {
@@ -288,7 +306,7 @@ onBeforeUnmount(() => {
 
 provide(shellContextKey, ctx)
 
-const { selectedAssignment, selectedCampaign } = ctx
+const { selectedAssignment, selectedCampaign, selectedSubmission, fileReviewDrawer, noticesOpen, attendanceOpen, selectedTeam, memberDetail } = ctx
 </script>
 
 <template>
@@ -325,11 +343,11 @@ const { selectedAssignment, selectedCampaign } = ctx
       </Transition>
     </div></a-layout-content>
 
-    <AssignmentReviewDrawer />
-    <SystemModals />
-    <StudentAttendanceModal v-if="role==='STUDENT'" />
-    <MemberModals />
-    <TeamDrawer />
-    <AssignmentFormModal />
+    <AssignmentReviewDrawer v-if="selectedSubmission || selectedCampaign || fileReviewDrawer" />
+    <SystemModals v-if="modals.password || noticesOpen" />
+    <StudentAttendanceModal v-if="role==='STUDENT' && attendanceOpen" />
+    <MemberModals v-if="modals.class || modals.import || modals.member || modals.team || modals.topicDecision || memberDetail" />
+    <TeamDrawer v-if="selectedTeam" />
+    <AssignmentFormModal v-if="modals.assignment" />
   </a-layout>
 </template>
