@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { filterAttendanceRecords, recentCheckedInRecords } from '../src/modules/attendance/records.js'
+import { attendanceCheckInTime, filterAttendanceRecords, recentCheckedInRecords } from '../src/modules/attendance/records.js'
+
+test('only present and late records display a check-in time', () => {
+  const checked_in_at = '2026-10-09T01:00:00Z'
+  for (const status of ['ABSENT', 'LEAVE', 'PENDING']) {
+    assert.equal(attendanceCheckInTime({ status, checked_in_at }), '—')
+    assert.equal(attendanceCheckInTime({ status, checked_in_at: null }), '—')
+  }
+  for (const status of ['PRESENT', 'LATE']) {
+    assert.equal(attendanceCheckInTime({ status, checked_in_at }), '2026/10/09 09:00:00')
+    assert.equal(attendanceCheckInTime({ status, checked_in_at: null }), '—')
+  }
+})
 
 const records = [
   { student_id: 1, student_name: '张三', student_no: 'S001', status: 'PRESENT', checked_in_at: '2026-10-09T01:00:00Z' },

@@ -26,9 +26,14 @@ export function useDashboard(ctx) {
       if (!isCurrent()) return
       dashboard.value = dashboardData
       if (ctx.role.value === 'STUDENT') {
-        const [assignmentData, campaignData, gradeData, teamData] = await Promise.all([api(`/assignments?class_id=${ctx.classId.value}`), api(`/peer-review-assignments?class_id=${ctx.classId.value}`), api(`/grades?class_id=${ctx.classId.value}`), api(`/teams?class_id=${ctx.classId.value}`)])
-        if (!isCurrent()) return
-        ctx.assignments.value = assignmentData.items; ctx.campaigns.value = campaignData.items; ctx.grades.value = gradeData.items; ctx.teams.value = teamData.items
+        // 总览主体先展示，学生端的次要列表并行补齐，避免首屏等待四个接口。
+        void Promise.allSettled([api(`/assignments?class_id=${ctx.classId.value}`), api(`/peer-review-assignments?class_id=${ctx.classId.value}`), api(`/grades?class_id=${ctx.classId.value}`), api(`/teams?class_id=${ctx.classId.value}`)]).then(([assignments, campaigns, grades, teams]) => {
+          if (!isCurrent()) return
+          if (assignments.status === 'fulfilled') { ctx.assignments.value = assignments.value.items }
+          if (campaigns.status === 'fulfilled') { ctx.campaigns.value = campaigns.value.items }
+          if (grades.status === 'fulfilled') { ctx.grades.value = grades.value.items }
+          if (teams.status === 'fulfilled') { ctx.teams.value = teams.value.items }
+        })
       }
     
   }

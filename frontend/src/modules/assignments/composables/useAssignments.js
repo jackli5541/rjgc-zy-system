@@ -279,13 +279,13 @@ export function useAssignments(ctx) {
   }
 
   async function loadAssignmentsView(isCurrent, { background = false } = {}) {
-      const [assignmentData, gradeData] = await Promise.all([
-        api(`/assignments?class_id=${ctx.classId.value}`),
-        ctx.role.value === 'STUDENT' ? api(`/grades?class_id=${ctx.classId.value}`) : Promise.resolve({ items: [] })
-      ])
+      const assignmentData = await api(`/assignments?class_id=${ctx.classId.value}`)
       if (!isCurrent()) return
       assignments.value = assignmentData.items
-      if (ctx.role.value === 'STUDENT') ctx.grades.value = gradeData.items
+      // 成绩只用于总览与成绩页，后台补齐不会阻塞作业列表首屏。
+      if (ctx.role.value === 'STUDENT') {
+        void api(`/grades?class_id=${ctx.classId.value}`).then(data => { if (isCurrent()) ctx.grades.value = data.items }).catch(() => {})
+      }
     
   }
 

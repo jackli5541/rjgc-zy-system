@@ -1,4 +1,5 @@
 <script setup>
+import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { computed, h, onMounted, ref, watch } from 'vue'
 import { message, Modal, Input } from 'ant-design-vue'
 import { DeleteOutlined, DownOutlined, EditOutlined, EyeOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, LockOutlined, PlusOutlined, TeamOutlined, UpOutlined } from '@ant-design/icons-vue'
@@ -202,7 +203,7 @@ onMounted(() => { refreshTree(); loadTeammates() })
 <template>
   <section class="teaching-materials-page capstone-page" @click="clearContext">
     <header class="page-title capstone-title">
-      <div><div class="eyebrow">个人任务</div><h1>大作业</h1><p class="capstone-topic-line">{{dueLabel}} · 课题：{{topicName || '尚未提交选题'}}<template v-if="teamName"> · {{teamName}}</template> · 我的模块：<strong>{{myModuleName || '未分配'}}</strong></p></div>
+      <div><div class="eyebrow">个人任务</div><h1>大作业</h1><AnimatedIntroText class="capstone-topic-line">{{dueLabel}} · 课题：{{topicName || '尚未提交选题'}}<template v-if="teamName"> · {{teamName}}</template> · 我的模块：<strong>{{myModuleName || '未分配'}}</strong></AnimatedIntroText></div>
       <nav class="capstone-stage-strip" aria-label="阶段导航">
         <button
           v-for="(stage, index) in STAGES"

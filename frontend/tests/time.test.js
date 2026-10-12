@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { beijingDateTimeToIso, formatBeijingTime, toBeijingDateTimeLocal } from '../src/shared/time.js'
+import { beijingDateTimeToIso, formatBeijingDate, formatBeijingTime, toBeijingDateTimeLocal } from '../src/shared/time.js'
+
+test('missing timestamps use the fallback instead of the Unix epoch', () => {
+  for (const value of [null, undefined, '']) {
+    assert.equal(formatBeijingTime(value, '—'), '—')
+    assert.equal(formatBeijingDate(value, '—'), '—')
+    assert.equal(toBeijingDateTimeLocal(value), '')
+  }
+})
 
 test('timestamps display in Beijing time regardless of browser timezone', () => {
   for (const value of ['2026-09-29T05:48:05Z', '2026-09-29T05:48:05', '2026-09-29T13:48:05+08:00']) {

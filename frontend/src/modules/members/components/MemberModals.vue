@@ -4,7 +4,7 @@ import StudentPortfolioDrawer from './StudentPortfolioDrawer.vue'
 import { DownloadOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { useShellContext } from '../../../shellContext'
 
-const { chooseRoster, classForm, classId, closeImport, closeTeamDrawer, confirmRoster, createTeam, importState, loadView, loading, memberDetail, memberForm, memberSaving, members, modals, openPortfolioFilePreview, previewRoster, rejectTopic, removeClassMember, resetMemberPassword, saveClass, saveMember, selectedTeam, session, teamDrawerWidth, teamForm, topicDecisionForm } = useShellContext()
+const { chooseRoster, classForm, classId, closeImport, closeTeamDrawer, confirmRoster, createTeam, importState, loadView, loading, memberDetail, memberForm, memberSaving, members, modals, openPortfolioFilePreview, previewRoster, rejectTopic, removeClassMember, resetMemberPassword, saveClass, saveMember, selectedTeam, teamPortfolioInline, session, teamDrawerWidth, teamForm, topicDecisionForm } = useShellContext()
 </script>
 
 <template>
@@ -13,6 +13,6 @@ const { chooseRoster, classForm, classId, closeImport, closeTeamDrawer, confirmR
     <a-modal v-model:open="modals.member" :title="memberForm.id?'编辑成员':'添加成员'" :confirm-loading="memberSaving" ok-text="保存" @ok="saveMember"><a-form layout="vertical"><a-form-item label="学号" required><a-input v-model:value="memberForm.student_no" :disabled="Boolean(memberForm.id)" maxlength="32"/></a-form-item><a-form-item label="姓名" required><a-input v-model:value="memberForm.name" maxlength="80"/></a-form-item></a-form></a-modal>
     <StudentPortfolioDrawer :student="memberDetail" :class-id="classId" :writable="session.context?.current_class?.status==='ACTIVE'" @close="memberDetail=null" @saved="loadView" @reset-password="resetMemberPassword" @remove="removeClassMember" @preview="openPortfolioFilePreview"/>
     <a-modal v-model:open="modals.team" title="创建小组" @ok="createTeam"><a-form layout="vertical"><a-form-item label="小组名称" required><a-input v-model:value="teamForm.name"/></a-form-item><a-checkbox v-model:checked="teamForm.open_recruitment">允许其他成员申请加入</a-checkbox></a-form></a-modal>
-    <button v-if="selectedTeam" type="button" class="team-portfolio-click-away" :style="{right:`${teamDrawerWidth}px`}" aria-label="关闭小组档案" @click="closeTeamDrawer"/>
+    <button v-if="selectedTeam&&!teamPortfolioInline" type="button" class="team-portfolio-click-away" :style="{right:`${teamDrawerWidth}px`}" aria-label="关闭小组档案" @click="closeTeamDrawer"/>
     <a-modal v-model:open="modals.topicDecision" title="驳回选题" ok-text="确认驳回" @ok="rejectTopic"><a-form layout="vertical"><a-form-item label="驳回原因" required><a-textarea v-model:value="topicDecisionForm.reason" :rows="3" placeholder="请说明需要修改的内容"/></a-form-item></a-form></a-modal>
 </template>

@@ -1,10 +1,11 @@
 <script setup>
+import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { useShellContext } from '../../../shellContext'
 const { audits, auditSearch, auditSemester, auditClassId, auditActorRole, auditSearched, auditSemesterOptions, auditClassOptions, auditPage, auditPageSize, auditTotal, loading, formatTime, actionLabel, objectLabel, roleLabel, searchAudits, changeAuditSemester, changeAuditPage } = useShellContext()
 </script>
 
 <template>
-  <div class="page-title"><div><div class="eyebrow">运行管理</div><h1>系统与审计</h1><p>关键业务操作不可修改。</p></div></div>
+  <div class="page-title"><div><div class="eyebrow">运行管理</div><h1>系统与审计</h1><AnimatedIntroText>关键业务操作不可修改。</AnimatedIntroText></div></div>
   <div class="audit-toolbar">
     <a-select v-model:value="auditSemester" :options="[{value:'ALL',label:'全部学期'},...auditSemesterOptions]" @change="changeAuditSemester"/>
     <a-select v-model:value="auditClassId" :options="[{value:'ALL',label:'全部教学班'},...auditClassOptions]" @change="searchAudits"/>

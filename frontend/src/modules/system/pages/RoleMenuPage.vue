@@ -1,4 +1,5 @@
 <script setup>
+import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { computed, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { ApartmentOutlined, BookOutlined, CalendarOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
@@ -78,7 +79,7 @@ onMounted(load)
 
 <template>
   <div class="page-title role-menu-page-title">
-    <div><div class="eyebrow">访问配置</div><h1>角色菜单配置</h1><p>按角色控制一级功能模块的显示范围。</p></div>
+    <div><div class="eyebrow">访问配置</div><h1>角色菜单配置</h1><AnimatedIntroText>按角色控制一级功能模块的显示范围。</AnimatedIntroText></div>
     <a-space><a-button :disabled="loading" @click="restoreDefaults">恢复默认</a-button><a-button type="primary" :loading="saving" :disabled="!dirty" @click="save">保存配置</a-button></a-space>
   </div>
   <a-card class="panel-card role-menu-panel" :bordered="false" :loading="loading">

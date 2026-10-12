@@ -6,13 +6,36 @@ export function useNotifications(ctx) {
   const notifications = ref([])
 
   const noticesOpen = ref(false)
+  const notificationsHasMore = ref(false)
+  const notificationsLoading = ref(false)
+  let historyOffset = 0
+  let refreshVersion = 0
 
   async function loadNotifications() {
-    if (!ctx.classId.value) { notifications.value = []; return }
+    const version = ++refreshVersion
+    if (!ctx.classId.value) { notifications.value = []; notificationsHasMore.value = false; return }
     try {
       const noticeData = await api('/notifications')
+      if (version !== refreshVersion) return
       notifications.value = noticeData.items
+      notificationsHasMore.value = noticeData.has_more
+      historyOffset = noticeData.next_offset
     } catch (_) { /* Notification refresh must not block page navigation or completed actions. */ }
+  }
+
+  async function loadNotificationHistory() {
+    if (notificationsLoading.value || !notificationsHasMore.value) return
+    const version = refreshVersion
+    notificationsLoading.value = true
+    try {
+      const data = await api(`/notifications?history=true&offset=${historyOffset}`)
+      if (version !== refreshVersion) return
+      const existing = new Set(notifications.value.map(item => item.id))
+      notifications.value.push(...data.items.filter(item => !existing.has(item.id)))
+      notificationsHasMore.value = data.has_more
+      historyOffset = data.next_offset
+    } catch (error) { message.error(error.message) }
+    finally { notificationsLoading.value = false }
   }
 
   async function readAll() {
@@ -31,5 +54,5 @@ export function useNotifications(ctx) {
     await ctx.router.push(item.link)
   }
 
-  return { notifications, noticesOpen, loadNotifications, readAll, openNotification }
+  return { notifications, noticesOpen, notificationsHasMore, notificationsLoading, loadNotifications, loadNotificationHistory, readAll, openNotification }
 }

@@ -6,14 +6,22 @@ export function useTeams(ctx) {
   const teams = ref([])
 
   const requests = ref([])
+  const requestsLoaded = ref(false)
+  const requestsLoading = ref(false)
 
   const selectedTeam = ref(null)
+
+  const teamPortfolioInline = computed(() => ctx.role.value === 'STUDENT' && ctx.route.path === '/teams' && !ctx.session.teamGate && Boolean(ctx.session.context?.team_membership?.team_id))
 
   const selectedTeamAssignments = ref([])
 
   const teamCapstoneModules = ref({})
 
+  const teamModulesLoading = ref(false)
+
   const teamDrawerLoading = ref(false)
+
+  const teamDetailError = ref(false)
 
   const exportingTeamIds = reactive(new Set())
 
@@ -39,19 +47,46 @@ export function useTeams(ctx) {
 
   async function cancelRequest(item) { await ctx.action(() => api(`/team-requests/${item.id}`, { method: 'DELETE' }), '申请已取消') }
 
+  async function loadRequests() {
+    if (requestsLoaded.value || requestsLoading.value || ctx.role.value !== 'STUDENT') return
+    requestsLoading.value = true
+    try {
+      const data = await api(`/team-requests?class_id=${ctx.classId.value}`)
+      requests.value = data.items || []
+      requestsLoaded.value = true
+    } catch (error) { message.error(error.message || '入组申请加载失败') }
+    finally { requestsLoading.value = false }
+  }
+
   async function decideRequest(item, decision) { await ctx.action(() => api(`/team-requests/${item.id}/decision?decision=${decision}`, { method: 'POST' }), decision === 'APPROVED' ? '已同意申请' : '已拒绝申请') }
 
-  async function openTeam(item) {
+  async function openTeam(item, { inline = false } = {}) {
     const generation = ++teamRequestGeneration
+    teamDetailError.value = false
     teamDrawerLoading.value = true
+    teamModulesLoading.value = true
     selectedTeamAssignments.value = []
-    try {
-      selectedTeam.value = await api(`/teams/${item.id}`)
+    teamCapstoneModules.value = {}
+    if (inline) {
+      selectedTeam.value = { ...item, members: [] }
       topicForm.name = item.topic?.name || ''
       topicForm.description = item.topic?.description || ''
-      if (item.is_leader || ctx.role.value === 'TEACHER') ctx.members.value = (await api(`/classes/${ctx.classId.value}/members`)).items
-      try { teamCapstoneModules.value = (await api(`/capstone/classes/${ctx.classId.value}/teams/${item.id}/modules`)).modules || {} }
-      catch (e) { teamCapstoneModules.value = {} }
+    }
+    try {
+      const detail = await api(`/teams/${item.id}`)
+      if (generation !== teamRequestGeneration) return
+      selectedTeam.value = detail
+      if (!inline) {
+        topicForm.name = detail.topic?.name || ''
+        topicForm.description = detail.topic?.description || ''
+      }
+      if (!inline && (item.is_leader || ctx.role.value === 'TEACHER')) ctx.members.value = (await api(`/classes/${ctx.classId.value}/members`)).items
+      if (inline) teamDrawerLoading.value = false
+      try {
+        const moduleData = await api(`/capstone/classes/${ctx.classId.value}/teams/${item.id}/modules`)
+        if (generation === teamRequestGeneration) teamCapstoneModules.value = moduleData.modules || {}
+      } catch (e) { if (generation === teamRequestGeneration) teamCapstoneModules.value = {} }
+      finally { if (generation === teamRequestGeneration) teamModulesLoading.value = false }
       if (ctx.role.value === 'TEACHER') {
         const assignmentData = await api(`/assignments?class_id=${ctx.classId.value}`)
         const recentAssignments = assignmentData.items.filter(assignment => assignment.submitter_type === 'TEAM' && assignment.status !== 'DRAFT')
@@ -63,13 +98,13 @@ export function useTeams(ctx) {
         if (generation === teamRequestGeneration) selectedTeamAssignments.value = history
       }
     } catch (e) {
-      if (generation === teamRequestGeneration) { selectedTeam.value = null; message.error(e.message) }
+      if (generation === teamRequestGeneration) { teamDetailError.value = true; selectedTeam.value = null; message.error(e.message) }
     } finally {
-      if (generation === teamRequestGeneration) teamDrawerLoading.value = false
+      if (generation === teamRequestGeneration) { teamDrawerLoading.value = false; teamModulesLoading.value = false }
     }
   }
 
-  function closeTeamDrawer() { teamRequestGeneration++; selectedTeam.value = null; selectedTeamAssignments.value = []; teamCapstoneModules.value = {}; teamDrawerLoading.value = false }
+  function closeTeamDrawer() { teamRequestGeneration++; selectedTeam.value = null; selectedTeamAssignments.value = []; teamCapstoneModules.value = {}; teamDrawerLoading.value = false; teamModulesLoading.value = false; teamDetailError.value = false }
 
   async function saveTopic() { await ctx.action(async () => { await api(`/teams/${selectedTeam.value.id}/topic`, { method: 'POST', body: JSON.stringify(topicForm) }); selectedTeam.value = null }, '选题已提交审核') }
 
@@ -158,18 +193,24 @@ export function useTeams(ctx) {
   }
 
   async function loadTeamsView(isCurrent, { background = false } = {}) {
-      const [t, r, memberData] = await Promise.all([api(`/teams?class_id=${ctx.classId.value}`), ctx.role.value === 'STUDENT' ? api(`/team-requests?class_id=${ctx.classId.value}`) : Promise.resolve({ items: [] }), ctx.role.value === 'TEACHER' ? api(`/classes/${ctx.classId.value}/members`) : Promise.resolve({ items: [] })])
+      const [t, memberData] = await Promise.all([api(`/teams?class_id=${ctx.classId.value}`), ctx.role.value === 'TEACHER' ? api(`/classes/${ctx.classId.value}/members`) : Promise.resolve({ items: [] })])
       if (!isCurrent()) return
-      teams.value = t.items; requests.value = r.items; ctx.members.value = memberData.items
-      if (ctx.role.value === 'STUDENT' && teams.value.some(item => item.is_leader)) {
-        const availableMembers = await api(`/classes/${ctx.classId.value}/members`)
-        if (!isCurrent()) return
-        ctx.members.value = availableMembers.items
-      }
+      teams.value = t.items
+      if (ctx.role.value === 'TEACHER') ctx.members.value = memberData.items
+      const ownTeam = teams.value.find(item => item.id === ctx.session.context?.team_membership?.team_id)
       const linkedTeam = teams.value.find(item => item.id === ctx.route.query.team)
-      if (linkedTeam) await openTeam(linkedTeam)
+      const portfolioTeam = teamPortfolioInline.value ? ownTeam : linkedTeam
+      if (portfolioTeam && (!background || selectedTeam.value?.id !== portfolioTeam.id)) {
+        if (teamPortfolioInline.value) void openTeam(portfolioTeam, { inline: true })
+        else await openTeam(portfolioTeam)
+      }
+      if (ctx.role.value === 'STUDENT' && teams.value.some(item => item.is_leader) && !background) {
+        void api(`/classes/${ctx.classId.value}/members`).then(availableMembers => {
+          if (isCurrent()) ctx.members.value = availableMembers.items
+        }).catch(error => message.error(error.message || '可邀请成员加载失败'))
+      }
     
   }
 
-  return { teams, requests, selectedTeam, selectedTeamAssignments, teamCapstoneModules, teamDrawerLoading, exportingTeamIds, teamRequestGeneration, teamForm, topicForm, topicDecisionForm, inviteTarget, currentTeam, needsTopicSubmission, createTeam, applyTeam, cancelRequest, decideRequest, openTeam, closeTeamDrawer, saveTopic, saveTeamModuleName, decideTopic, rejectTopic, inviteMember, respondInvitation, leaveTeam, closeTeamRecruitment, openTeamRecruitment, transferLeader, disbandTeam, downloadTeamCoursework, loadTeamsView }
+  return { teamModulesLoading, teamPortfolioInline, teams, requests, requestsLoaded, requestsLoading, selectedTeam, selectedTeamAssignments, teamCapstoneModules, teamDrawerLoading, teamDetailError, exportingTeamIds, teamRequestGeneration, teamForm, topicForm, topicDecisionForm, inviteTarget, currentTeam, needsTopicSubmission, createTeam, applyTeam, cancelRequest, decideRequest, loadRequests, openTeam, closeTeamDrawer, saveTopic, saveTeamModuleName, decideTopic, rejectTopic, inviteMember, respondInvitation, leaveTeam, closeTeamRecruitment, openTeamRecruitment, transferLeader, disbandTeam, downloadTeamCoursework, loadTeamsView }
 }

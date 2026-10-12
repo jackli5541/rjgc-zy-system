@@ -4,6 +4,20 @@ body.ant-scrolling-effect { width: 100% !important; padding-right: 0 !important;
 
 html{scrollbar-gutter:stable}
 
+/* Gentle depth feedback without changing control dimensions or layout. */
+.ant-btn { transition: background-color .2s ease-out, border-color .2s ease-out, color .2s ease-out, box-shadow .24s ease-out; }
+
+@media (hover: hover) and (pointer: fine) {
+  .ant-btn-default:not(:disabled):not(.ant-btn-background-ghost):hover { box-shadow: 0 4px 12px rgba(22,40,59,.09); }
+  .ant-btn-primary:not(:disabled):not(.ant-btn-background-ghost):hover { box-shadow: 0 5px 14px rgba(23,105,170,.2); }
+}
+
+.ant-btn-default:not(:disabled):active, .ant-btn-primary:not(:disabled):active { box-shadow: 0 1px 3px rgba(22,40,59,.08); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ant-btn, .nav-underline { transition: none !important; }
+}
+
 .page-surface{min-height:calc(100vh - 240px)}
 
 .page-surface .ant-table-tbody>tr>td{height:56px}

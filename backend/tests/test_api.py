@@ -2080,3 +2080,48 @@ def test_capstone_documents_are_ordered_by_lifecycle_not_alphabetically():
 
     listing = teacher.get(f"/api/v1/capstone/classes/{class_id}/students/{member['id']}/documents", headers=teacher_headers).json()
     assert [doc["stage"] for doc in listing["documents"]] == ["PROPOSAL", "REQUIREMENTS", "DESIGN", "IMPLEMENTATION", "TESTING"]
+
+@pytest.mark.parametrize('unread_count', [0, 3, 5, 8, 105])
+def test_notifications_initial_limit_and_read_history(unread_count):
+    from app.models import Notification
+
+    client, headers = login('teacher', '123456', 'teacher')
+    stamp = datetime.now(UTC)
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.login_name == 'teacher'))
+        other = User(login_name='notice-other', display_name='Other', password_hash=user.password_hash, role='STUDENT')
+        db.add(other)
+        db.flush()
+        for index in range(unread_count + 12):
+            db.add(Notification(user_id=user.id, kind='TEST', title=f'notice-{index}',
+                                read_at=None if index < unread_count else stamp,
+                                created_at=stamp - timedelta(minutes=index)))
+        db.add(Notification(user_id=user.id, kind='SUBMISSION_RESUBMITTED', title='hidden'))
+        db.add(Notification(user_id=other.id, kind='TEST', title='private'))
+        db.commit()
+
+    initial = client.get('/api/v1/notifications').json()
+    assert len(initial['items']) == max(5, unread_count)
+    assert initial['unread'] == unread_count
+    assert sum(not item['read'] for item in initial['items']) == unread_count
+    assert initial['has_more'] is True
+    seen = {item['id'] for item in initial['items']}
+    offset = initial['next_offset']
+    while True:
+        page = client.get(f'/api/v1/notifications?history=true&offset={offset}').json()
+        assert len(page['items']) <= 5
+        assert all(item['read'] for item in page['items'])
+        ids = {item['id'] for item in page['items']}
+        assert not seen.intersection(ids)
+        seen.update(ids)
+        offset = page['next_offset']
+        if not page['has_more']:
+            break
+    assert len(seen) == unread_count + 12
+    assert client.get('/api/v1/notifications?offset=-1').status_code == 422
+    assert TestClient(app).get('/api/v1/notifications').status_code == 401
+    assert client.post('/api/v1/notifications/read').status_code == 403
+    assert client.post('/api/v1/notifications/read', headers=headers).status_code == 204
+    after = client.get('/api/v1/notifications').json()
+    assert after['unread'] == 0
+    assert len(after['items']) == 5

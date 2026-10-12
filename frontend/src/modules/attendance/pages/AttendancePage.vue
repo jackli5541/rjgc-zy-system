@@ -1,4 +1,5 @@
 <script setup>
+import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { ClockCircleOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons-vue'
@@ -6,7 +7,7 @@ import { api } from '../../../api'
 import { beijingDateTimeToIso, formatBeijingDate, formatBeijingTime } from '../../../shared/time'
 import { useShellContext } from '../../../shellContext'
 import AttendanceRecordField from '../components/AttendanceRecordField.vue'
-import { filterAttendanceRecords } from '../records'
+import { attendanceCheckInTime, filterAttendanceRecords } from '../records'
 import AttendanceProjection from '../components/AttendanceProjection.vue'
 
 const { classId, session, attendanceSessions, selectedAttendance, activeAttendance, loadAttendanceView, selectAttendance } = useShellContext()
@@ -121,7 +122,7 @@ watch(() => selectedAttendance.value?.id, () => { rosterKeyword.value = ''; rost
 </script>
 
 <template>
-  <div class="page-title attendance-heading"><div><h1>考勤管理</h1><p>{{session.context?.current_class?.semester}} · {{session.context?.current_class?.name}}</p></div><a-button @click="exportClass"><DownloadOutlined/> 导出本学期 XLSX</a-button></div>
+  <div class="page-title attendance-heading"><div><h1>考勤管理</h1><AnimatedIntroText>{{session.context?.current_class?.semester}} · {{session.context?.current_class?.name}}</AnimatedIntroText></div><a-button @click="exportClass"><DownloadOutlined/> 导出本学期 XLSX</a-button></div>
 
   <section class="attendance-start">
     <div class="attendance-section-title"><h2>发起考勤</h2><span v-if="activeAttendance">本班已有进行中或待开始的考勤</span></div>
@@ -163,14 +164,14 @@ watch(() => selectedAttendance.value?.id, () => { rosterKeyword.value = ''; rost
         <template #title><span :class="`attendance-status-${status.value.toLowerCase()}`">{{status.label}}</span></template>
         <template #default="{record}"><AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-${status.value}`" :record="record" :session-id="selectedAttendance.id" field="status" :status-value="status.value" :busy="statusSaving[`${selectedAttendance.id}-${record.student_id}`]" @saving="setStatusSaving" @saved="recordSaved"/></template>
       </a-table-column>
-      <a-table-column title="签到时间" :width="200"><template #default="{record}">{{dateTime(record.checked_in_at)}}</template></a-table-column>
+      <a-table-column title="签到时间" :width="200"><template #default="{record}">{{attendanceCheckInTime(record)}}</template></a-table-column>
       <a-table-column title="备注" :width="260"><template #default="{record}"><AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-note`" :record="record" :session-id="selectedAttendance.id" field="note" @saved="recordSaved"/></template></a-table-column>
     </a-table>
     <div class="attendance-mobile-records">
       <article v-for="record in filteredRecords" :key="record.student_id" class="attendance-mobile-record">
         <div><strong>{{record.student_name}}</strong><small>{{record.student_no}}</small></div>
         <AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-status`" :record="record" :session-id="selectedAttendance.id" field="status" :busy="statusSaving[`${selectedAttendance.id}-${record.student_id}`]" @saving="setStatusSaving" @saved="recordSaved"/>
-        <span>签到：{{dateTime(record.checked_in_at)}}</span>
+        <span>签到：{{attendanceCheckInTime(record)}}</span>
         <AttendanceRecordField :key="`${selectedAttendance.id}-${record.student_id}-note`" :record="record" :session-id="selectedAttendance.id" field="note" @saved="recordSaved"/>
       </article>
       <a-empty v-if="!filteredRecords.length" description="暂无符合条件的学生记录"/>
