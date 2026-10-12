@@ -19,6 +19,7 @@ const dateFormatter = new Intl.DateTimeFormat('zh-CN', {
 })
 
 function validDate(value) {
+  if (value == null || value === '') return null
   let normalized = value
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value)) {
     normalized = `${value}Z`

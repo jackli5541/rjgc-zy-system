@@ -1,3 +1,9 @@
+import { formatBeijingTime } from '../../shared/time.js'
+
+export function attendanceCheckInTime(record) {
+  return ['PRESENT', 'LATE'].includes(record.status) ? formatBeijingTime(record.checked_in_at, '—') : '—'
+}
+
 export function recentCheckedInRecords(records = []) {
   const timestamp = record => Date.parse(record.checked_in_at) || 0
   return records.filter(record => ['PRESENT', 'LATE'].includes(record.status))
