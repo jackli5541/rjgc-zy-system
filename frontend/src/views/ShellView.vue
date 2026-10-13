@@ -5,21 +5,21 @@ import { message } from 'ant-design-vue'
 import { ApartmentOutlined, BookOutlined, CalendarOutlined, ControlOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
 import { api, apiClientId } from '../api'
 import ShellHeader from '../shared/components/ShellHeader.vue'
-const AssignmentsPage = defineAsyncComponent(() => import('../modules/assignments/pages/AssignmentsPage.vue'))
-const CapstonePage = defineAsyncComponent(() => import('../modules/capstone/pages/CapstonePage.vue'))
-const StudentCapstonePage = defineAsyncComponent(() => import('../modules/capstone/pages/StudentCapstonePage.vue'))
-const ClassDetailPage = defineAsyncComponent(() => import('../modules/members/pages/ClassDetailPage.vue'))
-const ClassesPage = defineAsyncComponent(() => import('../modules/members/pages/ClassesPage.vue'))
-const GradesPage = defineAsyncComponent(() => import('../modules/grades/pages/GradesPage.vue'))
-const OverviewPage = defineAsyncComponent(() => import('../modules/overview/pages/OverviewPage.vue'))
-const ReviewDetailPage = defineAsyncComponent(() => import('../modules/assignments/pages/ReviewDetailPage.vue'))
-const ReviewsPage = defineAsyncComponent(() => import('../modules/assignments/pages/ReviewsPage.vue'))
-const RoleMenuPage = defineAsyncComponent(() => import('../modules/system/pages/RoleMenuPage.vue'))
-const SystemPage = defineAsyncComponent(() => import('../modules/system/pages/SystemPage.vue'))
-const TeachingMaterialsPage = defineAsyncComponent(() => import('../modules/materials/pages/TeachingMaterialsPage.vue'))
-const AttendancePage = defineAsyncComponent(() => import('../modules/attendance/pages/AttendancePage.vue'))
+import AssignmentsPage from '../modules/assignments/pages/AssignmentsPage.vue'
+import CapstonePage from '../modules/capstone/pages/CapstonePage.vue'
+import StudentCapstonePage from '../modules/capstone/pages/StudentCapstonePage.vue'
+import ClassDetailPage from '../modules/members/pages/ClassDetailPage.vue'
+import ClassesPage from '../modules/members/pages/ClassesPage.vue'
+import GradesPage from '../modules/grades/pages/GradesPage.vue'
+import OverviewPage from '../modules/overview/pages/OverviewPage.vue'
+import ReviewDetailPage from '../modules/assignments/pages/ReviewDetailPage.vue'
+import ReviewsPage from '../modules/assignments/pages/ReviewsPage.vue'
+import RoleMenuPage from '../modules/system/pages/RoleMenuPage.vue'
+import SystemPage from '../modules/system/pages/SystemPage.vue'
+import TeachingMaterialsPage from '../modules/materials/pages/TeachingMaterialsPage.vue'
+import AttendancePage from '../modules/attendance/pages/AttendancePage.vue'
 const StudentAttendanceModal = defineAsyncComponent(() => import('../modules/attendance/components/StudentAttendanceModal.vue'))
-const TeamsPage = defineAsyncComponent(() => import('../modules/members/pages/TeamsPage.vue'))
+import TeamsPage from '../modules/members/pages/TeamsPage.vue'
 const AssignmentDetailDrawer = defineAsyncComponent(() => import('../modules/assignments/components/AssignmentDetailDrawer.vue'))
 const AssignmentFormModal = defineAsyncComponent(() => import('../modules/assignments/components/AssignmentFormModal.vue'))
 const AssignmentReviewDrawer = defineAsyncComponent(() => import('../modules/assignments/components/AssignmentReviewDrawer.vue'))
@@ -313,9 +313,7 @@ const { selectedAssignment, selectedCampaign, selectedSubmission, fileReviewDraw
   <a-layout v-if="session.user" class="app-shell">
     <ShellHeader />
     <a-layout-content class="app-content"><div class="content-wrap">
-      <div v-if="loading&&!initialLoading" class="page-progress" role="progressbar" aria-label="正在刷新页面数据"><span/></div>
-      <a-skeleton v-if="initialLoading" class="page-skeleton" active :paragraph="{rows:8}"/>
-      <Transition v-else name="page-fade" mode="out-in">
+      <div v-if="loading" class="page-progress" role="progressbar" aria-label="正在加载页面数据"><span/></div>
       <div :key="surfaceKey" class="page-surface" :aria-busy="loading">
       <OverviewPage v-if="view==='overview'" />
 
@@ -327,10 +325,10 @@ const { selectedAssignment, selectedCampaign, selectedSubmission, fileReviewDraw
 
       <AssignmentsPage v-else-if="view==='assignments'||(view==='assignment-detail'&&role==='TEACHER')" />
 
-      <AssignmentDetailDrawer v-if="view==='assignment-detail'&&selectedAssignment" />
+      <AssignmentDetailDrawer v-if="view==='assignment-detail'&&selectedAssignment?.id===detailId" />
 
       <ReviewsPage v-else-if="view==='reviews'" />
-      <ReviewDetailPage v-else-if="view==='review-detail'&&selectedCampaign" />
+      <ReviewDetailPage v-else-if="view==='review-detail'&&selectedCampaign?.assignment_id===detailId" />
 
       <CapstonePage v-else-if="view==='capstone'&&role==='TEACHER'" />
       <StudentCapstonePage v-else-if="view==='capstone'&&role==='STUDENT'" />
@@ -339,8 +337,12 @@ const { selectedAssignment, selectedCampaign, selectedSubmission, fileReviewDraw
       <TeachingMaterialsPage v-else-if="view==='materials'" />
       <SystemPage v-else-if="view==='system'&&role==='TEACHER'" />
       <RoleMenuPage v-else-if="view==='menu-permissions'&&role==='TEACHER'" />
+      <section v-if="(view==='review-detail'&&selectedCampaign?.assignment_id!==detailId)||(view==='assignment-detail'&&role==='STUDENT'&&selectedAssignment?.id!==detailId)" :aria-busy="loading">
+        <div class="page-title"><h1>{{ view==='review-detail'?'作品互评':'作业详情' }}</h1></div>
+        <a-skeleton v-if="loading" active :paragraph="{rows:6}" />
+        <a-empty v-else description="暂未加载详情，请重试" />
+      </section>
       </div>
-      </Transition>
     </div></a-layout-content>
 
     <AssignmentReviewDrawer v-if="selectedSubmission || selectedCampaign || fileReviewDrawer" />
