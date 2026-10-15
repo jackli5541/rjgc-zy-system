@@ -1,6 +1,7 @@
 :root {
   --shell-width: 1308px;
   --page-gutter: 36px;
+  --navigation-gutter: clamp(10px, 1.4vw, 28px);
   color: #182230;
   background: #f3f6fa;
   font-synthesis: none;
@@ -65,15 +66,15 @@ button, input, textarea { letter-spacing: 0; }
 
 .app-shell { min-height: 100vh; }
 
-.app-header { position: sticky; z-index: 15; top: 0; height: auto !important; line-height: normal !important; padding: 0 36px !important; border-bottom: 1px solid #dce9ea; background: #f8fcfc !important; }
+.app-header { position: sticky; z-index: 15; top: 0; height: auto !important; line-height: normal !important; padding: 0 var(--navigation-gutter) !important; border-bottom: 1px solid #dce9ea; background: #f8fcfc !important; }
 
-.header-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 64px; max-width: var(--shell-width); margin: 0 auto; }
+.header-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 64px; width: 100%; min-width: 0; }
 
 .header-brand { display: flex; align-items: center; gap: 10px; color: #203448; white-space: nowrap; font-size: 16px; }
 
 .class-switch { width: 220px; max-width: 100%; background: #f3f6fa; border-radius: 6px; }
 
-.top-nav { display: flex; gap: 8px; max-width: var(--shell-width); margin: 0 auto; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
+.top-nav { display: flex; gap: clamp(2px, .4vw, 8px); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
 
 .top-nav button { position: relative; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; gap: 8px; min-height: 48px; padding: 0 18px; border: 0; background: transparent; color: #637286; font: inherit; font-size: 14px; cursor: pointer; transition: color .18s, background .18s; }
 
@@ -301,7 +302,7 @@ button, input, textarea { letter-spacing: 0; }
   .login-page{grid-template-columns:1fr}
   .login-visual{display:none}
   .login-panel{padding:32px 24px}
-  .app-header{padding:0 16px!important}
+  .app-header{padding:0 var(--navigation-gutter)!important}
   .user-meta{display:none}
   .content-wrap{padding:24px 16px calc(100px + env(safe-area-inset-bottom))}
   .page-title{align-items:flex-start;flex-direction:column;gap:14px}

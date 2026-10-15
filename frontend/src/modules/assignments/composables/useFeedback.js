@@ -18,6 +18,7 @@ export function useFeedback(ctx) {
     filePreview.criteriaFiles = [...criteriaFiles]
     filePreview.criteriaText = criteriaText
     filePreview.index = Math.max(0, filePreview.files.findIndex(item => item.id === file?.id))
+    if (mode === 'TEACHER' && ctx.role.value === 'TEACHER') ctx.fileReviewExpanded.value = true
     filePreview.open = true
   }
 

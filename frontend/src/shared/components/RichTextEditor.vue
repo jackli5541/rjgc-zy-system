@@ -9,11 +9,15 @@ import { AudioOutlined, BlockOutlined, BoldOutlined, CodeOutlined, DeleteColumnO
 import { message } from 'ant-design-vue'
 import { cleanupMermaidArtifacts, renderMermaid as renderMermaidSvg } from '../../mermaidRenderer'
 import MediaLightbox from './MediaLightbox.vue'
+import DocumentCanvas from './DocumentCanvas.vue'
+import { createMermaidNodeView } from '../editor/mermaidNodeView'
 
 let activeSpeechStop = null
+let mermaidPreviewSequence = 0
+let mermaidPreviewTimer
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true }, imageUpload: Function })
+const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true }, imageUpload: Function, canvasScale: { type: Number, default: 0 } })
 const emit = defineEmits(['update:modelValue'])
 const askAiTeacher = inject('askAiTeacher', null)
 const aiTeacherAvatarUrl = inject('aiTeacherAvatarUrl', '')
@@ -104,65 +108,7 @@ const MermaidBlock = Node.create({
     return ['pre', ['code', { class: 'language-mermaid' }, node.attrs.source]]
   },
   addNodeView() {
-    return ({ node, getPos, editor: nodeEditor }) => {
-      const dom = document.createElement('div')
-      dom.className = 'mermaid-document-block'
-      dom.tabIndex = 0
-      dom.title = '点击编辑图表，按 Delete 删除'
-      const preview = document.createElement('div')
-      preview.className = 'mermaid-document-preview'
-      const zoomButton = document.createElement('button')
-      zoomButton.type = 'button'
-      zoomButton.className = 'mermaid-zoom-button'
-      zoomButton.textContent = '放大查看'
-      zoomButton.setAttribute('aria-label', '放大查看 Mermaid 图表')
-      const deleteButton = document.createElement('button')
-      deleteButton.type = 'button'
-      deleteButton.className = 'mermaid-delete-button'
-      deleteButton.setAttribute('aria-label', '删除 Mermaid 图表')
-      deleteButton.title = '删除图表'
-      deleteButton.textContent = '删除'
-      dom.append(preview, zoomButton, deleteButton)
-      let currentNode = node
-      let renderVersion = 0
-
-      const draw = async source => {
-        const version = ++renderVersion
-        preview.innerHTML = '<span class="mermaid-document-loading">正在绘制图表...</span>'
-        try {
-          const { svg } = await renderMermaidSvg(source, 'editor-block')
-          if (version === renderVersion) preview.innerHTML = svg
-        } catch (error) {
-          if (version === renderVersion) preview.innerHTML = '<span class="mermaid-document-error">图表语法有误，点击修改</span>'
-        }
-      }
-      const edit = () => openMermaidEditor(currentNode.attrs.source, getPos())
-      const zoom = () => { const svg = preview.querySelector('svg'); if (svg) openMermaidPreview(svg.outerHTML) }
-      const remove = () => {
-        const position = getPos()
-        nodeEditor.view.dispatch(nodeEditor.state.tr.delete(position, position + currentNode.nodeSize))
-        nodeEditor.commands.focus()
-      }
-      dom.addEventListener('click', event => { if (!event.target.closest('button')) edit() })
-      zoomButton.addEventListener('click', event => { event.stopPropagation(); zoom() })
-      deleteButton.addEventListener('click', event => { event.stopPropagation(); remove() })
-      dom.addEventListener('keydown', event => {
-        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); edit() }
-        if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); remove() }
-      })
-      draw(node.attrs.source)
-      return {
-        dom,
-        update: nextNode => {
-          if (nextNode.type.name !== 'mermaidBlock') return false
-          currentNode = nextNode
-          draw(nextNode.attrs.source)
-          return true
-        },
-        stopEvent: () => true,
-        destroy: () => { renderVersion += 1 }
-      }
-    }
+    return options => createMermaidNodeView({ ...options, onEdit: openMermaidEditor, onZoom: openMermaidPreview })
   }
 })
 
@@ -247,15 +193,16 @@ const EditableImage = Image.extend({
         const startX = event.clientX
         const startY = event.clientY
         const bounds = dom.getBoundingClientRect()
+        const displayScale = nodeEditor.view.dom.offsetWidth ? editorWidth / nodeEditor.view.dom.offsetWidth : 1
         let nextWidth = Math.round(bounds.width / editorWidth * 100)
-        let nextHeight = Math.round(bounds.height)
+        let nextHeight = Math.round(bounds.height / displayScale)
         const move = moveEvent => {
           if (axis !== 'height') {
             nextWidth = Math.max(10, Math.min(100, Math.round((bounds.width + moveEvent.clientX - startX) / editorWidth * 100)))
             dom.style.width = `${nextWidth}%`
           }
           if (axis !== 'width') {
-            nextHeight = Math.max(60, Math.min(2000, Math.round(bounds.height + moveEvent.clientY - startY)))
+            nextHeight = Math.max(60, Math.min(2000, Math.round((bounds.height + moveEvent.clientY - startY) / displayScale)))
             dom.style.height = `${nextHeight}px`
           }
         }
@@ -418,6 +365,8 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   stopRecognition()
+  mermaidPreviewSequence += 1
+  clearTimeout(mermaidPreviewTimer)
   cleanupMermaidArtifacts()
   editor.value?.destroy()
 })
@@ -491,18 +440,29 @@ function openMermaidEditor(source = '', position = null) {
   renderMermaid()
 }
 
+function scheduleMermaidRender() {
+  mermaidPreviewSequence += 1
+  clearTimeout(mermaidPreviewTimer)
+  mermaidPreviewTimer = setTimeout(renderMermaid, 180)
+}
+
 async function renderMermaid() {
+  clearTimeout(mermaidPreviewTimer)
+  const version = ++mermaidPreviewSequence
   mermaidRendering.value = true
   mermaidError.value = ''
   try {
     const { svg } = await renderMermaidSvg(mermaidSource.value, 'editor-dialog')
+    if (version !== mermaidPreviewSequence) return ''
     mermaidSvg.value = svg
     return svg
   } catch (error) {
-    mermaidSvg.value = ''
-    mermaidError.value = '图表语法有误，请检查节点和连线写法'
+    if (version === mermaidPreviewSequence) {
+      mermaidSvg.value = ''
+      mermaidError.value = '图表绘制失败，请检查语法后重试'
+    }
     return ''
-  } finally { mermaidRendering.value = false }
+  } finally { if (version === mermaidPreviewSequence) mermaidRendering.value = false }
 }
 
 async function insertMermaid() {
@@ -564,11 +524,12 @@ async function insertMermaid() {
     </div>
     <input v-if="document" ref="imageInput" class="document-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" @change="insertImage">
     <div v-if="speechEnabled&&speechSupported&&listening&&interimText" class="speech-interim">正在识别：{{interimText}}</div>
-    <EditorContent :editor="editor"/>
+    <DocumentCanvas v-if="canvasScale" :scale="canvasScale"><EditorContent :editor="editor"/></DocumentCanvas>
+    <EditorContent v-else :editor="editor"/>
     <Teleport to="body"><button v-if="selectionAction" type="button" class="ai-selection-action" :style="{left:`${selectionAction.left}px`,top:`${selectionAction.top}px`}" @pointerdown.prevent @click="askAi"><MessageOutlined/> 问叶老师</button></Teleport>
     <MediaLightbox v-if="mermaidPreviewOpen" :svg="mermaidPreviewSvg" :src="imagePreviewSrc" :alt="imagePreviewAlt" @close="closeMermaidPreview"/>
     <a-modal v-model:open="mermaidOpen" :title="editingMermaidPos===null?'插入 Mermaid 图表':'编辑 Mermaid 图表'" width="820px" :confirm-loading="mermaidRendering" :ok-text="editingMermaidPos===null?'插入图表':'保存修改'" cancel-text="取消" @ok="insertMermaid">
-      <div class="mermaid-builder"><div><label>图表语法</label><a-textarea v-model:value="mermaidSource" :rows="12" spellcheck="false" @change="renderMermaid"/></div><div><label>预览</label><div class="mermaid-preview-toolbar"><button type="button" @click="zoomMermaidBuilder(-.2)">−</button><span>{{Math.round(mermaidBuilderScale*100)}}%</span><button type="button" @click="zoomMermaidBuilder(.2)">＋</button><button type="button" @click="resetMermaidBuilder">恢复大小</button></div><div ref="mermaidBuilderViewport" class="mermaid-preview" :class="{ dragging: mermaidBuilderDragging }" @pointerdown="startMermaidBuilderDrag" @pointermove="moveMermaidBuilderDrag" @pointerup="endMermaidBuilderDrag" @pointercancel="endMermaidBuilderDrag"><a-spin v-if="mermaidRendering"/><div v-else-if="mermaidSvg" class="mermaid-preview-content" :style="{transform:'translate('+mermaidBuilderOffset.x+'px, '+mermaidBuilderOffset.y+'px) scale('+mermaidBuilderScale+')'}" v-html="mermaidSvg"></div><a-alert v-else type="error" :message="mermaidError||'暂无预览'"/></div></div></div>
+      <div class="mermaid-builder"><div><label>图表语法</label><a-textarea v-model:value="mermaidSource" :rows="12" spellcheck="false" @change="scheduleMermaidRender"/></div><div><label>预览</label><div class="mermaid-preview-toolbar"><button type="button" @click="zoomMermaidBuilder(-.2)">−</button><span>{{Math.round(mermaidBuilderScale*100)}}%</span><button type="button" @click="zoomMermaidBuilder(.2)">＋</button><button type="button" @click="resetMermaidBuilder">恢复大小</button></div><div ref="mermaidBuilderViewport" class="mermaid-preview" :class="{ dragging: mermaidBuilderDragging }" @pointerdown="startMermaidBuilderDrag" @pointermove="moveMermaidBuilderDrag" @pointerup="endMermaidBuilderDrag" @pointercancel="endMermaidBuilderDrag"><a-spin v-if="mermaidRendering"/><div v-else-if="mermaidSvg" class="mermaid-preview-content" :style="{transform:'translate('+mermaidBuilderOffset.x+'px, '+mermaidBuilderOffset.y+'px) scale('+mermaidBuilderScale+')'}" v-html="mermaidSvg"></div><a-alert v-else type="error" :message="mermaidError||'暂无预览'"/></div></div></div>
     </a-modal>
   </div>
 </template>

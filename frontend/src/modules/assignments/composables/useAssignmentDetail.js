@@ -182,10 +182,7 @@ export function useAssignmentDetail(ctx) {
 
   async function continueGrading(item) {
     try {
-      const board = await api(`/assignments/${item.id}/submissions`)
-      const targets = pendingTeacherReviewTargets(board.items)
-      if (!targets.length) return message.info('暂无待批改作业')
-      await ctx.router.push({ name: 'assignment-detail', params: { id: item.id }, query: { tab: 'submission', grade_submission: targets[0].submission_version_id } })
+      await ctx.router.push({ name: 'assignment-detail', params: { id: item.id }, query: { tab: 'submission', grade_submission: 'next' } })
     } catch (error) { message.error(error.message) }
   }
 
@@ -225,6 +222,7 @@ export function useAssignmentDetail(ctx) {
         const allowedTabs = ['details', 'submission']
         assignmentDetailTab.value = allowedTabs.includes(ctx.route.query.tab) ? ctx.route.query.tab : 'details'
         await loadAssignmentDetail(assignment, isCurrent, { preserveUi: background })
+        if (!isCurrent()) return
         const previewVersion = ctx.route.query.preview_submission
         const previewKey = `${assignment.id}:${previewVersion || ''}`
         if (previewVersion && isCurrent() && openedSubmissionPreview.value !== previewKey) {
@@ -237,7 +235,7 @@ export function useAssignmentDetail(ctx) {
         const gradingKey = `${assignment.id}:grading:${gradingVersion || ''}`
         if (gradingVersion && isCurrent() && openedSubmissionPreview.value !== gradingKey) {
           const targets = pendingTeacherReviewTargets(assignment.board)
-          const record = targets.find(item => item.submission_version_id === gradingVersion)
+          const record = gradingVersion === 'next' ? targets[0] : targets.find(item => item.submission_version_id === gradingVersion)
           openedSubmissionPreview.value = gradingKey
           if (record) ctx.openAssessmentDrawer(record, { mode: 'TEACHER', targets, targetIndex: targets.indexOf(record), pendingOnly: true })
           else message.info('暂无待批改作业')

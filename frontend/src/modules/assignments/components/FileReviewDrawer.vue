@@ -1,11 +1,13 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ArrowDownOutlined, ArrowUpOutlined, BookOutlined, CaretRightOutlined, CloseOutlined, ColumnWidthOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, MinusOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons-vue'
+import { ArrowDownOutlined, ArrowUpOutlined, BookOutlined, CaretRightOutlined, CloseOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, MinusOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { api, exportArchive, randomUUID } from '../../../api'
 import { loadMarkdownPreview } from '../../../markdownPreview'
 import RichTextEditor from '../../../shared/components/RichTextEditor.vue'
 import RichTextViewer from '../../../shared/components/RichTextViewer.vue'
+import MarkdownReader from '../../../shared/components/MarkdownReader.vue'
+import DocumentScaleControls from '../../../shared/components/DocumentScaleControls.vue'
 import { useResizableDrawer, useResizableRightPane } from '../../../useHorizontalResize'
 
 const props = defineProps({
@@ -32,6 +34,10 @@ const props = defineProps({
 const emit = defineEmits(['close', 'feedback-published', 'clear-feedback', 'peer-feedback-updated', 'target-change', 'external-target', 'update:expanded'])
 const index = ref(0)
 const contentZoom = ref(1)
+const pageScale = computed({ get: () => Math.round(contentZoom.value * 100), set: value => { contentZoom.value = value / 100 } })
+const textScale = ref(100)
+const outlineOpen = ref(true)
+const feedbackCollapsed = ref(false)
 const loading = ref(false)
 const saving = ref(false)
 const downloading = ref(false)
@@ -57,6 +63,9 @@ const criteriaDrag = reactive({ active: false, pointerId: null, offsetX: 0, offs
 const criteriaResize = reactive({ active: false, pointerId: null, direction: '', startX: 0, startY: 0, startLeft: 0, startTop: 0, startWidth: 0, startHeight: 0 })
 const criteriaResizeDirections = ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']
 let loadSequence = 0
+let fileLoadController
+let feedbackLoadSequence = 0
+let feedbackLoadController
 let criteriaLoadSequence = 0
 let positionFrame = 0
 let criteriaDragFrame = 0
@@ -333,7 +342,7 @@ const resizeDrawer = event => {
   if (props.expanded) emit('update:expanded', false)
   startDrawerResize(event, currentWidth)
 }
-const workspaceStyle = computed(() => hasFeedbackPanel.value ? { '--right-pane-width': `${feedbackWidth.value}px`, gridTemplateColumns: 'minmax(320px, 1fr) 8px var(--right-pane-width)' } : undefined)
+const workspaceStyle = computed(() => hasFeedbackPanel.value && !feedbackCollapsed.value ? { '--right-pane-width': `${feedbackWidth.value}px`, ...(drawerWidth.value > 900 ? { gridTemplateColumns: 'minmax(0, 1fr) 8px var(--right-pane-width)' } : {}) } : { gridTemplateColumns: 'minmax(0,1fr)', gridTemplateRows: 'minmax(0,1fr)' })
 
 function handleFeedbackSeparatorKey(event) {
   if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return
@@ -395,41 +404,52 @@ function stopCriteriaResize(event) {
 }
 
 async function loadFeedback() {
-  if (!props.submissionVersionId) return resetFeedback()
+  const sequence = ++feedbackLoadSequence
+  feedbackLoadController?.abort()
+  feedbackLoadController = null
+  resetFeedback()
+  if (!props.open || !props.submissionVersionId) return
   if (props.initialFeedback) return resetFeedback(props.initialFeedback)
+  const controller = new AbortController()
+  feedbackLoadController = controller
   const path = props.mode === 'PEER' ? `/submission-versions/${props.submissionVersionId}/peer-feedback` : `/submission-versions/${props.submissionVersionId}/feedback`
-  try { resetFeedback(await api(path)) }
-  catch (loadError) { resetFeedback(); message.error(loadError.message) }
+  try {
+    const result = await api(path, { signal: controller.signal })
+    if (sequence === feedbackLoadSequence) resetFeedback(result)
+  } catch (loadError) {
+    if (sequence === feedbackLoadSequence && !controller.signal.aborted) message.error(loadError.message)
+  }
 }
 
 async function loadFile() {
   const sequence = ++loadSequence
-  releaseBinaryUrl(); richHtml.value = ''; error.value = ''
+  fileLoadController?.abort()
+  fileLoadController = null
+  releaseBinaryUrl(); richHtml.value = ''; error.value = ''; loading.value = false
   const file = activeFile.value
-  if (!file) return
+  if (!props.open || !file) return
   if (!file.previewable || file.download_only || renderType.value === 'DOWNLOAD_ONLY') {
     error.value = file.preview_error || '该文件格式暂不支持在线预览。'
     return
   }
+  const controller = new AbortController()
+  fileLoadController = controller
   loading.value = true
   try {
-    if (renderType.value === 'RICH_TEXT') {
-      if (/\.md$/i.test(file.name || '')) {
-        const { url } = await api(`/files/${file.id}/preview-url`)
-        const html = await loadMarkdownPreview(url)
-        if (sequence === loadSequence) richHtml.value = html
-      } else {
-        throw new Error('仅支持 Markdown 文档在线预览')
-      }
-    } else if (renderType.value === 'IMAGE') {
-      const { url } = await api(`/files/${file.id}/preview-url`)
-      if (sequence === loadSequence) binaryUrl.value = url
-    } else {
-      const { url } = await api(`/files/${file.id}/preview-url`)
-      if (sequence === loadSequence) binaryUrl.value = url
+    if (renderType.value === 'RICH_TEXT' && !/\.md$/i.test(file.name || '')) {
+      throw new Error('仅支持 Markdown 文档在线预览')
     }
-  } catch (loadError) { if (sequence === loadSequence) error.value = loadError.message || '文件预览加载失败' }
-  finally { if (sequence === loadSequence) loading.value = false }
+    const { url } = await api(`/files/${file.id}/preview-url`, { signal: controller.signal })
+    if (sequence !== loadSequence) return
+    if (renderType.value === 'RICH_TEXT') {
+      const html = await loadMarkdownPreview(url, { signal: controller.signal })
+      if (sequence === loadSequence) richHtml.value = html
+    } else binaryUrl.value = url
+  } catch (loadError) {
+    if (sequence === loadSequence && !controller.signal.aborted) error.value = loadError.message || '文件预览加载失败'
+  } finally {
+    if (sequence === loadSequence) loading.value = false
+  }
 }
 
 function anchoredPosition(rect, width, height) {
@@ -696,22 +716,28 @@ watch(() => props.open, value => {
     peerAnnotationsExpanded.value = true
   }
   contentZoom.value = 1
+  textScale.value = 100
+  feedbackCollapsed.value = false
   index.value = Math.min(props.initialIndex, Math.max(0, props.files.length - 1))
-  loadFeedback(); loadFile()
-})
-watch(index, () => { stopSpeechInput(); selectedAnnotationId.value = ''; commentComposer.open = false; dismissTransient(); contentZoom.value = 1; loadFile() })
-watch(() => props.files, () => { if (props.open) loadFile() }, { deep: true })
+}, { immediate: true, flush: 'sync' })
+watch(index, () => { stopSpeechInput(); selectedAnnotationId.value = ''; commentComposer.open = false; dismissTransient(); contentZoom.value = 1 })
+watch(() => props.submissionVersionId, () => {
+  if (!props.open) return
+  stopSpeechInput()
+  index.value = 0
+}, { flush: 'sync' })
+watch(() => props.initialIndex, value => {
+  if (props.open) index.value = Math.min(value, Math.max(0, props.files.length - 1))
+}, { flush: 'sync' })
+// Watch the active file's preview metadata, not unrelated feedback or every
+// mutation of the full file list. Vue batches simultaneous target/file updates.
+watch(() => JSON.stringify([props.open, props.submissionVersionId, activeFile.value?.id, activeFile.value?.name, activeFile.value?.previewable, activeFile.value?.download_only, activeFile.value?.render_type, activeFile.value?.preview_error]), loadFile, { immediate: true })
+watch([() => props.open, () => props.submissionVersionId, () => props.mode], loadFeedback, { immediate: true })
 watch(() => criteriaState.index, () => { if (criteriaState.visible) loadCriteria() })
 watch(() => props.criteriaFiles, () => {
   criteriaState.index = Math.min(criteriaState.index, Math.max(0, props.criteriaFiles.length - 1))
   if (props.open && criteriaState.visible) loadCriteria()
 }, { deep: true })
-watch(() => props.submissionVersionId, () => {
-  if (!props.open) return
-  stopSpeechInput()
-  index.value = 0
-  loadFeedback(); loadFile()
-})
 watch(() => props.expanded, value => {
   if (value) {
     drawerWidth.value = window.innerWidth
@@ -733,7 +759,7 @@ watch(drawerWidth, () => {
   if (commentComposer.open && commentComposer.mode === 'edit') scheduleComposerPosition()
 })
 onMounted(() => { document.addEventListener('pointerdown', handleGlobalPointer); document.addEventListener('scroll', handleGlobalScroll, true); document.addEventListener('keydown', handleGlobalKey); window.addEventListener('resize', handleResize) })
-onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawerAnimationTimer); document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); if (criteriaDragFrame) cancelAnimationFrame(criteriaDragFrame); if (criteriaResizeFrame) cancelAnimationFrame(criteriaResizeFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
+onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; feedbackLoadSequence += 1; fileLoadController?.abort(); feedbackLoadController?.abort(); clearTimeout(drawerAnimationTimer); document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); if (criteriaDragFrame) cancelAnimationFrame(criteriaDragFrame); if (criteriaResizeFrame) cancelAnimationFrame(criteriaResizeFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
 </script>
 
 <template>
@@ -756,11 +782,6 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <span>{{files.length ? `${index+1} / ${files.length}` : '0 / 0'}}</span>
         <a-tooltip title="下一个文件（→）"><span><a-button shape="circle" :disabled="index>=files.length-1" @click="index+=1"><RightOutlined/></a-button></span></a-tooltip>
         <a-select v-if="files.length>1" v-model:value="index" style="min-width:220px" :options="files.map((item,fileIndex)=>({value:fileIndex,label:fileOptionLabel(item)}))"/>
-        <span class="review-toolbar-divider"></span>
-        <a-tooltip title="缩小作品"><a-button shape="circle" :disabled="contentZoom<=.6" @click="contentZoom=Math.max(.6,contentZoom-.1)"><ZoomOutOutlined/></a-button></a-tooltip>
-        <span>{{Math.round(contentZoom*100)}}%</span>
-        <a-tooltip title="放大作品"><a-button shape="circle" :disabled="contentZoom>=2" @click="contentZoom=Math.min(2,contentZoom+.1)"><ZoomInOutlined/></a-button></a-tooltip>
-        <a-tooltip title="恢复作品大小"><a-button shape="circle" @click="contentZoom=1"><ColumnWidthOutlined/></a-button></a-tooltip>
       </a-space>
       <div v-if="mode==='TEACHER'&&(visiblePeerFeedbacks.length||feedback.grade)" class="review-score-summary">
         <div v-if="visiblePeerFeedbacks.length" class="review-score-group peer-scores"><strong>学生互评</strong><a-tag v-for="peer in visiblePeerFeedbacks" :key="peer.id" color="purple">{{peer.evaluator_name}}打分 {{peer.grade}}</a-tag></div>
@@ -768,6 +789,9 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <div v-if="feedback.grade" class="review-score-group teacher-score"><strong>教师评分</strong><a-tag :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
       </div>
       <div class="review-toolbar-actions">
+        <DocumentScaleControls v-model:text-scale="textScale" v-model:page-scale="pageScale" :show-text="renderType === 'RICH_TEXT'" />
+        <a-button class="document-outline-toggle" v-if="renderType === 'RICH_TEXT'" :aria-expanded="outlineOpen" @click="outlineOpen = !outlineOpen">{{outlineOpen ? '收起大纲' : '展开大纲'}}</a-button>
+        <a-button v-if="hasFeedbackPanel" :aria-expanded="!feedbackCollapsed" @click="feedbackCollapsed = !feedbackCollapsed">{{feedbackCollapsed ? '展开评价栏' : '收起评价栏'}}</a-button>
         <a-tooltip v-if="hasCriteria" :title="criteriaState.visible?'隐藏判定标准（F2）':'显示判定标准（F2）'">
           <a-badge :count="criteriaFiles.length" :show-zero="false" size="small">
             <a-button ref="criteriaButton" :type="criteriaState.visible?'primary':'default'" :aria-expanded="criteriaState.visible" aria-controls="review-criteria-panel" @click="criteriaState.visible?hideCriteriaPanel():openCriteriaPanel()"><BookOutlined/> 判定标准</a-button>
@@ -776,17 +800,17 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         <a-button v-if="activeFile&&allowDownload" :loading="downloading" @click="downloadActiveFile"><DownloadOutlined/> {{activeFileIsMarkdown?'下载离线包':'下载原文件'}}</a-button>
       </div>
     </div>
-    <div ref="drawerRoot" class="file-review-workspace" :class="{'with-feedback':hasFeedbackPanel,'resizing-feedback':feedbackResizing}" :style="workspaceStyle">
+    <div ref="drawerRoot" class="file-review-workspace" :class="{'with-feedback':hasFeedbackPanel&&!feedbackCollapsed,'resizing-feedback':feedbackResizing}" :style="workspaceStyle">
       <section class="submission-preview-pane standalone">
         <main ref="documentStage" class="review-document-stage">
           <a-spin v-if="loading" size="large" tip="正在加载文件"/>
-          <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile&&allowDownload" type="primary" :loading="downloading" @click="downloadActiveFile"><DownloadOutlined/> {{activeFileIsMarkdown?'下载离线包':'下载原文件'}}</a-button></template></a-result>
-          <div v-else-if="renderType==='RICH_TEXT'&&richHtml" class="rich-document-scroll"><div class="review-scaled-content" :style="{zoom:`${contentZoom*100}%`}"><RichTextViewer ref="documentViewer" :html="richHtml" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" @selection="handleSelection" @select="selectAnnotation"/></div></div>
+          <a-result v-else-if="error" status="warning" title="无法在线预览" :sub-title="error"><template #extra><a-button v-if="activeFile" @click="loadFile">重新加载</a-button><a-button v-if="activeFile&&allowDownload" type="primary" :loading="downloading" @click="downloadActiveFile"><DownloadOutlined/> {{activeFileIsMarkdown?'下载离线包':'下载原文件'}}</a-button></template></a-result>
+          <MarkdownReader v-else-if="renderType==='RICH_TEXT'&&richHtml" ref="documentViewer" class="review-markdown-reader" :html="richHtml" :annotations="previewAnnotations" :editable="editable" :selected-annotation-id="selectedAnnotationId" :outline-open="outlineOpen" :text-scale="textScale" :page-scale="Math.round(contentZoom * 100)" region-label="作业正文" @close-outline="outlineOpen = false" @selection="handleSelection" @select="selectAnnotation" />
           <div v-else-if="renderType==='IMAGE'&&binaryUrl" class="review-image-scroll"><img class="review-image" :style="{width:`${contentZoom*100}%`,maxWidth:'none'}" :src="binaryUrl" :alt="activeFile?.name" @error="error='图片加载失败'"/></div>
         </main>
       </section>
-      <span v-if="hasFeedbackPanel" class="review-split-handle" role="separator" tabindex="0" aria-label="调整文件区域和评审区域宽度" aria-orientation="vertical" @pointerdown="startFeedbackResize($event,drawerRoot)" @keydown="handleFeedbackSeparatorKey"/>
-      <aside v-if="hasFeedbackPanel" class="feedback-sidebar">
+      <span v-if="hasFeedbackPanel && !feedbackCollapsed" class="review-split-handle" role="separator" tabindex="0" aria-label="调整文件区域和评审区域宽度" aria-orientation="vertical" @pointerdown="startFeedbackResize($event,drawerRoot)" @keydown="handleFeedbackSeparatorKey"/>
+      <aside v-if="hasFeedbackPanel" v-show="!feedbackCollapsed" class="feedback-sidebar">
         <a-alert v-if="externalWarning" type="warning" show-icon message="提交或评价数据已更新" description="当前未保存内容已保留。完成本次编辑后将自动同步最新数据。"/>
         <div class="feedback-heading"><div><strong>{{owner||'教师反馈'}}</strong><span v-if="feedback.status">{{feedback.status==='PUBLISHED'?'已发布':'草稿'}}<template v-if="feedback.has_draft"> · 有待发布修改</template></span></div><a-tag v-if="feedback.grade" :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
         <div v-if="mode==='PEER'" v-for="item in teacherFeedbacksFor(feedback, 'GRADE')" :key="item.id" class="teacher-feedback-note"><strong>{{item.teacher_name}} · {{feedbackCategories.find(option=>option.value===item.category)?.label}}</strong><div v-html="item.reason"></div></div>

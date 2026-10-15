@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, provide, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { api } from '../../../api'
 import AssignmentMaterials from './AssignmentMaterials.vue'
 import AiTeacherDrawer from './AiTeacherDrawer.vue'
@@ -10,6 +10,12 @@ import { aiTeacherActionLabel, aiTeacherAvatarUrl } from '../aiTeacherConfig'
 
 const { assignmentAttachments, assignmentDetailTab, assignmentDrawerAnimating, assignmentDrawerExpanded, assignmentDrawerResizing, assignmentDrawerWidth, assignmentIsUpdate, assignmentSubmitted, assignmentTypeLabel, boardFilter, boardQuery, boardTeamFilter, boardTeamOptions, canEditAssignment, canManageTeamSubmission, canSubmitAssignment, changeAssignmentDetailTab, classId, closeAssignment, closeAssignmentDrawer, deleteAssignment, deleteDraft, deleteSelectedMaterials, deletingMaterials, downloadAssignmentSubmissions, exportingAssignment, focusSubmissionStatus, formatTime, gradeSourceLabel, grades, gradingStatusColor, groupedBoard, materialTypeOptions, onlineWorkspace, onlineWorkspaceData, openAssignmentEdit, openFilePreview, openSubmissionDetail, publishAssignment, resizeAssignmentDrawer, retractAssignment, retypeMaterial, role, selectedAssignment, statusLabel, submissionBoardPane, submitAssignment, teacherSubmissionSummary, toggleAssignmentDrawerExpanded, uploadMaterialFile, uploadMaterialType } = useShellContext()
 const aiTeacherOpen = ref(false)
+const requirementsOpen = ref(false)
+const editorFocused = ref(false)
+watch(() => selectedAssignment.value?.id, () => {
+  requirementsOpen.value = false
+  editorFocused.value = false
+})
 const aiTeacherQuote = ref('')
 const aiTeacherQuoteSource = ref(null)
 const aiTeacherQuoteVersion = ref(0)
@@ -136,23 +142,19 @@ onBeforeUnmount(() => {
           <Transition name="drawer-fade" appear><div class="assignment-drawer-mask" @click="closeAssignmentDrawer"></div></Transition>
         </template>
         <Transition :name="role==='TEACHER'?'drawer-slide':'detail-fade'" appear>
-        <div :class="{'assignment-detail-drawer':role==='TEACHER','expanded':role==='TEACHER'&&assignmentDrawerExpanded,'resizing':assignmentDrawerResizing}" :style="role==='TEACHER'?{'--drawer-width':`${assignmentDrawerWidth}px`,width:`${assignmentDrawerWidth}px`}:undefined">
+        <div :class="{'student-assignment-detail':role==='STUDENT','editor-focused':role==='STUDENT'&&editorFocused,'assignment-detail-drawer':role==='TEACHER','expanded':role==='TEACHER'&&assignmentDrawerExpanded,'resizing':assignmentDrawerResizing}" :style="role==='TEACHER'?{'--drawer-width':`${assignmentDrawerWidth}px`,width:`${assignmentDrawerWidth}px`}:undefined">
          <span v-if="role==='TEACHER'" class="drawer-resize-handle with-center-control drawer-resize-handle-top" role="separator" aria-label="调整作业详情抽屉宽度" aria-orientation="vertical" @pointerdown="resizeAssignmentDrawer"/>
          <span v-if="role==='TEACHER'" class="drawer-resize-handle with-center-control drawer-resize-handle-bottom" role="separator" aria-label="调整作业详情抽屉宽度" aria-orientation="vertical" @pointerdown="resizeAssignmentDrawer"/>
          <a-tooltip v-if="role==='TEACHER'" :open="assignmentDrawerAnimating?false:undefined" :title="assignmentDrawerExpanded?'收回':'展开至全屏'" placement="right"><button type="button" class="assignment-drawer-expand-button" :aria-label="assignmentDrawerExpanded?'收回作业详情':'将作业详情展开至全屏'" @pointerdown.stop @click="toggleAssignmentDrawerExpanded"><RightOutlined v-if="assignmentDrawerExpanded"/><ExpandOutlined v-else/></button></a-tooltip>
-         <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag :color="selectedAssignment.kind==='EXPERIMENT'?'purple':'blue'">{{assignmentTypeLabel(selectedAssignment)}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><a-button @click="closeAssignmentDrawer"><ArrowLeftOutlined/> 返回作业列表</a-button></div>
+         <div class="page-title detail-title"><div><div class="eyebrow">作业详情</div><h1>{{selectedAssignment.title}}</h1><div class="assignment-title-meta"><a-tag :color="selectedAssignment.kind==='EXPERIMENT'?'purple':'blue'">{{assignmentTypeLabel(selectedAssignment)}}</a-tag><a-tag :color="selectedAssignment.status==='PUBLISHED'?'green':'default'">{{statusLabel(selectedAssignment.status)}}</a-tag><span>截止 {{formatTime(selectedAssignment.due_at)}}</span><a-tag v-if="selectedAssignment.allow_late">允许迟交</a-tag></div></div><div class="assignment-detail-actions"><a-tag v-if="role === 'STUDENT'" :color="assignmentSubmitted ? 'green' : 'default'">{{assignmentSubmitted ? '已提交 · 可继续修改' : '未提交'}}</a-tag><a-button v-if="role === 'STUDENT'" :aria-expanded="requirementsOpen" @click="requirementsOpen = !requirementsOpen">{{requirementsOpen ? '收起作业要求' : '作业要求'}}</a-button><a-button @click="closeAssignmentDrawer"><ArrowLeftOutlined/> 返回作业列表</a-button></div></div>
          <section class="assignment-workspace">
            <template v-if="role==='STUDENT'">
              <div class="student-assignment-content">
-               <header class="student-workspace-intro">
-                 <div><span class="student-workspace-label">作业要求</span><div class="rich-text detail-description" v-html="selectedAssignment.description" @mouseup="selectRequirement" @keyup="selectRequirement"></div></div>
+               <header v-if="requirementsOpen" class="student-workspace-intro">
+                 <div><span class="student-workspace-label">作业要求</span><div class="rich-text detail-description" v-html="selectedAssignment.description" @mouseup="selectRequirement" @keyup="selectRequirement"></div><p class="student-submission-hint">{{selectedAssignment.submitter_type==='TEAM'&&!canManageTeamSubmission?'小组成员均可协作编辑，由组长正式提交':`${onlineWorkspaceData?.documents?.length||0} 份 Markdown 文档将作为一个版本提交`}}</p></div>
                  <div class="student-workspace-side"><div ref="workspaceStateRef" class="student-workspace-state" :class="{submitted:assignmentSubmitted,closed:!canEditAssignment&&!assignmentSubmitted}"><CheckCircleOutlined v-if="assignmentSubmitted"/><InboxOutlined v-else/><div><strong>{{assignmentSubmitted?'已提交':new Date(selectedAssignment.due_at)<=new Date()&&!selectedAssignment.allow_late?'已截止':'在线编写中'}}</strong><span>{{assignmentSubmitted?`${formatTime(selectedAssignment.submission?.submitted_at)} · 可继续修改`:`截止 ${formatTime(selectedAssignment.due_at)}`}}</span></div></div></div>
                </header>
-               <OnlineMarkdownWorkspace ref="onlineWorkspace" :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" :can-submit="canSubmitAssignment&&Boolean(onlineWorkspaceData?.documents?.length)" :submit-label="assignmentIsUpdate?'更新提交':'提交当前版本'" @ready="onlineWorkspaceData=$event" @submit="submitAssignment"/>
-               <footer class="student-submit-bar">
-                 <span v-if="selectedAssignment.submitter_type==='TEAM'&&!canManageTeamSubmission">小组成员均可协作编辑，由组长正式提交</span>
-                 <span v-else>{{onlineWorkspaceData?.documents?.length||0}} 份 Markdown 文档将作为一个版本提交</span>
-               </footer>
+               <OnlineMarkdownWorkspace ref="onlineWorkspace" v-model:focused="editorFocused" focusable :key="selectedAssignment.id" :assignment-id="selectedAssignment.id" :writable="canEditAssignment" :can-submit="canSubmitAssignment&&Boolean(onlineWorkspaceData?.documents?.length)" :submit-label="assignmentIsUpdate?'更新提交':'提交当前版本'" @ready="onlineWorkspaceData=$event" @submit="submitAssignment"/>
              </div>
            </template>
            <template v-else><a-select class="assignment-mobile-view" :value="assignmentDetailTab" :options="[{value:'details',label:'作业详情'},{value:'submission',label:'提交情况'}]" aria-label="选择作业视图" @change="changeAssignmentDetailTab"/>
