@@ -32,6 +32,9 @@
 .attendance-session-row strong{color:#223744;font-size:14px}
 .attendance-session-row small{color:#83919b;font-size:12px;margin-top:4px}
 .attendance-mobile-records{display:none}
+.attendance-desktop-table .ant-table-sticky-holder{box-shadow:0 3px 8px rgba(20,39,58,.08)}
+.attendance-back-top.attendance-back-top{left:50%;right:auto;bottom:32px;width:44px;height:44px;transform:translateX(-50%)}
+@media(max-width:760px){.attendance-back-top.attendance-back-top{bottom:88px}}
 .attendance-roster-filters{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px}
 .attendance-roster-filters>.ant-input-affix-wrapper{width:min(280px,100%)}
 .attendance-roster-status-filters{display:flex;gap:8px}
