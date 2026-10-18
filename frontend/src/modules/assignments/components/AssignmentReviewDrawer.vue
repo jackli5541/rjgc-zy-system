@@ -11,6 +11,7 @@ const { changeReviewTarget, clearTeacherGrade, closeFilePreview, filePreview, fi
       :open="filePreview.open"
       :files="filePreview.files"
       :initial-index="filePreview.index"
+      :assignment-id="selectedAssignment?.id||''"
       :submission-version-id="selectedSubmission?.submission_version_id||''"
       :owner="selectedSubmission?.owner||''"
       :assignment-title="filePreview.assignmentTitle||selectedAssignment?.title||selectedCampaign?.assignment_title||reviewTask?.assignment?.title||''"

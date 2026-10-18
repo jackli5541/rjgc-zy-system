@@ -17,7 +17,7 @@ from app.core.utils import decode_text_file, now
 from app.modules.assignments.schemas import AssignmentFields, SubmissionAnnotationIn, SubmissionFeedbackIn
 
 PREVIEWABLE_FILE_SUFFIXES = {".md"}
-DOWNLOAD_ONLY_FILE_SUFFIXES = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
+DOWNLOAD_ONLY_FILE_SUFFIXES = {".txt", ".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".docx", ".pptx", ".xlsx", ".zip", ".rar", ".7z"}
 STUDENT_UPLOAD_FILE_SUFFIXES = PREVIEWABLE_FILE_SUFFIXES | {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 

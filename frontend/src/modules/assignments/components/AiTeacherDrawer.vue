@@ -13,9 +13,10 @@ const props = defineProps({
   assignment: { type: Object, default: null },
   quote: { type: String, default: '' },
   quoteSource: { type: String, default: '' },
+  quotes: { type: Array, default: () => [] },
   quoteVersion: { type: Number, default: 0 }
 })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'clear-quotes', 'update-quotes'])
 
 const loading = ref(false)
 const sending = ref(false)
@@ -24,8 +25,7 @@ const verificationPending = ref(false)
 const input = ref('')
 const messages = ref([])
 const enabled = ref(true)
-const selectedQuote = ref('')
-const selectedQuoteSource = ref('')
+const selectedQuotes = ref([])
 const conversationId = ref('')
 const windowSize = reactive({ width: 420, height: 500 })
 let resizeObserver
@@ -66,7 +66,7 @@ const defaultWindowPosition = () => {
   }
 }
 
-const windowStyle = computed(() => ({ left: `${windowPosition.left}px`, top: `${windowPosition.top}px`, width: `${windowSize.width}px`, height: `${windowSize.height}px` }))
+const windowStyle = computed(() => ({ left: `${windowPosition.left}px`, top: `${windowPosition.top}px`, width: `${windowSize.width}px`, height: `${windowSize.height}px`, '--ai-quote-max-height': `${Math.max(24, Math.min(160, windowSize.height - 300))}px` }))
 
 function resetWindowPosition() {
   let saved = null
@@ -142,6 +142,11 @@ function clampWindowSize() {
 
 function handleViewportResize() { if (props.open) clampWindowSize() }
 
+function removeQuote(index) {
+  selectedQuotes.value.splice(index, 1)
+  emit('update-quotes', selectedQuotes.value.map(item => ({ ...item })))
+}
+
 function newConversation() {
   answerTypewriter?.cancel()
   sendController?.abort()
@@ -149,8 +154,8 @@ function newConversation() {
   localStorage.setItem(conversationKey.value, conversationId.value)
   messages.value = []
   input.value = ''
-  selectedQuote.value = ''
-  selectedQuoteSource.value = ''
+  selectedQuotes.value = []
+  emit('clear-quotes')
   verificationPending.value = false
   historyRequestId += 1
   scrollToLatest(true)
@@ -201,18 +206,18 @@ async function sendQuestion() {
   const question = input.value.trim()
   if (!question || loading.value || sending.value || verifying.value || verificationPending.value || !assignmentId.value) return
   historyRequestId += 1
-  const quote = selectedQuote.value
-  const quoteSource = quote ? selectedQuoteSource.value : ''
+  const quotes = selectedQuotes.value.map(item => ({ ...item }))
+  const quote = quotes.map(item => item.quote).join('\n\n')
+  emit('clear-quotes')
   const requestAssignmentId = assignmentId.value
   const requestConversationId = conversationId.value
-  const localUserMessage = { id: randomUUID(), role: 'user', content: question, contexts: quote ? [{ quote }] : [] }
+  const localUserMessage = { id: randomUUID(), role: 'user', content: question, contexts: quotes }
   const localAnswer = reactive({ id: 'stream-' + Date.now(), role: 'assistant', content: '', renderedContent: '' })
   messages.value.push(localUserMessage)
   messages.value.push(localAnswer)
   scrollToLatest(true)
   input.value = ''
-  selectedQuote.value = ''
-  selectedQuoteSource.value = ''
+  selectedQuotes.value = []
   sending.value = true
   sendController = new AbortController()
   const typewriter = createTypewriter(text => {
@@ -232,15 +237,14 @@ async function sendQuestion() {
       ? normalizeMessage(userMessage)
       : item.id === localAnswer.id ? normalizeMessage(assistantMessage) : item)
     input.value = ''
-    selectedQuote.value = ''
-    selectedQuoteSource.value = ''
+    selectedQuotes.value = []
     verificationPending.value = false
     completed = true
     scrollToLatest()
     return true
   }
   try {
-    const reader = await apiStream('/assignments/' + requestAssignmentId + '/ai-teacher/chat', { question, quote, quote_source: quoteSource || undefined, conversation_id: requestConversationId, message_id: localUserMessage.id }, sendController.signal)
+    const reader = await apiStream('/assignments/' + requestAssignmentId + '/ai-teacher/chat', { question, quote, quote_source: quotes[0]?.source || undefined, quotes, conversation_id: requestConversationId, message_id: localUserMessage.id }, sendController.signal)
     const decoder = new TextDecoder()
     let buffer = ''
     while (true) {
@@ -265,6 +269,19 @@ async function sendQuestion() {
         } else if (event === 'error') throw new Error(data.message || '叶老师暂时无法回答')
       }
     }
+    buffer += decoder.decode()
+    buffer = buffer.replace(/\r\n/g, '\n')
+    if (buffer.trim()) {
+      const frame = buffer.replace(/\r/g, '')
+      const event = frame.match(/^event: (.+)$/m)?.[1]
+      const payload = frame.match(/^data: (.+)$/m)?.[1]
+      if (payload) {
+        const data = JSON.parse(payload)
+        if (event === 'delta') typewriter.append(data.text)
+        else if (event === 'done' && !applyCompletedTurn(data.messages || [])) throw new Error('回答记录不完整，请稍后重试')
+        else if (event === 'error') throw new Error(data.message || '叶老师暂时无法回答')
+      }
+    }
     if (!completed) throw new Error('回答中断，请重试')
   } catch (error) {
     typewriter.cancel()
@@ -278,14 +295,12 @@ async function sendQuestion() {
         if (reconciled.completed) {
           messages.value = stored.map(normalizeMessage)
           input.value = ''
-          selectedQuote.value = ''
-          selectedQuoteSource.value = ''
+          selectedQuotes.value = []
           verificationPending.value = false
           scrollToLatest()
         } else {
           input.value = question
-          selectedQuote.value = quote
-          selectedQuoteSource.value = quote ? quoteSource : ''
+          selectedQuotes.value = quotes
           messages.value = messages.value.filter(item => item.id !== localUserMessage.id && item.id !== localAnswer.id)
           verificationPending.value = false
           if (error.name !== 'AbortError') message.error(error.message)
@@ -310,8 +325,10 @@ async function sendQuestion() {
 function stopAnswer() { answerTypewriter?.cancel(); sendController?.abort() }
 
 watch(() => props.quoteVersion, () => {
-  selectedQuote.value = props.quote || ''
-  selectedQuoteSource.value = selectedQuote.value ? props.quoteSource || '' : ''
+  const incoming = props.quotes?.length
+    ? props.quotes
+    : props.quote ? [{ quote: props.quote, source: props.quoteSource || undefined }] : []
+  selectedQuotes.value = incoming.filter(item => item.quote).map(item => ({ quote: item.quote, source: item.source }))
 })
 
 watch(() => props.open, async value => {
@@ -372,11 +389,11 @@ onBeforeUnmount(() => {
               <button type="button" :title="copiedMessageId === item.id ? '已复制' : '复制回答'" :aria-label="copiedMessageId === item.id ? '已复制' : '复制回答'" @click="copyAnswer(item)"><CopyOutlined /></button>
             </div>
           </div>
-          <div v-else class="ai-user-content"><blockquote v-if="item.contexts?.[0]?.quote">{{ item.contexts[0].quote }}</blockquote>{{ item.content }}</div>
+          <div v-else class="ai-user-content"><blockquote v-for="context in item.contexts || []" :key="context.quote">{{ context.quote }}</blockquote>{{ item.content }}</div>
         </article>
       </div>
       <div class="ai-teacher-composer">
-        <div v-if="selectedQuote" class="ai-teacher-quote"><span>{{ selectedQuote }}</span><button type="button" aria-label="移除引用" title="移除引用" @click="selectedQuote=''; selectedQuoteSource=''">×</button></div>
+        <div v-if="selectedQuotes.length" class="ai-teacher-quote-list"><div v-for="(item, index) in selectedQuotes" :key="item.quote + index" class="ai-teacher-quote"><span>{{ item.quote }}</span><button type="button" aria-label="移除引用" title="移除引用" @click="removeQuote(index)">×</button></div></div>
         <div v-if="verificationPending" class="ai-verification-warning">回答状态未确认，请关闭后重新打开查看记录。</div>
         <a-textarea
           v-model:value="input"
@@ -387,7 +404,7 @@ onBeforeUnmount(() => {
           @keydown.enter.exact.prevent="sendQuestion"
         />
         <div class="ai-composer-actions">
-          <span></span>
+          <span class="ai-composer-hint">Enter+Shift换行</span>
           <a-button v-if="sending" @click="stopAnswer"><StopOutlined /> 停止</a-button>
           <a-button v-else type="primary" :disabled="!input.trim() || verifying || verificationPending || !enabled" @click="sendQuestion"><SendOutlined /> 发送</a-button>
         </div>
@@ -403,14 +420,16 @@ onBeforeUnmount(() => {
 .ai-teacher-window-header strong{overflow:hidden;color:#1f3440;text-overflow:ellipsis;white-space:nowrap;font-size:15px}
 .ai-teacher-window-header>div{display:flex;align-items:center;gap:3px;cursor:auto}
 .ai-new-conversation{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
-.ai-teacher-panel{display:flex;min-height:0;flex:1;flex-direction:column;gap:10px;overflow:hidden;padding:10px 12px 12px}
+.ai-teacher-window-header{flex-shrink:0}
+.ai-teacher-panel{display:grid;grid-template-rows:minmax(0,1fr) auto;min-height:0;flex:1;gap:10px;overflow:hidden;padding:10px 12px 12px}
+.ai-teacher-quote-list{min-height:0;max-height:var(--ai-quote-max-height,160px);overflow-y:auto;overscroll-behavior:contain}
 .ai-message-list{display:flex;min-height:0;flex:1 1 0;flex-direction:column;gap:18px;overflow:auto;padding:4px 2px 8px}
 .ai-message{max-width:94%;color:#24343d}
 .ai-message.user{align-self:flex-end;max-width:82%}
 .ai-message.assistant{align-self:flex-start;width:100%}
 .ai-user-content{margin:0;padding:10px 14px;border-radius:16px 16px 4px 16px;background:#f1f3f5;color:#1f2d35;white-space:pre-wrap;line-height:1.65}
 .ai-user-content blockquote{max-height:90px;margin:0 0 8px;padding:4px 8px;overflow:auto;border-left:3px solid #168269;color:#667984;background:#fff;font-size:12px}
-.ai-teacher-quote{display:flex;max-height:90px;gap:8px;padding:7px 9px;overflow:auto;border-left:3px solid #168269;background:#f3f8f6;color:#40545b;font-size:12px}.ai-teacher-quote span{flex:1;white-space:pre-wrap}.ai-teacher-quote button{align-self:flex-start;border:0;background:transparent;cursor:pointer}
+.ai-teacher-quote{display:flex;gap:8px;padding:7px 9px;border-left:3px solid #168269;background:#f3f8f6;color:#40545b;font-size:12px}.ai-teacher-quote span{min-width:0;flex:1;white-space:pre-wrap;overflow-wrap:anywhere}.ai-teacher-quote button{flex-shrink:0;align-self:flex-start;border:0;background:transparent;cursor:pointer}
 .ai-verification-warning{color:#ad6919;font-size:12px;line-height:1.5}
 .ai-answer{min-width:0}
 .ai-answer-content{font-size:14px;line-height:1.72;overflow-wrap:anywhere}
@@ -429,9 +448,10 @@ onBeforeUnmount(() => {
 .ai-answer-actions button{display:grid;width:28px;height:28px;place-items:center;padding:0;border:0;border-radius:6px;color:inherit;background:transparent;cursor:pointer}
 .ai-answer-actions button:hover{color:#40515a;background:#f0f3f4}
 .ai-teacher-composer{display:grid;flex:0 0 auto;gap:9px;min-height:0;padding-top:12px;border-top:1px solid #e2e8ed}
-.ai-teacher-composer :deep(.ant-input){resize:vertical}
+.ai-teacher-composer :deep(.ant-input){height:76px;min-height:76px;max-height:76px;resize:none;overflow-y:auto}
 .ai-composer-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:40px}
+.ai-composer-hint{flex:1;justify-content:flex-end;text-align:right;overflow-wrap:anywhere}
 .ai-composer-actions span{display:flex;min-width:0;align-items:center;gap:5px;color:#7b8993;font-size:12px;line-height:1.4}
-.ai-composer-actions :deep(.ant-btn){display:inline-flex;align-items:center;justify-content:center;min-width:84px;height:40px;white-space:nowrap}
+.ai-composer-actions :deep(.ant-btn){display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;min-width:84px;height:40px;white-space:nowrap}
 @media(max-width:600px){.ai-teacher-window{resize:vertical}.ai-teacher-panel{padding:8px}.ai-teacher-window-header{min-height:44px}}
 </style>

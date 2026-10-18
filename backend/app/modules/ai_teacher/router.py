@@ -34,11 +34,17 @@ _active_students: set[UUID] = set()
 _active_lock = Lock()
 
 
+class AiTeacherQuoteIn(BaseModel):
+    quote: str = Field(min_length=1, max_length=1200)
+    source: Literal["workspace", "assignment"] | None = None
+
+
 class AiTeacherChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     conversation_id: UUID
     quote: str = ""
     quote_source: Literal["workspace", "assignment"] | None = None
+    quotes: list[AiTeacherQuoteIn] = Field(default_factory=list, max_length=8)
     message_id: UUID | None = None
 
 
@@ -158,12 +164,34 @@ async def chat_with_ai_teacher(aid: UUID, data: AiTeacherChatIn, request: Reques
     if not question:
         raise ApiError(422, "QUESTION_REQUIRED", "请填写问题")
     owner_user_id, owner_team_id, workspace = workspace_scope(db, assignment, user)
-    quote = normalize_reference_text(data.quote)
+    raw_quotes = [{"quote": item.quote, "source": item.source or ""} for item in data.quotes]
+    if data.quote:
+        raw_quotes.insert(0, {"quote": data.quote, "source": data.quote_source or ""})
+    if len(raw_quotes) > 8:
+        raise ApiError(422, "QUOTE_TOO_MANY", "引用区域过多，请减少后重试")
+    references = []
+    for raw in raw_quotes:
+        item_quote = normalize_reference_text(raw.get("quote", ""))
+        item_source = raw.get("source") or None
+        if item_quote:
+            references.append({"quote": item_quote, **({"source": item_source} if item_source else {})})
+    quote = "\n\n".join(f"引用 {index}:\n{item['quote']}" for index, item in enumerate(references, 1))
+    if any(item.get("source") == "workspace" for item in references) and not workspace:
+        raise ApiError(422, "QUOTE_OUT_OF_SCOPE", "当前没有可访问的作业文档")
+    assignment_sources = [normalize_text(html_to_text(assignment.description))]
+    if workspace:
+        assignment_sources.extend(normalize_reference_text(item.markdown_content or "", markdown_source=True) for item in db.scalars(
+            select(SubmissionDocument).where(SubmissionDocument.workspace_id == workspace.id)
+        ).all())
+    for item in references:
+        if item.get("source") != "workspace" and not any(item["quote"] in source_text for source_text in assignment_sources):
+            raise ApiError(422, "QUOTE_OUT_OF_SCOPE", "引用内容不在当前作业中，请从作业要求或当前文档中重新选择")
+    data.quote_source = None if len({item.get("source") for item in references}) != 1 else next(iter({item.get("source") for item in references}), None)
     if data.quote_source and not quote:
         raise ApiError(422, "QUOTE_EMPTY", "引用内容为空，请重新选择文字")
-    if len(quote) > settings.ai_teacher_max_quote_chars:
+    if any(len(item["quote"]) > settings.ai_teacher_max_quote_chars for item in references) or len(quote) > settings.ai_teacher_max_quote_chars * 5:
         raise ApiError(422, "QUOTE_TOO_LONG", "引用内容过长，请缩短选区")
-    if quote:
+    if quote and len(references) <= 1:
         if data.quote_source == "workspace":
             if not workspace:
                 raise ApiError(422, "QUOTE_OUT_OF_SCOPE", "当前没有可访问的作业工作区")
@@ -231,7 +259,7 @@ async def chat_with_ai_teacher(aid: UUID, data: AiTeacherChatIn, request: Reques
                 return
             with SessionLocal() as stream_db:
                 question_time = now()
-                user_message = AiChatMessage(id=data.message_id or uuid4(), assignment_id=aid, student_id=user.id, conversation_id=data.conversation_id, role="user", content=question, contexts=[{"quote": quote}] if quote else [], created_at=question_time)
+                user_message = AiChatMessage(id=data.message_id or uuid4(), assignment_id=aid, student_id=user.id, conversation_id=data.conversation_id, role="user", content=question, contexts=references, created_at=question_time)
                 assistant_message = AiChatMessage(assignment_id=aid, student_id=user.id, conversation_id=data.conversation_id, role="assistant", content=answer, contexts=context_payload, created_at=question_time + timedelta(microseconds=1))
                 stream_db.add_all([user_message, assistant_message])
                 stream_db.flush()

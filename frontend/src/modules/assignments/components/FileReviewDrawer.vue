@@ -1,7 +1,10 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowDownOutlined, ArrowUpOutlined, BookOutlined, CaretRightOutlined, CloseOutlined, ColumnWidthOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, MinusOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons-vue'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
+import SingleAiGradingPanel from '../../ai_grading/components/SingleAiGradingPanel.vue'
+import { useSingleAiGrading } from '../../ai_grading/composables/useSingleAiGrading'
+import { applyFeedbackSuggestion, hasFeedbackContent, feedbackMatchesSuggestion } from '../../ai_grading/feedbackSuggestion'
 import { api, exportArchive, randomUUID } from '../../../api'
 import { loadMarkdownPreview } from '../../../markdownPreview'
 import RichTextEditor from '../../../shared/components/RichTextEditor.vue'
@@ -14,6 +17,7 @@ const props = defineProps({
   criteriaFiles: { type: Array, default: () => [] },
   criteriaText: { type: String, default: '' },
   initialIndex: { type: Number, default: 0 },
+  assignmentId: { type: String, default: '' },
   submissionVersionId: { type: String, default: '' },
   owner: { type: String, default: '' },
   assignmentTitle: { type: String, default: '' },
@@ -87,6 +91,33 @@ const toggleExpanded = () => {
   drawerAnimationTimer = setTimeout(() => { drawerAnimating.value = false }, 220)
 }
 const feedback = reactive({ status: null, revision: 0, grade: undefined, comment: '', annotations: [], published_at: null, has_draft: false })
+const aiEnabled = computed(() => props.open && props.editable && props.mode === 'TEACHER' && Boolean(props.assignmentId && props.submissionVersionId))
+const { visible: aiVisible, loading: aiLoading, draft: aiDraft, error: aiError, phase: aiPhase, animate: aiAnimate, start: startAiGrading, reset: resetAiGrading } = useSingleAiGrading(() => aiEnabled.value ? { assignmentId: props.assignmentId, versionId: props.submissionVersionId } : null)
+const aiAdopted = computed(() => feedbackMatchesSuggestion(feedback, aiDraft.value))
+let aiAdoptConfirmation
+function resetAiReview() {
+  resetAiGrading()
+  aiAdoptConfirmation?.destroy()
+  aiAdoptConfirmation = null
+}
+watch([() => props.open, () => props.assignmentId, () => props.submissionVersionId, aiEnabled], resetAiReview, { flush: 'sync' })
+onBeforeUnmount(resetAiReview)
+
+function adoptAiSuggestion(draft) {
+  if (feedbackMatchesSuggestion(feedback, draft)) return
+  if (!aiEnabled.value || saving.value || feedback.status === 'PUBLISHED' || draft !== aiDraft.value || draft.status !== 'READY') return
+  const versionId = props.submissionVersionId
+  const assignmentId = props.assignmentId
+  const apply = () => {
+    if (!aiEnabled.value || saving.value || feedback.status === 'PUBLISHED' || props.assignmentId !== assignmentId || props.submissionVersionId !== versionId || aiDraft.value !== draft) return
+    applyFeedbackSuggestion(feedback, draft)
+    message.success('已填入 AI 建议，请检查后保存草稿或发布')
+  }
+  if (hasFeedbackContent(feedback)) {
+    aiAdoptConfirmation?.destroy()
+    aiAdoptConfirmation = Modal.confirm({ title: '替换当前等级和总评？', content: '采用 AI 建议将替换已填写的等级和总评，文内批注会保留。', okText: '替换', cancelText: '取消', onOk: apply })
+  } else apply()
+}
 const externalWarning = ref(false)
 const teacherFeedbackEditor = reactive({ open: false, saving: false, assessment: null, targetType: '', annotationId: null, feedbackId: null, category: 'MISUNDERSTANDING', reason: '' })
 
@@ -830,9 +861,10 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
         </section>
         <div v-if="!editable&&feedback.comment" class="published-overall"><strong>{{mode==='PEER'?'互评总评':'教师总评'}}</strong><div v-html="feedback.comment"></div></div>
         <div v-if="mode==='PEER'" v-for="item in teacherFeedbacksFor(feedback, 'COMMENT')" :key="item.id" class="teacher-feedback-note"><strong>{{item.teacher_name}} · {{feedbackCategories.find(option=>option.value===item.category)?.label}}</strong><div v-html="item.reason"></div></div>
+        <SingleAiGradingPanel v-if="aiEnabled&&aiVisible" :draft="aiDraft" :loading="aiLoading" :phase="aiPhase" :error="aiError" :animate="aiAnimate" :adopted="aiAdopted" :disabled="saving||feedback.status==='PUBLISHED'" @adopt="adoptAiSuggestion" @retry="startAiGrading"/>
         <div v-if="editable" class="feedback-actions">
           <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in ['A','B','C','D','E']" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
-          <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'&&feedback.status" danger @click="emit('clear-feedback')">清除反馈</a-button><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button></div>
+          <div class="feedback-action-buttons" :class="{'with-ai':aiEnabled}"><a-button class="clear-feedback-action" v-if="mode==='TEACHER'&&feedback.status" danger @click="emit('clear-feedback')">清除反馈</a-button><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button><a-button v-if="aiEnabled" :loading="aiLoading" :disabled="saving||feedback.status==='PUBLISHED'" @click="startAiGrading">AI批改</a-button></div>
         </div>
       </aside>
     </div>
@@ -915,4 +947,9 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; clearTimeout(drawe
 @media(max-width:1180px){.file-review-workspace.peer-comparison.with-feedback{grid-template-columns:minmax(340px,1fr) minmax(300px,1fr);grid-template-rows:minmax(420px,60vh) auto}.peer-comparison>.feedback-sidebar{grid-column:1/-1;max-height:460px;border-top:1px solid #d7dfe7;border-left:0}}
 @media(max-width:760px){.file-review-workspace.peer-comparison.with-feedback{grid-template-columns:1fr;grid-template-rows:minmax(420px,55vh) minmax(420px,55vh) auto}.peer-comparison>.feedback-sidebar{grid-column:auto}.submission-preview-toolbar{flex-wrap:wrap}.submission-preview-toolbar>.ant-select{width:100%}.review-image-scroll{padding:12px}}
 @media(max-width:900px){.file-review-workspace.with-feedback{grid-template-columns:1fr!important}.review-split-handle{display:none}}
+</style>
+
+<style scoped>
+.feedback-action-buttons.with-ai { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.feedback-action-buttons.with-ai > .clear-feedback-action { grid-column: 1 / -1; }
 </style>
