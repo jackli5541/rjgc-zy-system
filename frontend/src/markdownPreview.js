@@ -43,8 +43,8 @@ export function renderMarkdown(source) {
   return template.innerHTML
 }
 
-export async function loadMarkdownPreview(url) {
-  const response = await fetch(url)
+export async function loadMarkdownPreview(url, options = {}) {
+  const response = await fetch(url, options)
   if (!response.ok) throw new Error('Markdown 文件加载失败')
   const announcedSize = Number(response.headers.get('content-length') || 0)
   if (announcedSize > MAX_MARKDOWN_BYTES) throw new Error('Markdown 文件超过 5 MB，无法在线预览')

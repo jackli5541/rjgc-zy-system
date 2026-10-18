@@ -686,3 +686,84 @@ html.file-preview-open { overflow: hidden; }
   .peer-review-candidate+.peer-review-candidate{margin:4px 0 0}
   .peer-review-actions .ant-btn{min-height:44px}
 }
+
+/* Compact reading controls and independently scrolling review panes. */
+.review-workspace-drawer .review-drawer-title{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.review-workspace-drawer .review-drawer-title>span:last-child{display:none}
+.review-workspace-drawer .review-drawer-assignment{text-align:right}
+.review-workspace-drawer .ant-drawer-header{padding:10px 16px}
+.review-workspace-drawer .review-workspace-toolbar{flex-wrap:wrap;gap:8px;padding:7px 12px;min-height:48px}
+.review-workspace-drawer .review-workspace-toolbar>.ant-space{flex-wrap:wrap;min-width:0;gap:6px!important}
+.review-workspace-drawer .review-toolbar-actions{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:8px;min-width:0;margin-left:auto}
+.review-workspace-drawer .review-scale-label{font-size:12px;color:#778995}
+.review-workspace-drawer .review-markdown-reader{width:100%;height:100%;min-width:0;min-height:0}
+.review-workspace-drawer .review-document-stage{align-items:stretch}
+.review-workspace-drawer .review-markdown-reader .material-outline-title{font-size:13px}
+.review-workspace-drawer .review-markdown-reader .teaching-material-rich{padding:10px}
+@media(max-width:900px){
+  .review-workspace-drawer .file-review-workspace.with-feedback{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) minmax(140px,30%);overflow:hidden}
+  .review-workspace-drawer .review-split-handle{display:none}
+  .review-workspace-drawer .review-workspace-toolbar{flex-direction:row;align-items:center}
+}
+@media(max-width:760px){
+  .review-workspace-drawer .review-drawer-title{grid-template-columns:minmax(0,1fr)}
+  .review-workspace-drawer .review-drawer-assignment{text-align:left}
+}
+
+/* Student editing fills the viewport below the common navigation. */
+.app-shell:has(.student-assignment-detail){height:100dvh;min-height:0;overflow:hidden}
+.app-content:has(.student-assignment-detail){display:flex;flex:1;min-height:0;overflow:hidden}
+.content-wrap:has(.student-assignment-detail){display:flex;flex:1;width:100%;max-width:none;min-height:0;padding:8px var(--navigation-gutter);overflow:hidden}
+.page-surface:has(.student-assignment-detail){display:flex;flex:1;min-width:0;min-height:0;overflow:hidden}
+.student-assignment-detail{display:flex;flex:1;flex-direction:column;min-width:0;min-height:0}
+.student-assignment-detail .detail-title{flex:0 0 auto;min-height:0;margin-bottom:8px;gap:12px;align-items:center;flex-direction:row}
+.student-assignment-detail .detail-title .eyebrow{display:none}
+.student-assignment-detail .detail-title h1{margin:0 0 4px;font-size:20px;line-height:1.35}
+.student-assignment-detail .assignment-title-meta{gap:6px;font-size:12px}
+.student-assignment-detail .assignment-workspace{display:flex;flex:1;min-height:0}
+.student-assignment-detail .student-assignment-content{display:flex;flex:1;flex-direction:column;min-height:0;min-width:0;padding:8px 10px 0}
+.student-assignment-detail .student-workspace-intro{flex:0 0 auto;gap:12px;margin-bottom:8px;max-height:80px;overflow:auto}
+.student-assignment-detail .student-workspace-intro .detail-description{font-size:13px;line-height:1.5}
+.student-assignment-detail .student-workspace-intro .detail-description p{margin:2px 0}
+.student-assignment-detail .student-workspace-state{padding:6px 12px}
+.student-assignment-detail .student-submit-bar{flex:0 0 auto;margin:0;padding:5px 0}
+.student-assignment-detail .student-submit-bar>span{font-size:12px;font-weight:400}
+.student-assignment-detail .markdown-workspace{flex:1;height:auto;min-height:0}
+@media(max-width:760px){
+  .content-wrap:has(.student-assignment-detail){padding-bottom:calc(70px + env(safe-area-inset-bottom))}
+  .student-assignment-detail .detail-title h1{font-size:17px}
+  .student-assignment-detail .student-workspace-intro{grid-template-columns:minmax(0,1fr) auto;max-height:70px;gap:8px}
+  .student-assignment-detail .student-workspace-state span{display:none}
+}
+
+/* Give the student editor one compact task bar and the remaining height. */
+.student-assignment-detail .detail-title{min-height:38px;margin-bottom:6px}
+.student-assignment-detail .detail-title>div:first-child{display:flex;align-items:center;gap:12px;min-width:0}
+.student-assignment-detail .detail-title h1{max-width:40vw;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:18px}
+.student-assignment-detail .assignment-title-meta{display:flex;align-items:center;flex-wrap:nowrap;white-space:nowrap}
+.assignment-detail-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0}
+.student-assignment-detail .student-assignment-content{padding:0}
+.student-assignment-detail .assignment-workspace{border-radius:6px;box-shadow:none}
+.student-assignment-detail .student-workspace-intro{max-height:120px;margin:0;padding:10px 12px;border-bottom:1px solid #e2e8ec;background:#fbfcfd}
+.student-submission-hint{margin:4px 0 0;color:#70818d;font-size:12px}
+.app-shell:has(.student-assignment-detail.editor-focused)>.app-header{display:none}
+.student-assignment-detail.editor-focused>.detail-title,.student-assignment-detail.editor-focused .student-workspace-intro{display:none}
+.app-content:has(.student-assignment-detail.editor-focused),.content-wrap:has(.student-assignment-detail.editor-focused){background:#202a35}
+.page-surface:has(.student-assignment-detail.editor-focused){background:transparent}
+.student-assignment-detail.editor-focused .assignment-workspace{border-color:#46525f;box-shadow:0 8px 28px rgba(0,0,0,.24)}
+.student-assignment-detail.editor-focused .markdown-workspace{border-color:#46525f;background:#293440}
+.student-assignment-detail.editor-focused .workspace-document-reader .teaching-material-rich{padding:clamp(6px,.6vw,12px);background:#293440}
+.student-assignment-detail.editor-focused .document-canvas-surface{box-shadow:0 2px 12px rgba(0,0,0,.24)}
+@media(max-width:1200px){
+  .student-assignment-detail .assignment-title-meta .ant-tag{display:none}
+  .student-assignment-detail .detail-title h1{max-width:32vw}
+}
+@media(max-width:760px){
+  .student-assignment-detail .detail-title{flex-wrap:wrap;gap:4px}
+  .student-assignment-detail .detail-title>div:first-child{flex-direction:column;align-items:flex-start;gap:2px}
+  .student-assignment-detail .detail-title h1{max-width:44vw;font-size:15px}
+  .assignment-detail-actions{gap:4px}
+  .assignment-detail-actions>.ant-tag{display:none}
+  .app-shell:has(.student-assignment-detail.editor-focused) .mobile-nav{display:none}
+  .content-wrap:has(.student-assignment-detail.editor-focused){padding-bottom:8px}
+}

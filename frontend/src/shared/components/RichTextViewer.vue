@@ -84,6 +84,8 @@ function rebuildHighlights() {
   const container = root.value
   if (!container) return
   const containerRect = container.getBoundingClientRect()
+  const scaleX = container.offsetWidth ? containerRect.width / container.offsetWidth : 1
+  const scaleY = container.offsetHeight ? containerRect.height / container.offsetHeight : 1
   const items = []
   props.annotations.forEach((annotation, annotationIndex) => {
     const anchor = annotation.anchor || {}
@@ -96,7 +98,7 @@ function rebuildHighlights() {
       const range = document.createRange()
       range.setStart(start.node, start.offset)
       range.setEnd(end.node, end.offset)
-      const rects = Array.from(range.getClientRects()).filter(rect => rect.width && rect.height).map(rect => ({ left: rect.left - containerRect.left + container.scrollLeft, top: rect.top - containerRect.top + container.scrollTop, width: rect.width, height: rect.height }))
+      const rects = Array.from(range.getClientRects()).filter(rect => rect.width && rect.height).map(rect => ({ left: (rect.left - containerRect.left) / scaleX + container.scrollLeft, top: (rect.top - containerRect.top) / scaleY + container.scrollTop, width: rect.width / scaleX, height: rect.height / scaleY }))
       if (!rects.length) return
       const last = rects[rects.length - 1]
       items.push({ id: annotation.id, ordinal: annotationIndex + 1, markType: annotation.mark_type || (annotation.comment ? 'COMMENT' : 'HIGHLIGHT'), color: annotation.color || 'YELLOW', rects, bubble: { left: last.left + last.width + 5, top: last.top + last.height / 2 } })

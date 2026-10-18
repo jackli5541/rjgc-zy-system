@@ -1,14 +1,20 @@
 <script setup>
-import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message, Modal, Input } from 'ant-design-vue'
-import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, MoreOutlined, UploadOutlined, VideoCameraOutlined } from '@ant-design/icons-vue'
+import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, MenuFoldOutlined, MenuUnfoldOutlined, UnorderedListOutlined, UploadOutlined, VideoCameraOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { loadMarkdownPreview } from '../../../markdownPreview'
-import RichTextViewer from '../../../shared/components/RichTextViewer.vue'
+import MaterialResizeHandle from '../../../shared/components/MaterialResizeHandle.vue'
+import MarkdownReader from '../../../shared/components/MarkdownReader.vue'
+import DocumentScaleControls from '../../../shared/components/DocumentScaleControls.vue'
 import { useShellContext } from '../../../shellContext'
 
 const { classId, role } = useShellContext()
+const treeCollapsed = ref(false)
+const treeWidth = ref(260)
+const textScale = ref(120)
+const pageScale = ref(80)
+const outlineOpen = ref(true)
 const loading = ref(false)
 const error = ref('')
 const folders = ref([])
@@ -199,32 +205,33 @@ onBeforeUnmount(() => htmlResizeObserver?.disconnect())
   <section class="teaching-materials-page" @click="clearContext">
     <input ref="uploadInput" class="teaching-material-upload-input" type="file" accept=".md,.html,.htm,.mp4" @change="handleUpload">
     <header class="page-title teaching-materials-title">
-      <div><div class="eyebrow">课程资源</div><h1>教学资料</h1><AnimatedIntroText>文件目录（右击操作）</AnimatedIntroText></div>
+      <div class="teaching-materials-title-content"><h1>教学资料</h1><span v-if="canManage" class="teaching-materials-title-hint">右击文件目录可管理资料</span></div>
       <a-tag v-if="canManage" color="blue">教师管理</a-tag><a-tag v-else>只读查看</a-tag>
     </header>
     <a-alert v-if="error" type="error" show-icon :message="error" class="teaching-materials-alert" />
-    <div class="teaching-materials-layout">
+    <div class="teaching-materials-layout" :class="{ 'tree-collapsed': treeCollapsed, 'teacher-tree-collapsed': treeCollapsed && canManage }" :style="{ '--material-tree-width': `${treeWidth}px` }">
       <aside class="teaching-materials-tree" @contextmenu="event => openContext(event)">
-        <div class="teaching-materials-tree-heading"><span>文件目录</span><small>右击操作</small></div>
+        <div class="teaching-materials-tree-heading"><span v-if="!treeCollapsed">文件目录</span><small v-if="!treeCollapsed && canManage">右击操作</small><a-button type="text" :title="treeCollapsed ? '展开文件目录' : '折叠文件目录'" :aria-label="treeCollapsed ? '展开文件目录' : '折叠文件目录'" :aria-expanded="!treeCollapsed" @click="treeCollapsed = !treeCollapsed"><MenuUnfoldOutlined v-if="treeCollapsed"/><MenuFoldOutlined v-else/></a-button></div>
         <a-spin v-if="loading" class="teaching-materials-loading" />
         <a-empty v-else-if="!visibleNodes.length" description="暂无教学资料" />
         <div v-else class="teaching-materials-node-list">
-          <button v-for="node in visibleNodes" :key="`${node.nodeType}-${node.id}`" type="button" class="teaching-material-node" :class="{selected:selected?.id===node.id,folder:node.nodeType==='folder'}" :style="{paddingLeft:`${14 + node.depth * 20}px`}" @click.stop="node.nodeType==='folder' ? toggleFolder(node) : selectFile(node)" @contextmenu="event => openContext(event,node)">
+          <button v-for="node in visibleNodes" :key="`${node.nodeType}-${node.id}`" type="button" class="teaching-material-node" :class="{selected:selected?.id===node.id,folder:node.nodeType==='folder'}" :style="{paddingLeft:`${treeCollapsed ? 8 : 14 + node.depth * 20}px`}" :title="node.name" @click.stop="node.nodeType==='folder' ? toggleFolder(node) : selectFile(node)" @contextmenu="event => openContext(event,node)">
             <FolderOpenOutlined v-if="node.nodeType==='folder' && expanded.has(node.id)" class="teaching-material-node-icon" />
             <FolderOutlined v-else-if="node.nodeType==='folder'" class="teaching-material-node-icon" />
             <component :is="fileIcon(node)" v-else class="teaching-material-node-icon file" />
             <span class="teaching-material-node-name">{{node.name}}</span><span v-if="node.nodeType==='file'" class="teaching-material-node-type">{{typeLabel(node.media_type)}}</span>
           </button>
         </div>
+        <MaterialResizeHandle v-if="!treeCollapsed" v-model="treeWidth" :min="180" :max="420" label="文件目录宽度" />
       </aside>
       <main class="teaching-materials-preview">
         <div v-if="!selected" class="teaching-materials-placeholder"><FolderOpenOutlined/><h2>选择文件查看内容</h2><p>点击左侧文件，内容会显示在这里</p></div>
         <template v-else>
-          <div class="teaching-material-preview-heading"><div><div class="eyebrow">{{typeLabel(selected.media_type)}}</div><h2>{{selected.name}}</h2></div><a-tag>{{Math.max(1, Math.ceil(selected.size / 1024))}} KB</a-tag></div>
+          <div class="teaching-material-preview-heading"><div><div class="eyebrow">{{typeLabel(selected.media_type)}}</div><h2>{{selected.name}}</h2></div><div class="teaching-material-preview-actions"><DocumentScaleControls v-if="selected.media_type === 'MARKDOWN'" v-model:text-scale="textScale" v-model:page-scale="pageScale" :default-page-scale="80" :default-text-scale="120" /><a-button class="document-outline-toggle" v-if="selected.media_type === 'MARKDOWN'" :aria-expanded="outlineOpen" @click="outlineOpen = !outlineOpen"><UnorderedListOutlined/>{{ outlineOpen ? '收起大纲' : '展开大纲' }}</a-button><a-tag>{{Math.max(1, Math.ceil(selected.size / 1024))}} KB</a-tag></div></div>
           <a-spin v-if="contentLoading" class="teaching-material-content-loading" />
           <div v-else-if="selected.media_type==='VIDEO'" class="teaching-material-video"><video :src="selected.content_url" controls preload="metadata" /></div>
           <div v-else-if="selected.media_type==='HTML'" ref="htmlViewport" class="teaching-material-html"><div class="teaching-material-html-stage" :style="{width:`${HTML_CANVAS_WIDTH * htmlScale}px`,height:`${HTML_CANVAS_HEIGHT * htmlScale}px`}"><iframe :srcdoc="htmlDocument" title="HTML 教学资料" sandbox="allow-scripts" allow="fullscreen" allowfullscreen referrerpolicy="no-referrer" :style="{width:`${HTML_CANVAS_WIDTH}px`,height:`${HTML_CANVAS_HEIGHT}px`,transform:`scale(${htmlScale})`}" /></div></div>
-          <div v-else class="teaching-material-rich"><RichTextViewer :html="content" /></div>
+          <MarkdownReader v-else :html="content" :outline-open="outlineOpen" :text-scale="textScale" :page-scale="pageScale" @close-outline="outlineOpen = false" />
         </template>
       </main>
     </div>

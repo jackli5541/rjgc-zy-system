@@ -1,7 +1,7 @@
 <script setup>
 import AnimatedIntroText from '../../../shared/components/AnimatedIntroText.vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { message, Modal } from 'ant-design-vue'
+import { FloatButton, message, Modal } from 'ant-design-vue'
 import { ClockCircleOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { beijingDateTimeToIso, formatBeijingDate, formatBeijingTime } from '../../../shared/time'
@@ -11,6 +11,8 @@ import { attendanceCheckInTime, filterAttendanceRecords } from '../records'
 import AttendanceProjection from '../components/AttendanceProjection.vue'
 
 const { classId, session, attendanceSessions, selectedAttendance, activeAttendance, loadAttendanceView, selectAttendance } = useShellContext()
+const AttendanceBackTop = FloatButton.BackTop
+const headerOffset = ref(0)
 const form = reactive({ title: '', duration_minutes: 15, start_mode: 'NOW', started_at: '' })
 const creating = ref(false)
 const nowMs = ref(Date.now())
@@ -27,6 +29,7 @@ const dateTime = value => formatBeijingTime(value, '—')
 let tick
 let refresh
 let recordRevision = 0
+let headerObserver
 
 async function reload() {
   try { await loadAttendanceView() } catch (error) { message.error(error.message) }
@@ -94,6 +97,13 @@ function exportClass() { window.location.href = `/api/v1/classes/${classId.value
 function escape(event) { if (event.key === 'Escape') projecting.value = false }
 
 onMounted(() => {
+  const header = document.querySelector('.app-header')
+  if (header) {
+    const updateHeaderOffset = () => { headerOffset.value = Math.ceil(header.getBoundingClientRect().height) }
+    updateHeaderOffset()
+    headerObserver = new ResizeObserver(updateHeaderOffset)
+    headerObserver.observe(header)
+  }
   form.title = `${formatBeijingDate(new Date())} 考勤`
   tick = setInterval(async () => {
     nowMs.value = Date.now()
@@ -116,7 +126,7 @@ onMounted(() => {
   }, 5000)
   window.addEventListener('keydown', escape)
 })
-onBeforeUnmount(() => { clearInterval(tick); clearInterval(refresh); window.removeEventListener('keydown', escape) })
+onBeforeUnmount(() => { clearInterval(tick); clearInterval(refresh); headerObserver?.disconnect(); window.removeEventListener('keydown', escape) })
 watch(classId, () => { selectedAttendance.value = null; projecting.value = false; reload() })
 watch(() => selectedAttendance.value?.id, () => { rosterKeyword.value = ''; rosterStatus.value = '' })
 </script>
@@ -158,7 +168,7 @@ watch(() => selectedAttendance.value?.id, () => { rosterKeyword.value = ''; rost
       <a-button @click="rosterKeyword=''; rosterStatus=''">重置筛选</a-button>
       <span>显示 {{filteredRecords.length}} / {{selectedAttendance.records?.length || 0}} 人</span>
     </div>
-    <a-table class="attendance-desktop-table" :data-source="filteredRecords" row-key="student_id" size="small" :pagination="{pageSize:20}" :scroll="{x:680}">
+    <a-table class="attendance-desktop-table" :data-source="filteredRecords" row-key="student_id" size="small" :pagination="false" :sticky="{offsetHeader:headerOffset}" :scroll="{x:680}">
       <a-table-column title="学号" data-index="student_no" :width="150"/><a-table-column title="姓名" data-index="student_name" :width="130"/>
       <a-table-column v-for="status in attendanceStatusColumns" :key="status.value" :width="76" align="center">
         <template #title><span :class="`attendance-status-${status.value.toLowerCase()}`">{{status.label}}</span></template>
@@ -178,6 +188,9 @@ watch(() => selectedAttendance.value?.id, () => { rosterKeyword.value = ''; rost
     </div>
   </section>
 
+  <Teleport to="body">
+    <AttendanceBackTop v-if="!projecting" class="attendance-back-top" tooltip="回到顶部" aria-label="回到顶部" :visibility-height="300"/>
+  </Teleport>
 
   <AttendanceProjection v-if="projecting && selectedAttendance?.status==='ACTIVE'" :attendance="selectedAttendance" :class-name="session.context?.current_class?.name" :code-seconds="codeSeconds" :session-seconds="sessionSeconds" @close="projecting=false"/>
 </template>

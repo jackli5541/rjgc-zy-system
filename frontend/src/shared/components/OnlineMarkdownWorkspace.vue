@@ -6,9 +6,15 @@ import { api, exportArchive } from '../../api'
 import { loadMarkdownPreview, renderMarkdown } from '../../markdownPreview'
 import RichTextEditor from './RichTextEditor.vue'
 import RichTextViewer from './RichTextViewer.vue'
+import MarkdownReader from './MarkdownReader.vue'
+import MaterialResizeHandle from './MaterialResizeHandle.vue'
+import DocumentCanvas from './DocumentCanvas.vue'
+import DocumentScaleControls from './DocumentScaleControls.vue'
 
 const props = defineProps({
   assignmentId: String,
+  focused: Boolean,
+  focusable: Boolean,
   basePath: { type: String, default: '' },
   documentId: { type: String, default: '' },
   hideDocumentList: Boolean,
@@ -17,7 +23,7 @@ const props = defineProps({
   canSubmit: Boolean,
   submitLabel: { type: String, default: '提交当前版本' },
 })
-const emit = defineEmits(['ready', 'preview-criteria', 'submit'])
+const emit = defineEmits(['ready', 'preview-criteria', 'submit', 'update:focused'])
 const parentAskAiTeacher = inject('askAiTeacher', null)
 if (parentAskAiTeacher) provide('askAiTeacher', quote => {
   parentAskAiTeacher(quote, 'workspace')
@@ -32,7 +38,11 @@ provide('aiTeacherDocumentId', computed(() => `${resourceBase.value}:${loadedId.
 const editorHtml = ref('')
 const sourceMarkdown = ref('')
 const editorMode = ref('visual')
-const sidebarCollapsed = ref(false)
+const sidebarCollapsed = ref(true)
+const outlineOpen = ref(true)
+const textScale = ref(120)
+const pageScale = ref(80)
+const sidebarWidth = ref(210)
 const criteriaPreview = ref(null)
 const state = ref('idle')
 const downloading = ref(false)
@@ -337,14 +347,23 @@ defineExpose({ save: () => state.value === 'dirty' ? false : save(), reload: () 
 </script>
 
 <template>
-  <div class="markdown-workspace" :class="{loading,'sidebar-collapsed':sidebarCollapsed,'no-sidebar':hideDocumentList}">
-    <aside v-if="!hideDocumentList" class="document-sidebar">
+  <div class="markdown-workspace" :style="{ '--workspace-sidebar-width': `${sidebarWidth}px`, '--workspace-font-size': `${15 * textScale / 100}px` }" :class="{loading,focused,'sidebar-collapsed':sidebarCollapsed,'no-sidebar':hideDocumentList || sidebarCollapsed || focused}">
+    <aside v-if="!hideDocumentList && !focused && !sidebarCollapsed" class="document-sidebar">
       <div class="document-sidebar-heading"><div><strong>文档</strong><span>{{workspace?.documents?.length||0}} 份 Markdown</span></div><a-tooltip :title="sidebarCollapsed?'展开文档栏':'折叠文档栏'"><a-button type="text" shape="circle" :aria-label="sidebarCollapsed?'展开文档栏':'折叠文档栏'" @click="sidebarCollapsed=!sidebarCollapsed"><MenuUnfoldOutlined v-if="sidebarCollapsed"/><MenuFoldOutlined v-else/></a-button></a-tooltip></div>
       <nav class="document-list" aria-label="作业文档列表"><a-tooltip v-for="item in workspace?.documents||[]" :key="item.id" :title="sidebarCollapsed?item.name:''" placement="right"><button type="button" class="document-item" :class="{active:item.id===activeId}" @click="selectDocument(item.id)"><span class="document-icon"><FileTextOutlined/></span><span class="document-name">{{item.name}}</span></button></a-tooltip></nav>
+      <MaterialResizeHandle v-if="!sidebarCollapsed" v-model="sidebarWidth" :min="150" :max="360" label="作业文档列表宽度" />
     </aside>
     <main class="document-surface">
-      <header class="document-status"><div class="document-title"><strong>{{criteriaPreview?.file.name||active?.name}}</strong><span v-if="criteriaPreview">判定标准 · 只读</span><span v-else-if="active?.updated_by">最近由 {{active.updated_by}} 编辑</span></div><div v-if="criteriaPreview" class="readonly-indicator"><EyeOutlined/> 只读查看</div><div v-else-if="active" class="editor-mode-switch" role="tablist" aria-label="编辑模式"><button type="button" :class="{active:editorMode==='visual'}" role="tab" :aria-selected="editorMode==='visual'" @click="setEditorMode('visual')">可视化</button><button type="button" :class="{active:editorMode==='source'}" role="tab" :aria-selected="editorMode==='source'" @click="setEditorMode('source')"><CodeOutlined/> Markdown 源码</button></div></header>
-      <div class="writing-stage" :class="{'criteria-stage':criteriaPreview}"><a-skeleton v-if="criteriaPreview?.loading||documentLoading||loading" active/><RichTextViewer v-else-if="criteriaPreview?.type==='rich'" :html="criteriaPreview.html"/><a-empty v-else-if="criteriaPreview" description="判定标准仅支持 Markdown 文档"/><template v-else-if="active&&loadedId===active.id"><RichTextEditor v-if="editorMode==='visual'" v-model="editorHtml" :editable="writable" :image-upload="uploadImage" document placeholder="开始编写作业..."><template #toolbarEnd><a-tooltip v-if="enableDownload" title="下载当前原文件"><a-button type="text" shape="circle" aria-label="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button></a-tooltip><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></template></RichTextEditor><section v-else class="source-editor"><div class="source-editor-heading"><div><CodeOutlined/><strong>Markdown 源码</strong></div><div class="source-editor-actions"><a-tooltip v-if="enableDownload" title="下载当前原文件"><a-button type="text" shape="circle" aria-label="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button></a-tooltip><div class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span></div><a-tooltip v-if="['dirty','conflict','error'].includes(state)" title="撤销"><a-button type="text" shape="circle" aria-label="撤销" @click="discardChanges"><UndoOutlined/></a-button></a-tooltip><a-button v-if="state==='dirty'||state==='error'" type="primary" size="small" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button><a-button v-if="canSubmit" type="primary" size="small" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button></div></div><textarea v-model="sourceMarkdown" :readonly="!writable" class="source-editor-input" spellcheck="false" aria-label="Markdown 源码"></textarea></section></template><a-empty v-else description="该作业没有可编辑的 Markdown 附件"/></div>
+      <header class="document-status"><a-tooltip v-if="sidebarCollapsed && !hideDocumentList && !focused" title="展开文档栏"><a-button type="text" shape="circle" aria-label="展开文档栏" @click="sidebarCollapsed = false"><MenuUnfoldOutlined/></a-button></a-tooltip><div class="document-title"><strong :title="criteriaPreview?.file.name || active?.name">{{criteriaPreview?.file.name||active?.name}}</strong></div><div class="workspace-document-actions"><div v-if="criteriaPreview" class="readonly-indicator"><EyeOutlined/> 只读查看</div><div v-else-if="active" class="editor-mode-switch" role="tablist" aria-label="编辑模式"><button type="button" :class="{active:editorMode==='visual'}" role="tab" :aria-selected="editorMode==='visual'" @click="setEditorMode('visual')">可视化</button><button type="button" :class="{active:editorMode==='source'}" role="tab" :aria-selected="editorMode==='source'" @click="setEditorMode('source')"><CodeOutlined/> Markdown 源码</button></div><DocumentScaleControls v-model:text-scale="textScale" v-model:page-scale="pageScale" :default-page-scale="80" :default-text-scale="120" /><a-button class="document-outline-toggle" :disabled="editorMode === 'source' && !criteriaPreview" :title="editorMode === 'source' ? '切换可视化查看大纲' : undefined" :aria-expanded="outlineOpen && (editorMode === 'visual' || Boolean(criteriaPreview))" @click="outlineOpen = !outlineOpen">{{outlineOpen ? '收起大纲' : '展开大纲'}}</a-button><a-button v-if="focusable" :aria-pressed="focused" @click="emit('update:focused', !focused)">{{focused ? '退出专注' : '专注编辑'}}</a-button></div>
+        <div v-if="active && !criteriaPreview" class="workspace-save-actions">
+          <span class="save-indicator" :class="state"><CheckCircleFilled v-if="state==='saved'"/><CloudSyncOutlined v-else-if="state==='dirty'||state==='saving'"/><span>{{({dirty:'未保存',saving:'正在保存',saved:'已保存',conflict:'存在编辑冲突',error:'保存失败'})[state]||'已同步'}}</span></span>
+          <a-button v-if="enableDownload" type="text" aria-label="下载当前原文件" title="下载当前原文件" :loading="downloading" @click="downloadCurrent"><DownloadOutlined/></a-button>
+          <a-button v-if="['dirty','conflict','error'].includes(state)" type="text" aria-label="撤销" title="撤销" @click="discardChanges"><UndoOutlined/></a-button>
+          <a-button v-if="state==='dirty'||state==='error'" :loading="state==='saving'" @click="save"><SaveOutlined/> 保存</a-button>
+          <a-button v-if="canSubmit" type="primary" :disabled="state==='dirty'||state==='saving'||state==='conflict'||state==='error'" @click="emit('submit')">{{submitLabel}}</a-button>
+        </div>
+      </header>
+      <div class="writing-stage" :class="{'criteria-stage':criteriaPreview}"><MarkdownReader class="workspace-document-reader" :html="criteriaPreview?.html || editorHtml" :reset-key="`${activeId}:${editorMode}:${documentLoading}:${loading}`" :outline-open="outlineOpen && (editorMode === 'visual' || Boolean(criteriaPreview))" :text-scale="textScale" region-label="作业编辑区" @close-outline="outlineOpen = false"><a-skeleton v-if="criteriaPreview?.loading||documentLoading||loading" active/><DocumentCanvas v-else-if="criteriaPreview?.type==='rich'" :scale="pageScale"><RichTextViewer :html="criteriaPreview.html"/></DocumentCanvas><a-empty v-else-if="criteriaPreview" description="判定标准仅支持 Markdown 文档"/><template v-else-if="active&&loadedId===active.id"><RichTextEditor v-if="editorMode==='visual'" v-model="editorHtml" :canvas-scale="pageScale" :editable="writable" :image-upload="uploadImage" document placeholder="开始编写作业..."></RichTextEditor><section v-else class="source-editor"><DocumentCanvas :scale="pageScale" fill-viewport><textarea v-model="sourceMarkdown" :readonly="!writable" class="source-editor-input" spellcheck="false" aria-label="Markdown 源码"></textarea></DocumentCanvas></section></template><a-empty v-else description="该作业没有可编辑的 Markdown 附件"/></MarkdownReader></div>
     </main>
   </div>
 </template>
@@ -353,12 +372,65 @@ defineExpose({ save: () => state.value === 'dirty' ? false : save(), reload: () 
 .markdown-workspace{display:grid;grid-template-columns:248px minmax(0,1fr);min-height:680px;overflow:hidden;border:1px solid #dfe6eb;border-radius:6px;background:#f5f7f8}.document-sidebar{border-right:1px solid #dfe6eb;background:#fbfcfc}.document-sidebar-heading,.document-status{display:flex;align-items:center;justify-content:space-between;min-height:62px;border-bottom:1px solid #e4e9ed}.document-sidebar-heading{padding:0 14px 0 18px}.document-sidebar-heading>div,.document-title{display:flex;min-width:0;flex-direction:column}.document-sidebar-heading strong{color:#263943;font-size:14px}.document-sidebar-heading span,.document-title span{margin-top:2px;color:#87949c;font-size:11px}.document-list{padding:10px}.document-item{display:grid;grid-template-columns:30px minmax(0,1fr) 28px;align-items:center;width:100%;min-height:48px;margin-bottom:4px;padding:4px 6px;border:0;border-radius:5px;background:transparent;color:#526672;text-align:left;cursor:pointer}.document-item:hover{background:#f0f4f5}.document-item.active{background:#e5f1ed;color:#176f5b}.document-icon{display:grid;place-items:center;width:26px;height:30px;border:1px solid #dce5e7;border-radius:4px;background:#fff}.document-item.active .document-icon{border-color:#b9d9cf;color:#19816a}.document-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.document-surface{min-width:0}.document-status{padding:0 20px;background:#fff}.document-title strong{overflow:hidden;color:#263943;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.document-status>div{display:flex;align-items:center;gap:8px}.save-indicator{display:flex;align-items:center;gap:7px;color:#7d8b93;font-size:12px;white-space:nowrap}.save-indicator.saved{color:#24866e}.save-indicator.conflict,.save-indicator.error{color:#bd4f49}.writing-stage{min-height:618px;padding:28px 34px 42px;background:#f3f5f6}.writing-stage :deep(.feedback-rich-editor){width:min(100%,980px);margin:0 auto;box-shadow:0 2px 10px rgba(31,47,56,.07)}@media(max-width:900px){.markdown-workspace{grid-template-columns:210px minmax(0,1fr)}.writing-stage{padding:20px 18px 32px}}@media(max-width:760px){.markdown-workspace{display:block;min-height:0}.document-sidebar{border-right:0;border-bottom:1px solid #dfe5ea}.document-list{display:flex;overflow-x:auto;padding:8px}.document-item{width:min(220px,70vw);flex:0 0 auto;margin:0 4px 0 0}.document-status{align-items:flex-start;min-height:0;padding:11px 12px;gap:4px;flex-wrap:wrap}.document-status .document-title{width:100%;align-items:flex-start}.document-title strong{max-width:100%}.writing-stage{min-height:500px;padding:12px 8px 20px}}
 .markdown-workspace.no-sidebar{grid-template-columns:minmax(0,1fr);overflow:visible}
 .markdown-workspace.no-sidebar :deep(.feedback-editor-toolbar){top:0}
-.markdown-workspace.sidebar-collapsed{grid-template-columns:56px minmax(0,1fr)}.sidebar-collapsed .document-sidebar-heading{justify-content:center;padding:0}.sidebar-collapsed .document-sidebar-heading>div{display:none}.sidebar-collapsed .document-list{padding:10px 7px}.sidebar-collapsed .document-item{display:grid;width:42px;grid-template-columns:1fr;justify-items:center;padding:4px}.sidebar-collapsed .document-name{display:none}@media(max-width:760px){.markdown-workspace.sidebar-collapsed{display:block}.sidebar-collapsed .document-sidebar-heading{justify-content:space-between;padding:0 14px 0 18px}.sidebar-collapsed .document-sidebar-heading>div{display:flex}.sidebar-collapsed .document-sidebar-heading :deep(.ant-btn){display:none}.sidebar-collapsed .document-list{padding:8px}.sidebar-collapsed .document-item{display:grid;width:min(220px,70vw);grid-template-columns:30px minmax(0,1fr) 28px;justify-items:stretch;padding:4px 6px}.sidebar-collapsed .document-name{display:block}}
 </style>
 <style scoped>
-.editor-mode-switch{padding:3px;border:1px solid #dce4e7;border-radius:5px;background:#f7f9fa}.editor-mode-switch button{display:inline-flex;align-items:center;gap:5px;min-height:28px;padding:0 10px;border:0;border-radius:3px;background:transparent;color:#70808a;font-size:12px;cursor:pointer}.editor-mode-switch button:hover{color:#176f5b;background:#edf4f1}.editor-mode-switch button.active{color:#176f5b;background:#e3f1ec;font-weight:600}.source-editor{width:min(100%,980px);min-height:560px;margin:0 auto;border:1px solid #d5dde5;border-radius:6px;background:#fff;box-shadow:0 2px 10px rgba(31,47,56,.07)}.source-editor-heading{display:flex;align-items:center;justify-content:space-between;min-height:52px;padding:0 14px;border-bottom:1px solid #e4e9ed;background:#fafbfb}.source-editor-heading>div:first-child{display:flex;align-items:center;gap:7px;color:#36515b}.source-editor-heading strong{font-size:13px}.source-editor-heading span{color:#85939b;font-size:11px}.source-editor-heading>div:first-child>span{margin-left:4px}.source-editor-actions{display:flex;align-items:center;gap:5px}.source-editor-input{display:block;width:100%;min-height:505px;padding:22px 24px;border:0;outline:0;resize:vertical;color:#263943;background:#fff;font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;font-size:13px;line-height:1.7;tab-size:2}.source-editor-input:focus{box-shadow:inset 0 0 0 2px rgba(37,134,111,.14)}
+.editor-mode-switch{padding:3px;border:1px solid #dce4e7;border-radius:5px;background:#f7f9fa}.editor-mode-switch button{display:inline-flex;align-items:center;gap:5px;min-height:28px;padding:0 10px;border:0;border-radius:3px;background:transparent;color:#70808a;font-size:12px;cursor:pointer}.editor-mode-switch button:hover{color:#176f5b;background:#edf4f1}.editor-mode-switch button.active{color:#176f5b;background:#e3f1ec;font-weight:600}.source-editor{width:min(100%,980px);min-height:560px;margin:0 auto;border:1px solid #d5dde5;border-radius:6px;background:#fff;box-shadow:0 2px 10px rgba(31,47,56,.07)}.source-editor-heading{display:flex;align-items:center;justify-content:space-between;min-height:52px;padding:0 14px;border-bottom:1px solid #e4e9ed;background:#fafbfb}.source-editor-heading>div:first-child{display:flex;align-items:center;gap:7px;color:#36515b}.source-editor-heading strong{font-size:13px}.source-editor-heading span{color:#85939b;font-size:11px}.source-editor-heading>div:first-child>span{margin-left:4px}.source-editor-actions{display:flex;align-items:center;gap:5px}.source-editor-input{display:block;width:100%;min-height:505px;padding:22px 24px;border:0;outline:0;resize:none;color:#263943;background:#fff;font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;font-size:13px;line-height:1.7;tab-size:2}.source-editor-input:focus{box-shadow:inset 0 0 0 2px rgba(37,134,111,.14)}
 .criteria-list{margin:2px 10px 10px;padding-top:10px;border-top:1px solid #e2e8eb}.criteria-list-heading{display:flex;align-items:center;justify-content:space-between;padding:0 6px 7px;color:#647781;font-size:11px;font-weight:600}.criteria-list-heading small{color:#8b989f;font-weight:400}.criteria-item{display:grid;grid-template-columns:30px minmax(0,1fr);align-items:center;width:100%;min-height:44px;padding:4px 6px;border:0;border-radius:5px;background:#f7f4ea;color:#665b3f;text-align:left;cursor:pointer}.criteria-item:hover{background:#f1ead7;color:#514625}
 .criteria-item.active{background:#ece3c9;color:#4f452e}.readonly-indicator{display:flex;align-items:center;gap:6px;color:#776b4d;font-size:12px}.writing-stage.criteria-stage{display:flex;align-items:stretch;justify-content:center}.criteria-stage :deep(.rich-document){width:min(100%,980px)}
 .markdown-workspace{overflow:clip}
 @media(max-width:760px){.editor-mode-switch{width:100%}.editor-mode-switch button{width:50%;justify-content:center}.source-editor{min-height:480px}.source-editor-heading{align-items:flex-start;gap:8px;padding:10px;flex-direction:column}.source-editor-heading>div:first-child{align-items:flex-start;flex-wrap:wrap}.source-editor-actions{width:100%;justify-content:flex-end}.source-editor-input{min-height:410px;padding:16px}}
+</style>
+
+<style scoped>
+.markdown-workspace{height:clamp(560px,78dvh,1100px);min-height:0;grid-template-columns:clamp(150px,var(--workspace-sidebar-width,210px),28%) minmax(0,1fr)}
+.markdown-workspace.no-sidebar{grid-template-columns:minmax(0,1fr);overflow:hidden}
+.document-sidebar{position:relative;display:flex;flex-direction:column;min-height:0;min-width:0}
+.document-sidebar-heading{flex:0 0 auto;min-height:46px;padding:0 8px}
+.document-list{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:6px}
+.document-surface{display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.document-status{flex:0 0 auto;min-height:46px;padding:8px 12px;gap:12px;flex-wrap:wrap}
+.document-status .document-title{min-width:0;flex:1;align-items:flex-start}
+.document-title strong{max-width:100%}
+.document-status .workspace-document-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;flex-direction:row;justify-content:flex-end;margin-left:auto}
+.writing-stage,.writing-stage.criteria-stage{display:flex;flex:1;min-height:0;min-width:0;padding:0;overflow:hidden}
+.workspace-document-reader{height:100%;width:100%;min-height:0;min-width:0}
+.workspace-document-reader :deep(.feedback-rich-editor.document){width:100%;max-width:none;min-height:100%;margin:0}
+.workspace-document-reader :deep(.feedback-rich-editor.document>.feedback-editor-toolbar){top:0}
+.workspace-document-reader :deep(.feedback-rich-editor.document .tiptap){min-height:500px;padding:clamp(18px,2vw,36px);font-size:var(--workspace-font-size,15px)}
+.workspace-document-reader :deep(.feedback-rich-editor.document .tiptap h1){font-size:2em}
+.workspace-document-reader :deep(.feedback-rich-editor.document .tiptap h2){font-size:1.4em}
+.workspace-document-reader :deep(.feedback-rich-editor.document .tiptap h3){font-size:1.17em}
+.source-editor{box-sizing:border-box;width:100%;max-width:none;height:100%;min-height:0;margin:0;border:0;border-radius:0;overflow:hidden}
+.source-editor-input{box-sizing:border-box;height:100%;min-height:0;resize:none;overflow:auto;overscroll-behavior:contain;font-size:var(--workspace-font-size,15px)}
+.source-editor-heading{position:sticky;top:0;z-index:2}
+@media(max-width:760px){
+  .markdown-workspace{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}
+  .document-sidebar-heading{min-height:36px}
+  .document-list{display:flex;max-height:60px;flex:none;overflow:auto;padding:4px}
+  .document-item{flex:0 0 150px;width:150px;margin:0 4px}
+  .document-status{padding:6px 8px}
+  .markdown-workspace.no-sidebar{grid-template-rows:minmax(0,1fr)}
+}
+</style>
+
+<style scoped>
+.markdown-workspace.focused{grid-template-columns:minmax(0,1fr)}
+.document-status{min-height:44px;padding:5px 8px;gap:8px}
+.document-status .document-title{flex:1 1 100px;max-width:220px}
+.document-title strong{font-size:12px}
+.document-status .workspace-document-actions{flex:0 1 auto;gap:6px}
+.document-status .workspace-save-actions{display:flex;flex-direction:row;align-items:center;gap:6px;flex-shrink:0}
+.workspace-save-actions .save-indicator{font-size:11px;white-space:nowrap}
+.workspace-document-reader :deep(.feedback-rich-editor.document>.feedback-editor-toolbar){min-height:38px;border-radius:0;box-shadow:0 1px 3px rgba(31,47,56,.08)}
+.workspace-document-reader :deep(.teaching-material-rich){padding:0}
+.document-sidebar-heading{min-height:44px}
+@media(max-width:1200px){
+  .document-status .document-title{display:none}
+}
+@media(max-width:760px){
+  .markdown-workspace.focused{grid-template-rows:minmax(0,1fr)}
+  .workspace-save-actions .save-indicator>span{display:none}
+  .document-status .workspace-document-actions{gap:4px;width:100%}
+  .document-status .workspace-save-actions{margin-left:auto}
+}
 </style>

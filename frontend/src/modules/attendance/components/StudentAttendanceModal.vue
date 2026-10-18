@@ -40,7 +40,7 @@ watch(attendanceOpen, open => {
   clearInterval(refresh)
   if (open) { load(); refresh = setInterval(load, 10000) }
   else code.value = ''
-})
+}, { immediate: true })
 watch(classId, () => { if (attendanceOpen.value) load() })
 onBeforeUnmount(() => clearInterval(refresh))
 </script>
