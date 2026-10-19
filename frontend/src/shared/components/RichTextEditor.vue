@@ -5,23 +5,22 @@ import { Node } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
 import { TableKit } from '@tiptap/extension-table'
-import { AudioOutlined, BlockOutlined, BoldOutlined, CodeOutlined, DeleteColumnOutlined, DeleteOutlined, DeleteRowOutlined, DeploymentUnitOutlined, InsertRowAboveOutlined, InsertRowBelowOutlined, InsertRowLeftOutlined, InsertRowRightOutlined, ItalicOutlined, LinkOutlined, MessageOutlined, MinusOutlined, OrderedListOutlined, PictureOutlined, RedoOutlined, StopOutlined, TableOutlined, UndoOutlined, UnorderedListOutlined } from '@ant-design/icons-vue'
+import { AudioOutlined, BlockOutlined, BoldOutlined, CodeOutlined, DeleteColumnOutlined, DeleteOutlined, DeleteRowOutlined, DeploymentUnitOutlined, InsertRowAboveOutlined, InsertRowBelowOutlined, InsertRowLeftOutlined, InsertRowRightOutlined, ItalicOutlined, LinkOutlined, MinusOutlined, OrderedListOutlined, PictureOutlined, RedoOutlined, StopOutlined, TableOutlined, UndoOutlined, UnorderedListOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { cleanupMermaidArtifacts, renderMermaid as renderMermaidSvg } from '../../mermaidRenderer'
 import MediaLightbox from './MediaLightbox.vue'
-import DocumentCanvas from './DocumentCanvas.vue'
-import { createMermaidNodeView } from '../editor/mermaidNodeView'
+import AiTeacherSelectionAction from './AiTeacherSelectionAction.vue'
 
 let activeSpeechStop = null
-let mermaidPreviewSequence = 0
-let mermaidPreviewTimer
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true }, imageUpload: Function, canvasScale: { type: Number, default: 0 } })
+const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true }, imageUpload: Function })
 const emit = defineEmits(['update:modelValue'])
 const askAiTeacher = inject('askAiTeacher', null)
 const aiTeacherAvatarUrl = inject('aiTeacherAvatarUrl', '')
 const selectionAction = ref(null)
+const aiTeacherDocumentId = inject('aiTeacherDocumentId', ref(''))
+watch(aiTeacherDocumentId, () => { selectionAction.value = null })
 
 function selectedText() {
   const selection = editor.value?.state.selection
@@ -30,13 +29,22 @@ function selectedText() {
 
 function updateSelectionAction() {
   if (!props.document || !askAiTeacher || !selectedText()) { selectionAction.value = null; return }
+  const { from, to } = editor.value.state.selection
+  const selectionId = JSON.stringify([aiTeacherDocumentId.value, from, to])
+  if (selectionAction.value?.selectionId === selectionId) return
   const browserSelection = window.getSelection()
-  const rect = browserSelection?.rangeCount ? browserSelection.getRangeAt(0).getBoundingClientRect() : null
-  selectionAction.value = rect?.width ? { left: Math.max(8, Math.min(rect.left, window.innerWidth - 124)), top: Math.max(8, rect.top - 38) } : null
+  const range = browserSelection?.rangeCount ? browserSelection.getRangeAt(0).cloneRange() : null
+  const rect = range?.getBoundingClientRect()
+  selectionAction.value = rect?.width ? { selectionId, range, left: Math.max(8, Math.min(rect.left, window.innerWidth - 124)), top: Math.max(8, rect.top - 38) } : null
 }
 
 function askAi() {
   askAiTeacher?.(selectedText())
+  selectionAction.value = null
+}
+
+function openAiChat() {
+  askAiTeacher?.()
   selectionAction.value = null
 }
 const speechSupported = ref(false)
@@ -108,7 +116,65 @@ const MermaidBlock = Node.create({
     return ['pre', ['code', { class: 'language-mermaid' }, node.attrs.source]]
   },
   addNodeView() {
-    return options => createMermaidNodeView({ ...options, onEdit: openMermaidEditor, onZoom: openMermaidPreview })
+    return ({ node, getPos, editor: nodeEditor }) => {
+      const dom = document.createElement('div')
+      dom.className = 'mermaid-document-block'
+      dom.tabIndex = 0
+      dom.title = '点击编辑图表，按 Delete 删除'
+      const preview = document.createElement('div')
+      preview.className = 'mermaid-document-preview'
+      const zoomButton = document.createElement('button')
+      zoomButton.type = 'button'
+      zoomButton.className = 'mermaid-zoom-button'
+      zoomButton.textContent = '放大查看'
+      zoomButton.setAttribute('aria-label', '放大查看 Mermaid 图表')
+      const deleteButton = document.createElement('button')
+      deleteButton.type = 'button'
+      deleteButton.className = 'mermaid-delete-button'
+      deleteButton.setAttribute('aria-label', '删除 Mermaid 图表')
+      deleteButton.title = '删除图表'
+      deleteButton.textContent = '删除'
+      dom.append(preview, zoomButton, deleteButton)
+      let currentNode = node
+      let renderVersion = 0
+
+      const draw = async source => {
+        const version = ++renderVersion
+        preview.innerHTML = '<span class="mermaid-document-loading">正在绘制图表...</span>'
+        try {
+          const { svg } = await renderMermaidSvg(source, 'editor-block')
+          if (version === renderVersion) preview.innerHTML = svg
+        } catch (error) {
+          if (version === renderVersion) preview.innerHTML = '<span class="mermaid-document-error">图表语法有误，点击修改</span>'
+        }
+      }
+      const edit = () => openMermaidEditor(currentNode.attrs.source, getPos())
+      const zoom = () => { const svg = preview.querySelector('svg'); if (svg) openMermaidPreview(svg.outerHTML) }
+      const remove = () => {
+        const position = getPos()
+        nodeEditor.view.dispatch(nodeEditor.state.tr.delete(position, position + currentNode.nodeSize))
+        nodeEditor.commands.focus()
+      }
+      dom.addEventListener('click', event => { if (!event.target.closest('button')) edit() })
+      zoomButton.addEventListener('click', event => { event.stopPropagation(); zoom() })
+      deleteButton.addEventListener('click', event => { event.stopPropagation(); remove() })
+      dom.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); edit() }
+        if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); remove() }
+      })
+      draw(node.attrs.source)
+      return {
+        dom,
+        update: nextNode => {
+          if (nextNode.type.name !== 'mermaidBlock') return false
+          currentNode = nextNode
+          draw(nextNode.attrs.source)
+          return true
+        },
+        stopEvent: () => true,
+        destroy: () => { renderVersion += 1 }
+      }
+    }
   }
 })
 
@@ -193,16 +259,15 @@ const EditableImage = Image.extend({
         const startX = event.clientX
         const startY = event.clientY
         const bounds = dom.getBoundingClientRect()
-        const displayScale = nodeEditor.view.dom.offsetWidth ? editorWidth / nodeEditor.view.dom.offsetWidth : 1
         let nextWidth = Math.round(bounds.width / editorWidth * 100)
-        let nextHeight = Math.round(bounds.height / displayScale)
+        let nextHeight = Math.round(bounds.height)
         const move = moveEvent => {
           if (axis !== 'height') {
             nextWidth = Math.max(10, Math.min(100, Math.round((bounds.width + moveEvent.clientX - startX) / editorWidth * 100)))
             dom.style.width = `${nextWidth}%`
           }
           if (axis !== 'width') {
-            nextHeight = Math.max(60, Math.min(2000, Math.round((bounds.height + moveEvent.clientY - startY) / displayScale)))
+            nextHeight = Math.max(60, Math.min(2000, Math.round(bounds.height + moveEvent.clientY - startY)))
             dom.style.height = `${nextHeight}px`
           }
         }
@@ -365,8 +430,6 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   stopRecognition()
-  mermaidPreviewSequence += 1
-  clearTimeout(mermaidPreviewTimer)
   cleanupMermaidArtifacts()
   editor.value?.destroy()
 })
@@ -440,29 +503,18 @@ function openMermaidEditor(source = '', position = null) {
   renderMermaid()
 }
 
-function scheduleMermaidRender() {
-  mermaidPreviewSequence += 1
-  clearTimeout(mermaidPreviewTimer)
-  mermaidPreviewTimer = setTimeout(renderMermaid, 180)
-}
-
 async function renderMermaid() {
-  clearTimeout(mermaidPreviewTimer)
-  const version = ++mermaidPreviewSequence
   mermaidRendering.value = true
   mermaidError.value = ''
   try {
     const { svg } = await renderMermaidSvg(mermaidSource.value, 'editor-dialog')
-    if (version !== mermaidPreviewSequence) return ''
     mermaidSvg.value = svg
     return svg
   } catch (error) {
-    if (version === mermaidPreviewSequence) {
-      mermaidSvg.value = ''
-      mermaidError.value = '图表绘制失败，请检查语法后重试'
-    }
+    mermaidSvg.value = ''
+    mermaidError.value = '图表语法有误，请检查节点和连线写法'
     return ''
-  } finally { if (version === mermaidPreviewSequence) mermaidRendering.value = false }
+  } finally { mermaidRendering.value = false }
 }
 
 async function insertMermaid() {
@@ -513,7 +565,7 @@ async function insertMermaid() {
       <a-tooltip title="重做"><a-button size="small" :disabled="!editor.can().redo()" @click="editor.chain().focus().redo().run()"><RedoOutlined/></a-button></a-tooltip>
       <a-tooltip v-if="document" title="插入图片"><a-button size="small" :loading="imageLoading" @click="imageInput?.click()"><PictureOutlined/></a-button></a-tooltip>
       <a-tooltip v-if="document" title="插入 Mermaid 图表"><a-button size="small" @click="openMermaidEditor()"><DeploymentUnitOutlined/></a-button></a-tooltip>
-      <a-tooltip v-if="document&&askAiTeacher" title="问叶老师（可带入选中文字）"><a-button size="small" class="ai-teacher-toolbar-button" aria-label="问叶老师" @pointerdown.prevent @click="askAi"><img :src="aiTeacherAvatarUrl" alt="" draggable="false"></a-button></a-tooltip>
+      <a-tooltip v-if="document&&askAiTeacher" title="问叶老师"><a-button size="small" class="ai-teacher-toolbar-button" aria-label="问叶老师" @pointerdown.prevent @click="openAiChat"><img :src="aiTeacherAvatarUrl" alt="" draggable="false"></a-button></a-tooltip>
       <a-tooltip v-if="speechEnabled&&speechSupported" :title="listening?'停止语音输入':'语音输入'">
         <a-button size="small" :type="listening?'primary':'default'" :aria-pressed="listening" @click="toggleSpeechRecognition"><StopOutlined v-if="listening"/><AudioOutlined v-else/></a-button>
       </a-tooltip>
@@ -524,12 +576,11 @@ async function insertMermaid() {
     </div>
     <input v-if="document" ref="imageInput" class="document-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" @change="insertImage">
     <div v-if="speechEnabled&&speechSupported&&listening&&interimText" class="speech-interim">正在识别：{{interimText}}</div>
-    <DocumentCanvas v-if="canvasScale" :scale="canvasScale"><EditorContent :editor="editor"/></DocumentCanvas>
-    <EditorContent v-else :editor="editor"/>
-    <Teleport to="body"><button v-if="selectionAction" type="button" class="ai-selection-action" :style="{left:`${selectionAction.left}px`,top:`${selectionAction.top}px`}" @pointerdown.prevent @click="askAi"><MessageOutlined/> 问叶老师</button></Teleport>
+    <EditorContent :editor="editor"/>
+    <AiTeacherSelectionAction v-if="selectionAction" :position="selectionAction" :selection-id="selectionAction.selectionId" @ask="askAi" />
     <MediaLightbox v-if="mermaidPreviewOpen" :svg="mermaidPreviewSvg" :src="imagePreviewSrc" :alt="imagePreviewAlt" @close="closeMermaidPreview"/>
     <a-modal v-model:open="mermaidOpen" :title="editingMermaidPos===null?'插入 Mermaid 图表':'编辑 Mermaid 图表'" width="820px" :confirm-loading="mermaidRendering" :ok-text="editingMermaidPos===null?'插入图表':'保存修改'" cancel-text="取消" @ok="insertMermaid">
-      <div class="mermaid-builder"><div><label>图表语法</label><a-textarea v-model:value="mermaidSource" :rows="12" spellcheck="false" @change="scheduleMermaidRender"/></div><div><label>预览</label><div class="mermaid-preview-toolbar"><button type="button" @click="zoomMermaidBuilder(-.2)">−</button><span>{{Math.round(mermaidBuilderScale*100)}}%</span><button type="button" @click="zoomMermaidBuilder(.2)">＋</button><button type="button" @click="resetMermaidBuilder">恢复大小</button></div><div ref="mermaidBuilderViewport" class="mermaid-preview" :class="{ dragging: mermaidBuilderDragging }" @pointerdown="startMermaidBuilderDrag" @pointermove="moveMermaidBuilderDrag" @pointerup="endMermaidBuilderDrag" @pointercancel="endMermaidBuilderDrag"><a-spin v-if="mermaidRendering"/><div v-else-if="mermaidSvg" class="mermaid-preview-content" :style="{transform:'translate('+mermaidBuilderOffset.x+'px, '+mermaidBuilderOffset.y+'px) scale('+mermaidBuilderScale+')'}" v-html="mermaidSvg"></div><a-alert v-else type="error" :message="mermaidError||'暂无预览'"/></div></div></div>
+      <div class="mermaid-builder"><div><label>图表语法</label><a-textarea v-model:value="mermaidSource" :rows="12" spellcheck="false" @change="renderMermaid"/></div><div><label>预览</label><div class="mermaid-preview-toolbar"><button type="button" @click="zoomMermaidBuilder(-.2)">−</button><span>{{Math.round(mermaidBuilderScale*100)}}%</span><button type="button" @click="zoomMermaidBuilder(.2)">＋</button><button type="button" @click="resetMermaidBuilder">恢复大小</button></div><div ref="mermaidBuilderViewport" class="mermaid-preview" :class="{ dragging: mermaidBuilderDragging }" @pointerdown="startMermaidBuilderDrag" @pointermove="moveMermaidBuilderDrag" @pointerup="endMermaidBuilderDrag" @pointercancel="endMermaidBuilderDrag"><a-spin v-if="mermaidRendering"/><div v-else-if="mermaidSvg" class="mermaid-preview-content" :style="{transform:'translate('+mermaidBuilderOffset.x+'px, '+mermaidBuilderOffset.y+'px) scale('+mermaidBuilderScale+')'}" v-html="mermaidSvg"></div><a-alert v-else type="error" :message="mermaidError||'暂无预览'"/></div></div></div>
     </a-modal>
   </div>
 </template>
@@ -546,7 +597,6 @@ async function insertMermaid() {
 .feedback-rich-editor.document :deep(.mermaid-document-block){position:relative;display:block}.feedback-rich-editor.document :deep(.mermaid-document-preview){display:block;min-height:136px;max-width:100%;overflow:auto}.feedback-rich-editor.document :deep(.mermaid-zoom-button){position:absolute;z-index:2;top:8px;right:54px;height:28px;padding:0 9px;border:0;border-radius:4px;opacity:0;color:#fff;background:rgba(34,48,57,.78);font-size:12px;cursor:pointer}.feedback-rich-editor.document :deep(.mermaid-document-block:hover .mermaid-zoom-button){opacity:1}.feedback-rich-editor.document :deep(.mermaid-delete-button){position:absolute;z-index:2;top:8px;right:8px;display:grid;width:30px;height:30px;padding:0;place-items:center;border:1px solid #d8e0e4;border-radius:4px;color:#687983;background:#fff;box-shadow:0 1px 4px rgba(31,47,56,.1);font-size:21px;line-height:1;cursor:pointer}.feedback-rich-editor.document :deep(.mermaid-delete-button:hover),.feedback-rich-editor.document :deep(.mermaid-delete-button:focus){border-color:#d76b65;color:#b83e38;background:#fff6f5;outline:none}
 .document-image-input{display:none}
 .ai-teacher-toolbar-button :deep(span){display:grid;place-items:center}.ai-teacher-toolbar-button img{display:block;width:20px;height:20px;border-radius:50%;object-fit:cover}
-.ai-selection-action{position:fixed;z-index:980;padding:6px 10px;border:1px solid #bad5ce;border-radius:5px;background:#fff;color:#176f5b;box-shadow:0 3px 12px rgba(31,47,56,.18);cursor:pointer}
 .feedback-rich-editor.document :deep(.document-image-block){position:relative;width:max-content;max-width:100%;margin:22px auto}.feedback-rich-editor.document :deep(.document-image-block img){margin:0}.feedback-rich-editor.document :deep(.document-image-zoom){position:absolute;z-index:3;top:8px;right:54px;height:28px;padding:0 9px;border:0;border-radius:4px;opacity:0;color:#fff;background:rgba(34,48,57,.78);font-size:12px;cursor:pointer}.feedback-rich-editor.document :deep(.document-image-block:hover .document-image-zoom){opacity:1}.feedback-rich-editor.document :deep(.document-image-delete){position:absolute;z-index:2;top:8px;right:8px;display:grid;width:30px;height:30px;padding:0;place-items:center;border:1px solid #d8e0e4;border-radius:4px;color:#687983;background:#fff;box-shadow:0 1px 4px rgba(31,47,56,.14);font-size:21px;line-height:1;cursor:pointer}.feedback-rich-editor.document :deep(.document-image-delete:hover),.feedback-rich-editor.document :deep(.document-image-delete:focus){border-color:#d76b65;color:#b83e38;background:#fff6f5;outline:none}
 .feedback-rich-editor.document :deep(.document-image-block img){width:100%;height:auto}.feedback-rich-editor.document :deep(.document-image-resize){position:absolute;right:5px;bottom:5px;width:20px;height:20px;padding:0;border:0;border-right:3px solid #26816d;border-bottom:3px solid #26816d;background:transparent;cursor:nwse-resize}.feedback-rich-editor.document :deep(.document-image-resize:focus){outline:2px solid rgba(38,129,109,.25);outline-offset:2px}
 @media(max-width:760px){.feedback-rich-editor.document>.feedback-editor-toolbar{top:120px}}

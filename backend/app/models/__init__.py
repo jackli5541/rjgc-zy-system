@@ -12,12 +12,15 @@ from app.models.grades import Grade, GradeCoefficient, GradeRevision
 from app.models.capstone import CAPSTONE_STAGES, CapstoneAsset, CapstoneConfig, CapstoneDocument, CapstoneDocumentTemplate, CapstoneModuleAssignment, CapstoneStageGrade, CapstoneUnlock
 from app.models.attendance import AttendanceRecord, AttendanceSession
 from app.models.ai_teacher import AiChatMessage, AiKnowledgeChunk, AiKnowledgeNode, AiSubjectKnowledge
+from app.models.ai_grading import AiGradingDraft, AiGradingJob
 
 __all__ = [
     "AiChatMessage",
     "AiKnowledgeChunk",
     "AiKnowledgeNode",
     "AiSubjectKnowledge",
+    "AiGradingDraft",
+    "AiGradingJob",
     "Assignment",
     "AttendanceRecord",
     "AttendanceSession",

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from urllib.parse import urlparse
 
 import httpx
@@ -30,16 +32,23 @@ class OpenAICompatibleClient:
         self.api_key = settings.ai_api_key
         self.timeout = settings.ai_request_timeout_seconds
         self.transport = transport
+        self.max_output_tokens = settings.ai_teacher_max_output_tokens
+        self.structured_output = False
+        self.temperature = 0.3
         self.fallback_model = "deepseek-chat" if parsed.hostname == "api.deepseek.com" and settings.ai_chat_model == "deepseek-flash" else None
 
     async def _stream_model(self, client: httpx.AsyncClient, model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": 0.3,
+            "temperature": self.temperature,
             "stream": True,
-            "max_tokens": settings.ai_teacher_max_output_tokens,
+            "max_tokens": self.max_output_tokens,
         }
+        if self.structured_output:
+            payload['response_format'] = {'type': 'json_object'}
+            if urlparse(self.base_url).hostname == 'api.deepseek.com':
+                payload['thinking'] = {'type': 'disabled'}
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         started = time.perf_counter()
         first_content_ms = None
@@ -116,9 +125,18 @@ class OpenAICompatibleClient:
             for index, model in enumerate(models):
                 emitted = False
                 try:
-                    async for delta in self._stream_model(client, model, messages):
-                        emitted = True
-                        yield delta
+                    async with aclosing(self._stream_model(client, model, messages)) as source:
+                        while True:
+                            try:
+                                # SSE heartbeats must not extend the wait for answer content.
+                                delta = await asyncio.wait_for(anext(source), timeout=self.timeout)
+                            except StopAsyncIteration:
+                                break
+                            except TimeoutError as exc:
+                                message = "模型服务长时间未返回正文，请稍后重试" if not emitted else "模型服务回答中断，请稍后重试"
+                                raise AiClientError(message, "content_timeout") from exc
+                            emitted = True
+                            yield delta
                     return
                 except AiClientError as exc:
                     if exc.code == "unsupported_model" and model == settings.ai_chat_model and self.fallback_model:

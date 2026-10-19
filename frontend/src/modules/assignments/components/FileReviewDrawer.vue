@@ -8,6 +8,8 @@ import RichTextEditor from '../../../shared/components/RichTextEditor.vue'
 import RichTextViewer from '../../../shared/components/RichTextViewer.vue'
 import MarkdownReader from '../../../shared/components/MarkdownReader.vue'
 import DocumentScaleControls from '../../../shared/components/DocumentScaleControls.vue'
+import SingleAiGradingPanel from '../../ai_grading/components/SingleAiGradingPanel.vue'
+import { useSingleAiGrading } from '../../ai_grading/composables/useSingleAiGrading'
 import { useResizableDrawer, useResizableRightPane } from '../../../useHorizontalResize'
 
 const props = defineProps({
@@ -31,7 +33,7 @@ const props = defineProps({
   allowDownload: Boolean,
   expanded: Boolean,
 })
-const emit = defineEmits(['close', 'feedback-published', 'clear-feedback', 'peer-feedback-updated', 'target-change', 'external-target', 'update:expanded'])
+const emit = defineEmits(['close', 'feedback-published', 'peer-feedback-updated', 'target-change', 'external-target', 'update:expanded'])
 const index = ref(0)
 const contentZoom = ref(1)
 const pageScale = computed({ get: () => Math.round(contentZoom.value * 100), set: value => { contentZoom.value = value / 100 } })
@@ -96,6 +98,16 @@ const toggleExpanded = () => {
   drawerAnimationTimer = setTimeout(() => { drawerAnimating.value = false }, 220)
 }
 const feedback = reactive({ status: null, revision: 0, grade: undefined, comment: '', annotations: [], published_at: null, has_draft: false })
+const aiGrading = useSingleAiGrading(() => props.mode === 'TEACHER' && props.editable && props.assignmentId && props.submissionVersionId
+  ? { assignmentId: props.assignmentId, versionId: props.submissionVersionId }
+  : null)
+function startAiGrading() { aiGrading.start() }
+function adoptAiGrading(draft) {
+  if (!draft) return
+  feedback.grade = draft.suggested_grade || feedback.grade
+  feedback.comment = draft.suggested_comment || feedback.comment
+}
+watch(() => [props.assignmentId, props.submissionVersionId], () => aiGrading.reset())
 const externalWarning = ref(false)
 const teacherFeedbackEditor = reactive({ open: false, saving: false, assessment: null, targetType: '', annotationId: null, feedbackId: null, category: 'MISUNDERSTANDING', reason: '' })
 
@@ -759,7 +771,7 @@ watch(drawerWidth, () => {
   if (commentComposer.open && commentComposer.mode === 'edit') scheduleComposerPosition()
 })
 onMounted(() => { document.addEventListener('pointerdown', handleGlobalPointer); document.addEventListener('scroll', handleGlobalScroll, true); document.addEventListener('keydown', handleGlobalKey); window.addEventListener('resize', handleResize) })
-onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; feedbackLoadSequence += 1; fileLoadController?.abort(); feedbackLoadController?.abort(); clearTimeout(drawerAnimationTimer); document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); if (criteriaDragFrame) cancelAnimationFrame(criteriaDragFrame); if (criteriaResizeFrame) cancelAnimationFrame(criteriaResizeFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
+onBeforeUnmount(() => { aiGrading.reset(); stopSpeechInput(); loadSequence += 1; feedbackLoadSequence += 1; fileLoadController?.abort(); feedbackLoadController?.abort(); clearTimeout(drawerAnimationTimer); document.documentElement.classList.remove('file-preview-open'); if (positionFrame) cancelAnimationFrame(positionFrame); if (criteriaDragFrame) cancelAnimationFrame(criteriaDragFrame); if (criteriaResizeFrame) cancelAnimationFrame(criteriaResizeFrame); releaseBinaryUrl(); document.removeEventListener('pointerdown', handleGlobalPointer); document.removeEventListener('scroll', handleGlobalScroll, true); document.removeEventListener('keydown', handleGlobalKey); window.removeEventListener('resize', handleResize) })
 </script>
 
 <template>
@@ -813,6 +825,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; feedbackLoadSequen
       <aside v-if="hasFeedbackPanel" v-show="!feedbackCollapsed" class="feedback-sidebar">
         <a-alert v-if="externalWarning" type="warning" show-icon message="提交或评价数据已更新" description="当前未保存内容已保留。完成本次编辑后将自动同步最新数据。"/>
         <div class="feedback-heading"><div><strong>{{owner||'教师反馈'}}</strong><span v-if="feedback.status">{{feedback.status==='PUBLISHED'?'已发布':'草稿'}}<template v-if="feedback.has_draft"> · 有待发布修改</template></span></div><a-tag v-if="feedback.grade" :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
+        <SingleAiGradingPanel v-if="aiGrading.visible" :draft="aiGrading.draft" :loading="aiGrading.loading" :phase="aiGrading.phase" :error="aiGrading.error" :animate="aiGrading.animate" :adopted="false" @adopt="adoptAiGrading" @retry="startAiGrading" />
         <div v-if="mode==='PEER'" v-for="item in teacherFeedbacksFor(feedback, 'GRADE')" :key="item.id" class="teacher-feedback-note"><strong>{{item.teacher_name}} · {{feedbackCategories.find(option=>option.value===item.category)?.label}}</strong><div v-html="item.reason"></div></div>
         <template v-if="editable">
           <label class="feedback-field"><span>总评</span><RichTextEditor ref="overallEditor" v-model="feedback.comment" speech-enabled placeholder="填写整体评价"/></label>
@@ -856,7 +869,7 @@ onBeforeUnmount(() => { stopSpeechInput(); loadSequence += 1; feedbackLoadSequen
         <div v-if="mode==='PEER'" v-for="item in teacherFeedbacksFor(feedback, 'COMMENT')" :key="item.id" class="teacher-feedback-note"><strong>{{item.teacher_name}} · {{feedbackCategories.find(option=>option.value===item.category)?.label}}</strong><div v-html="item.reason"></div></div>
         <div v-if="editable" class="feedback-actions">
           <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in ['A','B','C','D','E']" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
-          <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'&&feedback.status" danger @click="emit('clear-feedback')">清除反馈</a-button><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button></div>
+          <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button><a-button v-if="mode==='TEACHER'" @click="startAiGrading">{{aiGrading.visible?'重新生成 AI 批改':'AI 批改'}}</a-button></div>
         </div>
       </aside>
     </div>

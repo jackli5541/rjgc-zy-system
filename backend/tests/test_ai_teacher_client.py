@@ -126,3 +126,44 @@ def test_rate_limit_is_not_retried_with_same_provider(monkeypatch):
         asyncio.run(collect())
     assert error.value.code == "http_error"
     assert models == ["deepseek-flash"]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_heartbeats_cannot_extend_content_timeout(monkeypatch, partial):
+    class Heartbeats(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            if partial:
+                yield sse({"delta": {"content": "部分正文"}, "finish_reason": None}).split("data: [DONE]")[0].encode()
+            while True:
+                yield b": keep-alive\n\n"
+                await asyncio.sleep(0.002)
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = Heartbeats()
+    monkeypatch.setattr(settings, "ai_teacher_enabled", True)
+    monkeypatch.setattr(settings, "ai_base_url", "https://api.deepseek.com")
+    monkeypatch.setattr(settings, "ai_chat_model", "deepseek-flash")
+    monkeypatch.setattr(settings, "ai_request_timeout_seconds", 0.02)
+    models = []
+
+    def respond(request):
+        models.append(json.loads(request.content)["model"])
+        return httpx.Response(200, stream=stream)
+
+    async def run():
+        client = OpenAICompatibleClient(transport=httpx.MockTransport(respond))
+        chunks = []
+        async with asyncio.timeout(1):
+            with pytest.raises(AiClientError) as error:
+                async for chunk in client.stream_chat([{"role": "user", "content": "课程问题"}]):
+                    chunks.append(chunk)
+        assert error.value.code == "content_timeout"
+        assert chunks == (["部分正文"] if partial else [])
+
+    asyncio.run(run())
+    assert stream.closed
+    assert models == ["deepseek-flash"]

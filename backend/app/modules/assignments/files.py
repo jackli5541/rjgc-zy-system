@@ -40,14 +40,15 @@ def upload(aid: UUID, user: CsrfUser, db: Db, file: UploadFile = File(...), purp
         if a.starts_at and a.starts_at > now(): raise ApiError(409, "ASSIGNMENT_NOT_STARTED", "作业尚未开始")
         _, team = require_team(db, a.class_id, user)
     suffix = Path(file.filename or "file").suffix.lower()
-    if selected_material_type == "CRITERIA" and suffix != ".md":
-        raise ApiError(422, "CRITERIA_FILE_TYPE_INVALID", "判定标准仅支持 Markdown 文档")
+    if selected_material_type == "CRITERIA" and suffix not in {".md", ".txt"}:
+        raise ApiError(422, "CRITERIA_FILE_TYPE_INVALID", "判定标准仅支持 Markdown 或文本文件")
     supported = STUDENT_UPLOAD_FILE_SUFFIXES if user.role == "STUDENT" else PREVIEWABLE_FILE_SUFFIXES | DOWNLOAD_ONLY_FILE_SUFFIXES
     if suffix not in supported:
         message = "学生提交仅支持 Markdown、HTML、PDF 和常见图片" if user.role == "STUDENT" else "仅支持 Markdown、HTML、PDF、常见图片、Office 文档和 ZIP/RAR/7Z 压缩包"
         raise ApiError(422, "FILE_TYPE_INVALID", message)
     expected_mimes = {
         ".md": {"text/markdown", "text/plain", "application/octet-stream"},
+        ".txt": {"text/plain", "application/octet-stream"},
         ".html": {"text/html", "text/plain", "application/octet-stream"}, ".htm": {"text/html", "text/plain", "application/octet-stream"},
         ".pdf": {"application/pdf"},
         ".png": {"image/png"}, ".jpg": {"image/jpeg"}, ".jpeg": {"image/jpeg"}, ".gif": {"image/gif"}, ".webp": {"image/webp"},

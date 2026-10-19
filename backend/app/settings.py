@@ -7,6 +7,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
+    storage_backend: str = "oss"
+    storage_local_only: bool = False
+    local_storage_root: Path = PROJECT_ROOT / "data" / "files"
+    local_storage_secret: str = ""
     database_url: str = "mssql+pyodbc://sa:Coursework_2026!@localhost:1433/coursework?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
     cors_origins: str = "http://localhost:8080,http://localhost:5173"
     oss_endpoint: str = "https://oss-cn-hangzhou.aliyuncs.com"
@@ -39,6 +43,7 @@ class Settings(BaseSettings):
     # reaches a natural conclusion. Keep a bounded default for low-bandwidth
     # deployments; operators can tune this with AI_TEACHER_MAX_OUTPUT_TOKENS.
     ai_teacher_max_output_tokens: int = 1600
+    ai_grading_max_output_tokens: int = 8192
     ai_teacher_max_concurrent_per_worker: int = 4
     ai_teacher_max_quote_chars: int = 1200
     # Load the repository-level environment regardless of whether the API is

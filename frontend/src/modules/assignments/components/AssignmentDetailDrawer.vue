@@ -3,8 +3,9 @@ import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } f
 import { api } from '../../../api'
 import AssignmentMaterials from './AssignmentMaterials.vue'
 import AiTeacherDrawer from './AiTeacherDrawer.vue'
+import AiTeacherSelectionAction from '../../../shared/components/AiTeacherSelectionAction.vue'
 import OnlineMarkdownWorkspace from '../../../shared/components/OnlineMarkdownWorkspace.vue'
-import { ArrowLeftOutlined, CheckCircleOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, InboxOutlined, MessageOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, CheckCircleOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, ExpandOutlined, EyeOutlined, InboxOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { useShellContext } from '../../../shellContext'
 import { aiTeacherActionLabel, aiTeacherAvatarUrl } from '../aiTeacherConfig'
 
@@ -18,8 +19,15 @@ watch(() => selectedAssignment.value?.id, () => {
 })
 const aiTeacherQuote = ref('')
 const aiTeacherQuoteSource = ref(null)
+const aiTeacherQuotes = ref([])
 const aiTeacherQuoteVersion = ref(0)
 const requirementSelection = ref(null)
+let requirementRange = null
+let requirementSelectionVersion = 0
+watch(() => selectedAssignment.value?.id, () => {
+  requirementSelection.value = null
+  requirementRange = null
+})
 const FAB_SIZE = 52
 const FAB_MARGIN = 12
 const FAB_STORAGE_KEY = 'ai-teacher-floating-entry-position-v3'
@@ -105,16 +113,33 @@ function selectRequirement(event) {
     requirementSelection.value = null
     return
   }
+  if (requirementSelection.value && requirementRange &&
+    range.startContainer === requirementRange.startContainer && range.startOffset === requirementRange.startOffset &&
+    range.endContainer === requirementRange.endContainer && range.endOffset === requirementRange.endOffset) return
   const rect = range.getBoundingClientRect()
-  requirementSelection.value = { text, left: Math.max(8, Math.min(rect.left, window.innerWidth - 124)), top: Math.max(8, rect.top - 38) }
+  requirementRange = range.cloneRange()
+  const selectionId = JSON.stringify([selectedAssignment.value?.id, ++requirementSelectionVersion])
+  requirementSelection.value = { text, selectionId, range: requirementRange, left: Math.max(8, Math.min(rect.left, window.innerWidth - 124)), top: Math.max(8, rect.top - 38) }
 }
 function askRequirement() {
   openAiTeacher(requirementSelection.value?.text || '', 'assignment')
   requirementSelection.value = null
 }
+function updateAiTeacherQuotes(quotes = []) {
+  aiTeacherQuotes.value = quotes.map(item => ({ ...item }))
+  aiTeacherQuote.value = aiTeacherQuotes.value[0]?.quote || ''
+  aiTeacherQuoteSource.value = aiTeacherQuotes.value[0]?.source || null
+}
+
 function openAiTeacher(quote = '', quoteSource = null) {
-  aiTeacherQuote.value = quote
-  aiTeacherQuoteSource.value = quoteSource
+  if (quote) {
+    const reference = { quote, source: quoteSource || undefined }
+    if (!aiTeacherQuotes.value.some(item => item.quote === quote && item.source === reference.source)) aiTeacherQuotes.value.push(reference)
+  } else if (!aiTeacherOpen.value) {
+    aiTeacherQuotes.value = []
+  }
+  aiTeacherQuote.value = aiTeacherQuotes.value[0]?.quote || ''
+  aiTeacherQuoteSource.value = aiTeacherQuotes.value[0]?.source || null
   aiTeacherQuoteVersion.value += 1
   aiTeacherOpen.value = true
 }
@@ -123,7 +148,8 @@ provide('aiTeacherAvatarUrl', aiTeacherAvatarUrl)
 function handleAiShortcut(event) {
   if (role.value !== 'STUDENT' || event.key !== 'F3') return
   event.preventDefault()
-  aiTeacherOpen.value = !aiTeacherOpen.value
+  if (aiTeacherOpen.value) aiTeacherOpen.value = false
+  else openAiTeacher()
 }
 onMounted(() => {
   restoreFabPosition()
@@ -165,7 +191,7 @@ onBeforeUnmount(() => {
                 <div class="rich-text detail-description" v-html="selectedAssignment.description"></div>
               </section>
               <section class="assignment-pane">
-                <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-segmented v-if="role==='TEACHER'" v-model:value="uploadMaterialType" size="small" :options="materialTypeOptions"/><a-upload v-if="role==='TEACHER'" :custom-request="uploadMaterialFile" :show-upload-list="false" :accept="uploadMaterialType==='CRITERIA'?'.md':undefined" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
+                <div class="assignment-pane-heading"><h2>作业资料</h2><a-space><span v-if="assignmentAttachments.length">{{assignmentAttachments.length}} 个附件</span><a-segmented v-if="role==='TEACHER'" v-model:value="uploadMaterialType" size="small" :options="materialTypeOptions"/><a-upload v-if="role==='TEACHER'" :custom-request="uploadMaterialFile" :show-upload-list="false" :accept="uploadMaterialType==='CRITERIA'?'.md,.txt':undefined" multiple><a-button><UploadOutlined/> 上传作业附件</a-button></a-upload></a-space></div>
                 <a-empty v-if="!assignmentAttachments.length" class="detail-empty" description="暂无作业资料"/>
                 <AssignmentMaterials v-else :files="assignmentAttachments" :assignment-id="selectedAssignment.id" :can-delete="role==='TEACHER'" can-download :deleting="deletingMaterials" @preview="openFilePreview" @delete="deleteDraft" @delete-selected="deleteSelectedMaterials" @retype="retypeMaterial"/>
               </section>
@@ -185,7 +211,7 @@ onBeforeUnmount(() => {
                   <div class="assignment-pane-heading"><h2>提交明细</h2></div>
                   <div class="board-toolbar"><a-input-search v-model:value="boardQuery" allow-clear placeholder="搜索姓名或学号"/><a-select v-model:value="boardTeamFilter" :options="boardTeamOptions"/><a-segmented v-model:value="boardFilter" :options="[{label:'全部',value:'ALL'},{label:'未提交',value:'NOT_SUBMITTED'},{label:'已提交',value:'SUBMITTED'},{label:'迟交',value:'LATE'},{label:'未批改',value:'PENDING_REVIEW'},{label:'已批改',value:'REVIEWED'}]"/></div>
                   <a-empty v-if="!groupedBoard.length" class="detail-empty" description="没有符合条件的提交记录"/>
-                  <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column title="最终成绩"><template #default="{record}"><span v-if="record.final_grade" class="grade-result" :class="`source-${(record.grade_source||'unknown').toLowerCase()}`"><strong>{{record.final_grade}}</strong><span>{{gradeSourceLabel(record.grade_source)}}</span></span><a-tag v-else :color="gradingStatusColor(record.grading_status)">{{statusLabel(record.grading_status)}}</a-tag><a-tag v-if="record.grade_carried_forward" color="blue">待重新评分</a-tag></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
+                  <section v-for="group in groupedBoard" :key="group.id" class="submission-group"><div class="submission-group-heading"><strong>{{group.name}}</strong><span>{{group.items.length}} 人</span></div><a-table :data-source="group.items" row-key="submission_version_id" size="small" :pagination="false"><a-table-column title="提交对象" data-index="owner"/><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="学号"><template #default="{record}">{{record.student_no||'-'}}</template></a-table-column><a-table-column title="状态"><template #default="{record}"><a-tag>{{statusLabel(record.status)}}</a-tag><a-tag v-if="record.is_late" color="red">迟交</a-tag></template></a-table-column><a-table-column v-if="selectedAssignment.submitter_type==='INDIVIDUAL'" title="互评"><template #default="{record}">{{record.peer_grade||'-'}}<small v-if="record.peer_review_count">（{{record.peer_review_count}} 人）</small></template></a-table-column><a-table-column title="最终成绩"><template #default="{record}"><span v-if="record.final_grade" class="grade-result" :class="`source-${(record.grade_source||'unknown').toLowerCase()}`"><strong>{{record.final_grade}}</strong><span>{{gradeSourceLabel(record.grade_source)}}</span></span><a-tag v-else :color="gradingStatusColor(record.grading_status)">{{statusLabel(record.grading_status)}}</a-tag><a-tag v-if="record.grade_carried_forward" color="blue">待重新评分</a-tag></template></a-table-column><a-table-column title="提交时间"><template #default="{record}">{{formatTime(record.submitted_at)}}</template></a-table-column><a-table-column title="操作" :width="110"><template #default="{record}"><a-button v-if="record.status==='SUBMITTED'" type="link" @click="openSubmissionDetail(record)"><EyeOutlined/> 查看作业</a-button><span v-else>-</span></template></a-table-column></a-table></section>
                   </div>
                 </section>
               </template>
@@ -202,6 +228,6 @@ onBeforeUnmount(() => {
         </div>
         </Transition>
         <Teleport to="body"><button v-if="role==='STUDENT'&&selectedAssignment&&!aiTeacherOpen" type="button" class="ai-teacher-fab" :style="fabStyle" :aria-label="aiTeacherActionLabel" :title="aiTeacherActionLabel" @pointerdown="startFabDrag" @click="clickFab"><img :src="aiTeacherAvatarUrl" alt="" draggable="false"></button></Teleport>
-        <Teleport to="body"><button v-if="requirementSelection" type="button" class="ai-requirement-selection" :style="{left:`${requirementSelection.left}px`,top:`${requirementSelection.top}px`}" @pointerdown.prevent @click="askRequirement"><MessageOutlined/> 问叶老师</button></Teleport>
-        <AiTeacherDrawer v-if="role==='STUDENT'&&selectedAssignment" :key="selectedAssignment.id" :open="aiTeacherOpen" :assignment="selectedAssignment" :quote="aiTeacherQuote" :quote-source="aiTeacherQuoteSource" :quote-version="aiTeacherQuoteVersion" @close="aiTeacherOpen=false"/>
+        <AiTeacherSelectionAction v-if="requirementSelection" :position="requirementSelection" :selection-id="requirementSelection.selectionId" @ask="askRequirement" />
+        <AiTeacherDrawer v-if="role==='STUDENT'&&selectedAssignment" :key="selectedAssignment.id" :open="aiTeacherOpen" :assignment="selectedAssignment" :quote="aiTeacherQuote" :quote-source="aiTeacherQuoteSource" :quotes="aiTeacherQuotes" :quote-version="aiTeacherQuoteVersion" @close="aiTeacherOpen=false" @clear-quotes="updateAiTeacherQuotes()" @update-quotes="updateAiTeacherQuotes"/>
 </template>

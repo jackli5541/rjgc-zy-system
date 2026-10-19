@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hmac
+import time
 from datetime import timedelta
 from fastapi import APIRouter, Cookie, Query, Request, Response
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import and_, delete, func, or_, select, text
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
@@ -24,6 +26,25 @@ from app.modules.system.schemas import LoginIn, MenuPermissionsIn, PasswordIn
 from app.modules.system.service import MENU_CATALOG, _events_authenticate, _events_session_active, menu_permissions_by_role, menu_permissions_payload
 
 router = APIRouter()
+
+
+@router.get("/api/v1/local-files")
+def local_file(key: str, expires: int, params: str, signature: str):
+    if settings.storage_backend != "local" or expires < time.time():
+        raise ApiError(403, "FILE_LINK_EXPIRED", "文件链接已失效")
+    if not hmac.compare_digest(signature, storage.local_signature(key, expires, params)):
+        raise ApiError(403, "FILE_LINK_INVALID", "文件链接无效")
+    try:
+        path = storage.local_path(key)
+        options = json.loads(params)
+    except (ValueError, TypeError):
+        raise ApiError(403, "FILE_LINK_INVALID", "文件链接无效")
+    if not path.is_file():
+        raise ApiError(404, "FILE_MISSING", "文件不存在")
+    headers = {"Cache-Control": "private, no-store"}
+    if options.get("response-content-disposition"):
+        headers["Content-Disposition"] = options["response-content-disposition"]
+    return FileResponse(path, headers=headers)
 
 @router.get("/api/v1/events")
 async def realtime_events(request: Request, class_id: UUID = Query(), session_id: Annotated[str | None, Cookie()] = None):
