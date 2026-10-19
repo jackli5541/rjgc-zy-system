@@ -10,11 +10,12 @@ import { message } from 'ant-design-vue'
 import { cleanupMermaidArtifacts, renderMermaid as renderMermaidSvg } from '../../mermaidRenderer'
 import MediaLightbox from './MediaLightbox.vue'
 import AiTeacherSelectionAction from './AiTeacherSelectionAction.vue'
+import DocumentCanvas from './DocumentCanvas.vue'
 
 let activeSpeechStop = null
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true }, imageUpload: Function })
+const props = defineProps({ modelValue: { type: String, default: '' }, placeholder: { type: String, default: '' }, compact: Boolean, document: Boolean, canvasScale: { type: Number, default: 100 }, autofocus: Boolean, speechEnabled: Boolean, editable: { type: Boolean, default: true }, imageUpload: Function })
 const emit = defineEmits(['update:modelValue'])
 const askAiTeacher = inject('askAiTeacher', null)
 const aiTeacherAvatarUrl = inject('aiTeacherAvatarUrl', '')
@@ -576,7 +577,8 @@ async function insertMermaid() {
     </div>
     <input v-if="document" ref="imageInput" class="document-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" @change="insertImage">
     <div v-if="speechEnabled&&speechSupported&&listening&&interimText" class="speech-interim">正在识别：{{interimText}}</div>
-    <EditorContent :editor="editor"/>
+    <DocumentCanvas v-if="document" :scale="canvasScale"><EditorContent :editor="editor"/></DocumentCanvas>
+    <EditorContent v-else :editor="editor"/>
     <AiTeacherSelectionAction v-if="selectionAction" :position="selectionAction" :selection-id="selectionAction.selectionId" @ask="askAi" />
     <MediaLightbox v-if="mermaidPreviewOpen" :svg="mermaidPreviewSvg" :src="imagePreviewSrc" :alt="imagePreviewAlt" @close="closeMermaidPreview"/>
     <a-modal v-model:open="mermaidOpen" :title="editingMermaidPos===null?'插入 Mermaid 图表':'编辑 Mermaid 图表'" width="820px" :confirm-loading="mermaidRendering" :ok-text="editingMermaidPos===null?'插入图表':'保存修改'" cancel-text="取消" @ok="insertMermaid">
@@ -586,6 +588,7 @@ async function insertMermaid() {
 </template>
 
 <style scoped>
+.feedback-rich-editor.document{overflow:visible}
 .feedback-rich-editor :deep(.tiptap){font-synthesis:style}
 .feedback-rich-editor{overflow:hidden;border:1px solid #d5dde5;border-radius:6px;background:#fff}.feedback-editor-toolbar{display:flex;min-width:0;align-items:center;padding:7px 10px;border-bottom:1px solid #e4e9ed;background:#fafbfb}.editor-toolbar-tools{display:flex;min-width:0;align-items:center;gap:3px;flex:1 1 auto;overflow-x:auto;scrollbar-width:thin}.editor-toolbar-tools>*{flex:0 0 auto}.feedback-editor-toolbar :deep(.ant-btn){border-color:transparent;box-shadow:none}.feedback-editor-toolbar :deep(.ant-btn-default:hover){border-color:#d7e0e4;background:#eef3f4}.feedback-editor-toolbar-end{display:flex;align-items:center;gap:7px;flex:0 0 auto;margin-left:8px;padding-left:10px;border-left:1px solid #dce4e7;background:#fafbfb}.toolbar-divider{width:1px;height:20px;margin:0 4px;background:#dce4e7}.inline-code-icon{font-family:Consolas,"Liberation Mono",monospace;font-size:11px;font-weight:700;letter-spacing:0}.speech-status{margin-left:2px;color:#176b78;font-size:12px}.speech-interim{padding:5px 10px;color:#738496;background:#f8fafc;border-bottom:1px solid #edf1f4;font-size:12px;font-style:italic}.feedback-rich-editor :deep(.tiptap){min-height:104px;padding:10px 12px;outline:none;line-height:1.55}.feedback-rich-editor.compact :deep(.tiptap){min-height:76px}.feedback-rich-editor :deep(.tiptap p){margin:0 0 7px}.feedback-rich-editor :deep(.tiptap p:last-child){margin-bottom:0}.feedback-rich-editor :deep(.tiptap:empty:before){float:left;color:#a7b0ba;content:attr(data-placeholder);pointer-events:none}
 .feedback-rich-editor.document :deep(.tiptap){min-height:560px;padding:48px 64px 72px;color:#27353d;font-size:15px;line-height:1.8}.feedback-rich-editor.document :deep(.tiptap h1){margin:0 0 26px;color:#182932;font-size:30px;line-height:1.3}.feedback-rich-editor.document :deep(.tiptap h2){margin:34px 0 14px;color:#22363f;font-size:21px;line-height:1.4}.feedback-rich-editor.document :deep(.tiptap p){margin:0 0 14px}.feedback-rich-editor.document :deep(.tiptap blockquote){margin:18px 0;padding:10px 16px;border-left:3px solid #25866f;background:#f3f8f6;color:#53666e}.feedback-rich-editor.document :deep(.tiptap pre){overflow:auto;padding:14px;background:#f4f6f8;border-radius:4px}@media(max-width:760px){.feedback-rich-editor.document :deep(.tiptap){min-height:440px;padding:28px 20px}.feedback-editor-toolbar{padding-right:6px}.feedback-editor-toolbar-end{margin-left:5px;padding-left:6px}}
