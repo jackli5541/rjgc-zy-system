@@ -27,6 +27,7 @@ const dueAt = ref(null)
 const locked = ref(false)
 const unlocked = ref(false)
 const activeId = ref('')
+const editorFocused = ref(false)
 const context = ref(null)
 
 const teammates = ref([])
@@ -196,12 +197,12 @@ function backToOwnDocuments() {
   activeTeammate.value = null
 }
 
-watch(classId, () => { refreshTree(); loadTeammates(); backToOwnDocuments() })
+watch(classId, () => { editorFocused.value = false; refreshTree(); loadTeammates(); backToOwnDocuments() })
 onMounted(() => { refreshTree(); loadTeammates() })
 </script>
 
 <template>
-  <section class="teaching-materials-page capstone-page" @click="clearContext">
+  <section class="teaching-materials-page capstone-page" :class="{'editor-focused': editorFocused}" @click="clearContext">
     <header class="page-title capstone-title">
       <div><div class="eyebrow">个人任务</div><h1>大作业</h1><AnimatedIntroText class="capstone-topic-line">{{dueLabel}} · 课题：{{topicName || '尚未提交选题'}}<template v-if="teamName"> · {{teamName}}</template> · 我的模块：<strong>{{myModuleName || '未分配'}}</strong></AnimatedIntroText></div>
       <nav class="capstone-stage-strip" aria-label="阶段导航">
@@ -238,7 +239,7 @@ onMounted(() => { refreshTree(); loadTeammates() })
       <main class="teaching-materials-preview capstone-editor">
         <template v-if="viewMode==='own'">
           <div v-if="!activeId" class="teaching-materials-placeholder"><FolderOpenOutlined/><h2>选择左侧文档开始编写</h2><p>点击文档名称即可在线编辑</p></div>
-          <OnlineMarkdownWorkspace v-else :key="basePath" :base-path="basePath" :document-id="activeId" hide-document-list :enable-download="false" :writable="!locked" :can-submit="false" />
+          <OnlineMarkdownWorkspace v-else v-model:focused="editorFocused" focusable :key="basePath" :base-path="basePath" :document-id="activeId" hide-document-list :enable-download="false" :writable="!locked" :can-submit="false" />
         </template>
         <template v-else>
           <div class="capstone-readonly-banner"><EyeOutlined/> 只读查看 · 仅供参考，请勿抄袭 —— 正在查看「{{activeTeammate?.display_name}}」的文档<a-button size="small" @click="backToOwnDocuments">返回我的文档</a-button></div>

@@ -6,6 +6,16 @@
 
 .capstone-editor{padding:0;min-height:0;max-height:78vh;overflow-y:auto}
 
+.app-shell:has(.capstone-page.editor-focused)>.app-header{display:none}
+.capstone-page.editor-focused>.capstone-title,.capstone-page.editor-focused>.capstone-teammates,.capstone-page.editor-focused .teaching-materials-tree{display:none}
+.capstone-page.editor-focused .teaching-materials-layout{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
+.capstone-page.editor-focused .capstone-editor{max-height:none;overflow:hidden;border-color:#46525f;box-shadow:0 8px 28px rgba(0,0,0,.24)}
+.capstone-page.editor-focused .markdown-workspace{flex:1;height:auto;min-height:0;border-color:#46525f;background:#293440}
+.app-content:has(.capstone-page.editor-focused),.content-wrap:has(.capstone-page.editor-focused){background:#202a35}
+.page-surface:has(.capstone-page.editor-focused){background:transparent}
+.capstone-page.editor-focused .workspace-document-reader .teaching-material-rich{padding:clamp(6px,.6vw,12px);background:#293440}
+.capstone-page.editor-focused .document-canvas-surface{box-shadow:0 2px 12px rgba(0,0,0,.24)}
+
 .capstone-context-hint{display:block;padding:9px 14px;color:#9aa7b1;font-size:12px}
 
 .capstone-stage-strip{display:flex;align-items:stretch;flex:1;max-width:640px;margin:0 8px;border:1px solid #e5ebee;border-radius:10px;background:#fbfcfd;overflow:hidden}
@@ -58,6 +68,8 @@
 .capstone-teammate-item .module{color:#8b99a5;font-size:10px}
 
 @media(max-width:760px) {
+  .app-shell:has(.capstone-page.editor-focused) .mobile-nav{display:none}
+  .content-wrap:has(.capstone-page.editor-focused){padding-bottom:8px}
   .capstone-readonly-body{grid-template-columns:1fr}
   .capstone-readonly-doc-list{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid #e2e8ea}
 }
