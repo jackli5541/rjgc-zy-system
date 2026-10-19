@@ -14,6 +14,8 @@ from app.models import Assignment, AiGradingDraft, AiGradingJob, BackgroundJob, 
 from app.modules.ai_grading.schemas import AiGradingAcceptIn, AiGradingJobIn
 from app.modules.ai_grading.service import draft_json, draft_state, job_json, require_criteria, successful_baseline
 
+from app.modules.ai_grading.client import require_grading_config
+
 router = APIRouter()
 
 
@@ -47,6 +49,7 @@ def version_for_assignment(db, aid, version_id):
 @router.post("/api/v1/assignments/{aid}/ai-grading/jobs", status_code=202)
 def create_job(aid: UUID, data: AiGradingJobIn, user: CsrfUser, db: Db):
     assignment = assignment_for_teacher(db, user, aid)
+    require_grading_config()
     require_criteria(db, assignment)
     ids = list(dict.fromkeys(data.submission_version_ids))
     versions = []
@@ -93,6 +96,7 @@ def get_draft(aid: UUID, version_id: UUID, user: CurrentUser, db: Db):
 @router.post("/api/v1/assignments/{aid}/submissions/{version_id}/ai-grading-draft/retry", status_code=202)
 def retry_draft(aid: UUID, version_id: UUID, user: CsrfUser, db: Db):
     assignment = assignment_for_teacher(db, user, aid)
+    require_grading_config()
     version, _ = version_for_assignment(db, aid, version_id)
     # Serialize initial creation as well as retries for the same submission.
     db.scalar(select(SubmissionVersion).where(SubmissionVersion.id == version.id).with_for_update())

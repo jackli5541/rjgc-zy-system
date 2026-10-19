@@ -5,6 +5,15 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 
 
+GREETING_REPLY = "你好！你想了解哪个课程概念或作业要求？"
+_GREETING = re.compile(r"(?:你好|您好|老师好|叶老师好|叶老师你好|叶老师您好|hi|hello)", re.IGNORECASE)
+
+
+def greeting_reply(question: str) -> str | None:
+    text = re.sub(r"^[\s，。！？、,.!?：:；;～~…]+|[\s，。！？、,.!?：:；;～~…]+$", "", question)
+    return GREETING_REPLY if _GREETING.fullmatch(text) else None
+
+
 SELF_CHECK_GUIDANCE = "我不能检查或评价你已有的答案。你可以对照作业要求逐项自查：确认每个任务都有对应内容，术语和图表前后一致，并用课程概念核对关键步骤。若某个概念不清楚，可以单独提问。"
 _WORK = r"答案|草稿|作业|文档|写的|写好|已写|已有的|内容"
 _REVIEW = r"检查|批改|审阅|评估|评价|核对|看看|看一看|改改|挑错|找错|指出.*(?:错误|问题|遗漏)"

@@ -39,7 +39,7 @@ class DispatchTests(unittest.TestCase):
         db.scalar.return_value = job
         dispatcher = MagicMock()
         dispatcher.available.return_value = True
-        with patch.object(worker.SessionLocal, 'begin') as begin, patch.object(worker, 'process_claimed_job') as process:
+        with patch.object(worker.settings, 'ai_grading_enabled', True), patch.object(worker.SessionLocal, 'begin') as begin, patch.object(worker, 'process_claimed_job') as process:
             begin.return_value.__enter__.return_value = db
             worker.run_once(run_maintenance=False, dispatcher=dispatcher)
             self.assertEqual(job.status, 'RUNNING')

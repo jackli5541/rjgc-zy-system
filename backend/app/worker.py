@@ -19,6 +19,7 @@ from app.realtime import publish_event
 from app.settings import settings
 from app.modules.attendance.service import process_due_attendance
 from app.modules.ai_grading.dispatch import GradingDispatcher
+from app.modules.ai_grading.diagnostics import task_log_context, worker_identity
 from app.modules.ai_grading.service import GRADING_TIMEOUT_SECONDS, elapsed_seconds, generate_result, grading_messages, material_fingerprint, run_metadata, submission_context
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,10 @@ def process_ai_grading(job_id: UUID) -> None:
 def process_ai_grading_draft(draft_id: UUID, run_id: str | None = None) -> bool:
     started = time.perf_counter()
     expected_run = run_id
+    identity = worker_identity()
+    context = task_log_context(draft_id, run_id, None, identity)
+    stage = "LOAD"
+    timings = {}
     try:
         # Finish all database reads before the external model request.
         with SessionLocal.begin() as db:
@@ -264,6 +269,7 @@ def process_ai_grading_draft(draft_id: UUID, run_id: str | None = None) -> bool:
             if run_id and meta.get("id") != run_id:
                 return False
             expected_run = meta.get("id")
+            context = task_log_context(draft_id, expected_run, meta.get("job_id"), identity)
             remaining = GRADING_TIMEOUT_SECONDS - elapsed_seconds(draft)
             if remaining <= 0:
                 raise TimeoutError()
@@ -274,16 +280,22 @@ def process_ai_grading_draft(draft_id: UUID, run_id: str | None = None) -> bool:
                 raise ValueError("提交版本已变更，请重新打开当前正式提交")
             if assignment.version != draft.assignment_version:
                 raise ValueError("作业或评分标准已更新，请重新生成")
-            logger.info("ai_grading draft=%s queue_seconds=%.2f", draft_id, elapsed_seconds(draft))
-            meta = {**meta, "queue_seconds": round(elapsed_seconds(draft), 3)}
+            logger.info("ai_grading %s queue_seconds=%.2f", context, elapsed_seconds(draft))
+            meta = {**meta, "queue_seconds": round(elapsed_seconds(draft), 3), "worker": identity}
+            stage = "MATERIALS"
+            materials_started = time.perf_counter()
             rubric, content = submission_context(db, assignment, version)
+            timings["materials_ms"] = round((time.perf_counter() - materials_started) * 1000)
             messages = grading_messages(assignment, rubric, content)
-            draft.rubric_snapshot = {**rubric, "_previous": (draft.rubric_snapshot or {}).get("_previous"), "_fingerprint": material_fingerprint(messages), "_run": {**meta, "phase": "GENERATING"}}
+            draft.rubric_snapshot = {**rubric, "_previous": (draft.rubric_snapshot or {}).get("_previous"), "_fingerprint": material_fingerprint(messages), "_run": {**meta, "phase": "GENERATING", "timings": timings.copy()}}
             remaining = GRADING_TIMEOUT_SECONDS - elapsed_seconds(draft)
             if remaining <= 0:
                 raise TimeoutError()
-        logger.info("ai_grading draft=%s materials_ms=%s", draft_id, round((time.perf_counter() - started) * 1000))
-        result = asyncio.run(generate_result(messages, remaining))
+        logger.info("ai_grading %s materials_ms=%s", context, timings["materials_ms"])
+        stage = "GENERATING"
+        result = asyncio.run(generate_result(messages, remaining, log_context=context))
+        stage = "SAVING"
+        save_started = time.perf_counter()
         with SessionLocal.begin() as db:
             draft = db.scalar(select(AiGradingDraft).where(AiGradingDraft.id == draft_id).with_for_update())
             if not draft or draft.status != "PROCESSING" or run_metadata(draft).get("id") != expected_run:
@@ -300,15 +312,22 @@ def process_ai_grading_draft(draft_id: UUID, run_id: str | None = None) -> bool:
             draft.suggested_comment = result["suggested_comment"]
             draft.model_name = settings.ai_chat_model
             draft.status, draft.error_message, draft.updated_at = "READY", None, now()
-        logger.info("ai_grading draft=%s total_ms=%s status=READY", draft_id, round((time.perf_counter() - started) * 1000))
+            draft.rubric_snapshot = {**(draft.rubric_snapshot or {}), "_run": {
+                **run_metadata(draft), "worker": identity, "phase": "READY",
+            }}
+        logger.info("ai_grading %s save_ms=%s total_ms=%s status=READY", context,
+                    round((time.perf_counter() - save_started) * 1000), round((time.perf_counter() - started) * 1000))
         return True
     except Exception as error:
-        logger.exception("ai_grading draft=%s failed duration_ms=%s", draft_id, round((time.perf_counter() - started) * 1000))
+        logger.exception("ai_grading %s failed stage=%s duration_ms=%s", context, stage, round((time.perf_counter() - started) * 1000))
         with SessionLocal.begin() as db:
             draft = db.scalar(select(AiGradingDraft).where(AiGradingDraft.id == draft_id).with_for_update())
             if draft and draft.status == "PROCESSING" and run_metadata(draft).get("id") == expected_run:
                 reason = "AI 批改等待超过 180 秒，请重试" if isinstance(error, TimeoutError) else getattr(error, "message", None) or (str(error) if isinstance(error, (ValueError, RuntimeError)) else "批改材料读取或后台执行失败，请检查后台日志后重试")
                 draft.status, draft.error_message, draft.updated_at = "FAILED", reason[:2000], now()
+                draft.rubric_snapshot = {**(draft.rubric_snapshot or {}), "_run": {
+                    **run_metadata(draft), "worker": identity, "phase": "FAILED", "failed_stage": stage,
+                }}
         return False
 
 
@@ -324,7 +343,7 @@ def run_once(run_maintenance=True, dispatcher=None) -> None:
             process_due_attendance(db, current)
             cleanup_markdown_assets(db, current)
             cleanup_archive_exports(db, current)
-        ai_capacity = dispatcher is None or dispatcher.available()
+        ai_capacity = settings.ai_grading_enabled and (dispatcher is None or dispatcher.available())
         # Old immediate archive jobs used SQL Server's local CURRENT_TIMESTAMP,
         # which could be stored eight hours ahead while this worker compares UTC.
         legacy_archive_cutoff = current + timedelta(hours=9)
@@ -365,6 +384,10 @@ def run_once(run_maintenance=True, dispatcher=None) -> None:
         delete_keys = [key for key in job_payload.get("keys", []) if isinstance(key, str)] if job_kind == "OSS_DELETE" else []
 
     print(f"worker claimed job id={job_id} kind={job_kind!r}", flush=True)
+    if job_kind in {"AI_GRADING", "AI_GRADING_DRAFT"}:
+        logger.info("ai_grading claimed %s kind=%s", task_log_context(
+            job_payload.get("draft_id"), job_payload.get("run_id"), job_id, worker_identity(),
+        ), job_kind)
     if dispatcher and job_kind in {"AI_GRADING", "AI_GRADING_DRAFT"}:
         dispatcher.submit(process_claimed_job, job_id, job_kind, job_payload, file_id, delete_keys)
         return

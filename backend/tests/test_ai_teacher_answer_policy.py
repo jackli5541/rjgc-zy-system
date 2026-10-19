@@ -1,6 +1,43 @@
 import asyncio
 
 from app.modules.ai_teacher.answer_policy import SELF_CHECK_GUIDANCE, asks_for_answer_review, guarded_answer
+from app.modules.ai_teacher.answer_policy import GREETING_REPLY, greeting_reply
+from app.modules.ai_teacher import service
+from unittest.mock import Mock
+
+
+def test_greetings_match_whole_question_only():
+    for question in ('你好', ' 您好！ ', '老师好。', '叶老师你好', '叶老师您好～', 'HI!', '\n Hello?\t', '你好！！'):
+        assert greeting_reply(question) == GREETING_REPLY
+    for question in ('你好，需求分析怎么写？', 'hello world', '你好呀，请解释参与者', '什么是需求分析？', '', 'h', '老师'):
+        assert greeting_reply(question) is None
+
+
+def test_fixed_greeting_never_constructs_model_client(monkeypatch):
+    client = Mock(side_effect=AssertionError('Greeting must not call a model'))
+    monkeypatch.setattr(service, 'get_ai_client', client)
+
+    async def run():
+        return [part async for part in service.answer_stream([], greeting_reply('你好！'))]
+
+    assert asyncio.run(run()) == [GREETING_REPLY]
+    client.assert_not_called()
+
+
+def test_mixed_course_question_still_uses_model(monkeypatch):
+    async def stream(messages):
+        yield '需求分析先明确参与者。'
+
+    client = Mock()
+    client.stream_chat = stream
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(service, 'get_ai_client', factory)
+
+    async def run():
+        return [part async for part in service.answer_stream([], greeting_reply('你好，需求分析怎么写？'))]
+
+    assert ''.join(asyncio.run(run())) == '需求分析先明确参与者。'
+    factory.assert_called_once()
 
 
 def test_review_request_and_regular_course_question():

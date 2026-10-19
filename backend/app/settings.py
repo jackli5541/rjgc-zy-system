@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     export_archive_hours: int = 24
     frontend_dist: Path = PROJECT_ROOT / "frontend" / "dist"
     ai_teacher_enabled: bool = False
+    ai_grading_enabled: bool = False
     ai_provider: str = "openai_compatible"
     ai_base_url: str = "http://localhost:11434/v1"
     ai_api_key: str = "local-dev"

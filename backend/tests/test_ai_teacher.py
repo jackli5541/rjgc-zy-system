@@ -9,6 +9,7 @@ from app.database import SessionLocal, engine
 from app.main import app
 from app.models import AiChatMessage, User
 from app.modules.ai_teacher import router as ai_router
+from app.modules.ai_teacher import service as ai_service
 from app.settings import settings
 
 
@@ -46,6 +47,29 @@ class FailingClient:
         raise ai_router.AiClientError("上游中断")
 
 
+def test_greeting_stream_is_short_and_saved_without_model(monkeypatch):
+    from app.modules.ai_teacher.answer_policy import GREETING_REPLY
+
+    monkeypatch.setattr(settings, "ai_teacher_enabled", True)
+    _, student, headers, aid = assignment_fixture()
+    conversation_id, message_id = str(uuid4()), str(uuid4())
+
+    def no_model_call():
+        raise AssertionError("Greetings must not call the model")
+
+    monkeypatch.setattr(ai_service, "get_ai_client", no_model_call)
+    path = f"/api/v1/assignments/{aid}/ai-teacher"
+    response = student.post(f"{path}/chat", headers=headers, json={
+        "question": " 你好！ ", "conversation_id": conversation_id, "message_id": message_id,
+    })
+    assert response.status_code == 200
+    assert "event: delta" in response.text and "event: done" in response.text
+    history = student.get(f"{path}/history?conversation_id={conversation_id}").json()["messages"]
+    assert len(history) == 2
+    assert history[0]["id"] == message_id
+    assert history[1]["content"] == GREETING_REPLY
+
+
 def test_answer_review_requests_and_offers_are_not_returned(monkeypatch):
     monkeypatch.setattr(settings, "ai_teacher_enabled", True)
     _, student, headers, aid = assignment_fixture()
@@ -55,7 +79,7 @@ def test_answer_review_requests_and_offers_are_not_returned(monkeypatch):
     def no_model_call():
         raise AssertionError("Review requests must not call the model")
 
-    monkeypatch.setattr(ai_router, "get_ai_client", no_model_call)
+    monkeypatch.setattr(ai_service, "get_ai_client", no_model_call)
     review = student.post(f"{path}/chat", headers=headers, json={
         "question": "帮我检查已有的答案", "conversation_id": conversation_id,
     })
@@ -67,7 +91,7 @@ def test_answer_review_requests_and_offers_are_not_returned(monkeypatch):
             yield "先列出参与者。想让我检"
             yield "查已有的答案？"
 
-    monkeypatch.setattr(ai_router, "get_ai_client", lambda: OfferingClient())
+    monkeypatch.setattr(ai_service, "get_ai_client", lambda: OfferingClient())
     offered = student.post(f"{path}/chat", headers=headers, json={
         "question": "如何列出参与者", "conversation_id": conversation_id,
     })
@@ -83,7 +107,7 @@ def test_ai_teacher_schema_history_and_stream(monkeypatch):
     assert "conversation_id" in {column["name"] for column in schema.get_columns("ai_teacher_chat_messages")}
     assert {"embedding", "metadata"}.issubset({column["name"] for column in schema.get_columns("ai_teacher_knowledge_chunks")})
     monkeypatch.setattr(settings, "ai_teacher_enabled", True)
-    monkeypatch.setattr(ai_router, "get_ai_client", lambda: FakeClient())
+    monkeypatch.setattr(ai_service, "get_ai_client", lambda: FakeClient())
     teacher, student, headers, aid = assignment_fixture()
     first, second = str(uuid4()), str(uuid4())
     message_id = str(uuid4())
@@ -120,7 +144,7 @@ def test_ai_teacher_schema_history_and_stream(monkeypatch):
     assert "event: done" in legacy_client.text
     assert [item["role"] for item in student.get(f"{path}/history?conversation_id={second}").json()["messages"]] == ["user", "assistant"]
 
-    monkeypatch.setattr(ai_router, "get_ai_client", lambda: FailingClient())
+    monkeypatch.setattr(ai_service, "get_ai_client", lambda: FailingClient())
     failed_conversation = str(uuid4())
     failed = student.post(f"{path}/chat", headers=headers, json={
         "question": "怎样写用例", "conversation_id": failed_conversation,
@@ -143,7 +167,7 @@ def test_ai_teacher_schema_history_and_stream(monkeypatch):
 
 def test_workspace_quote_does_not_require_saved_document(monkeypatch):
     monkeypatch.setattr(settings, "ai_teacher_enabled", True)
-    monkeypatch.setattr(ai_router, "get_ai_client", lambda: FakeClient())
+    monkeypatch.setattr(ai_service, "get_ai_client", lambda: FakeClient())
     _, student, headers, aid = assignment_fixture()
     path = f"/api/v1/assignments/{aid}"
     conversation_id = str(uuid4())
@@ -177,7 +201,7 @@ def test_workspace_quote_does_not_require_saved_document(monkeypatch):
 
 def test_ai_teacher_done_serialization_failure_does_not_commit(monkeypatch):
     monkeypatch.setattr(settings, "ai_teacher_enabled", True)
-    monkeypatch.setattr(ai_router, "get_ai_client", lambda: FakeClient())
+    monkeypatch.setattr(ai_service, "get_ai_client", lambda: FakeClient())
     original_sse = ai_router.sse
 
     def fail_done(event, data):

@@ -4,7 +4,7 @@ import { CloseOutlined, CopyOutlined, PlusOutlined, SendOutlined, StopOutlined }
 import { message } from 'ant-design-vue'
 import { api, apiStream, randomUUID } from '../../../api'
 import { aiTeacherActionLabel, aiTeacherName } from '../aiTeacherConfig'
-import { hasCompletedTurn, reconcileTurn } from '../aiTeacherChat'
+import { findCompletedTurn, reconcileTurn } from '../aiTeacherChat'
 import { createTypewriter } from '../aiTeacherTypewriter'
 import { renderMarkdown } from '../../../markdownPreview'
 
@@ -229,9 +229,9 @@ async function sendQuestion() {
   answerTypewriter = typewriter
   let completed = false
   const applyCompletedTurn = saved => {
-    const userMessage = saved.find(item => item.id === localUserMessage.id && item.role === 'user')
-    const assistantMessage = saved[saved.indexOf(userMessage) + 1]
-    if (!userMessage || assistantMessage?.role !== 'assistant') return false
+    const turn = findCompletedTurn(saved, localUserMessage.id)
+    if (!turn) return false
+    const { user: userMessage, assistant: assistantMessage } = turn
     typewriter.finish()
     messages.value = messages.value.map(item => item.id === localUserMessage.id
       ? normalizeMessage(userMessage)

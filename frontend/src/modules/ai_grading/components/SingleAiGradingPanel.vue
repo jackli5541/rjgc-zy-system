@@ -42,8 +42,8 @@ watch(() => props.draft, () => { showPrevious.value = false })
       <div v-show="expanded" class="ai-grading-details">
       <a-button v-if="displayed.typing" size="small" @click="reveal.finish()">显示全部</a-button>
       <a-alert v-if="draft.materials_changed" type="info" message="批改材料已更新" show-icon />
-      <a-alert v-else-if="draft.grade_changed" type="warning" :message="`上次 ${draft.previous_result.suggested_grade} → 本次 ${draft.suggested_grade}`" show-icon>
-        <template #description><p>上次理由：{{ draft.previous_result.analysis?.grade_reason }}</p><p>本次理由：{{ draft.analysis?.grade_reason }}</p></template>
+      <a-alert v-else-if="draft.grade_changed" type="warning" :message="`上次 AI 建议 ${draft.previous_result.suggested_grade} → 本次 AI 建议 ${draft.suggested_grade}`" show-icon>
+        <template #description><p>上次 AI 定级理由：{{ draft.previous_result.analysis?.grade_reason }}</p><p>本次 AI 定级理由：{{ draft.analysis?.grade_reason }}</p></template>
       </a-alert>
       <p class="ai-suggested-comment"><strong>定级理由：</strong>{{ displayed.reason }}</p>
       <details><summary>查看判定明细</summary>
@@ -59,7 +59,7 @@ watch(() => props.draft, () => { showPrevious.value = false })
     <a-empty v-else-if="expanded" description="点击下方“AI批改”按钮生成批改建议" />
     <template v-if="expanded && error && draft?.previous_result">
       <a-button @click="showPrevious = !showPrevious">{{ showPrevious ? '收起上次成功建议' : '查看上次成功建议' }}</a-button>
-      <div v-if="showPrevious"><p>上次建议等级：{{ draft.previous_result.suggested_grade }}</p><p>{{ draft.previous_result.analysis?.grade_reason }}</p><p>{{ draft.previous_result.suggested_comment }}</p><details><summary>查看判定明细</summary><p v-for="(item, index) in draft.previous_result.analysis?.criteria_results || []" :key="index">{{ item.criterion }}：{{ item.judgment }}（{{ item.evidence }}）</p></details><p>历史建议仅供核对，请核对当前材料后再评分。</p></div>
+      <div v-if="showPrevious"><p>上次 AI 建议等级：{{ draft.previous_result.suggested_grade }}</p><p>{{ draft.previous_result.analysis?.grade_reason }}</p><p>{{ draft.previous_result.suggested_comment }}</p><details><summary>查看判定明细</summary><p v-for="(item, index) in draft.previous_result.analysis?.criteria_results || []" :key="index">{{ item.criterion }}：{{ item.judgment }}（{{ item.evidence }}）</p></details><p>历史建议仅供核对，请核对当前材料后再评分。</p></div>
     </template>
   </section>
 </template>

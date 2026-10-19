@@ -21,10 +21,10 @@ from app.core.errors import ApiError
 from app.core.utils import now
 from app.database import SessionLocal, engine
 from app.models import AiChatMessage, Assignment, SubmissionDocument, SubmissionWorkspace, TeachingClass
-from app.modules.ai_teacher.client import AiClientError, get_ai_client
+from app.modules.ai_teacher.client import AiClientError
 from app.modules.ai_teacher.retrieval import html_to_text, normalize_reference_text, normalize_text, refresh_assignment_ai_chunks, retrieve_contexts, retrieve_subject_contexts
-from app.modules.ai_teacher.answer_policy import SELF_CHECK_GUIDANCE, asks_for_answer_review, guarded_answer
-from app.modules.ai_teacher.service import build_messages, clearly_off_topic
+from app.modules.ai_teacher.answer_policy import SELF_CHECK_GUIDANCE, asks_for_answer_review, greeting_reply
+from app.modules.ai_teacher.service import answer_stream, build_messages, clearly_off_topic
 from app.modules.ai_teacher.streaming import batch_deltas
 from app.settings import settings
 
@@ -220,7 +220,10 @@ async def chat_with_ai_teacher(aid: UUID, data: AiTeacherChatIn, request: Reques
     ).all()
     history = list(reversed(history))
     review_request = asks_for_answer_review(question)
-    messages = build_messages(assignment, question, contexts, history, quote) if not review_request else []
+    fixed_answer = greeting_reply(question)
+    if review_request:
+        fixed_answer = SELF_CHECK_GUIDANCE
+    messages = build_messages(assignment, question, contexts, history, quote) if fixed_answer is None else []
     context_payload = [item.json() for item in contexts]
     db.rollback()  # Retrieved chunks are transient; do not write them for an interrupted stream.
     preparation_ms = round((time.perf_counter() - request_started) * 1000)
@@ -237,10 +240,7 @@ async def chat_with_ai_teacher(aid: UUID, data: AiTeacherChatIn, request: Reques
         deltas = None
         first_sse_ms = None
         try:
-            async def fixed_guidance():
-                yield SELF_CHECK_GUIDANCE
-
-            source = fixed_guidance() if review_request else guarded_answer(get_ai_client().stream_chat(messages))
+            source = answer_stream(messages, fixed_answer)
             deltas = batch_deltas(source)
             async for delta in deltas:
                 if await request.is_disconnected():

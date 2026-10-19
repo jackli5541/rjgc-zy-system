@@ -98,7 +98,7 @@ class GradingUnitTests(unittest.TestCase):
                 yield json.dumps({'grade_reason': '符合多数要求，接口边界需补充。', 'suggested_comment': '完成主体设计，请补充接口边界。'}) if self.calls > 1 else 'original'
         client = Client()
         with patch.object(service, 'get_ai_client', return_value=client), patch.object(service, 'parse_result', return_value=result.copy()):
-            compact = asyncio.run(service.generate_result([], 1))
+            compact = asyncio.run(service.generate_result([], 10))
         self.assertEqual(compact['suggested_grade'], 'B')
         self.assertEqual(compact['criteria_results'], result['criteria_results'])
         self.assertLessEqual(len(compact['grade_reason']), 120)

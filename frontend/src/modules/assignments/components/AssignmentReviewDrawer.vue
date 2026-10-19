@@ -20,6 +20,7 @@ const { changeReviewTarget, closeFilePreview, filePreview, fileReviewDrawer, fil
       :criteria-locked="filePreview.mode==='PEER'&&Boolean(reviewTask?.review_criteria_locked)"
       :editable="!filePreview.readonly&&(filePreview.mode==='TEACHER'&&role==='TEACHER'||filePreview.mode==='PEER'&&role==='STUDENT'&&!filePreview.initialFeedback)&&Boolean(selectedSubmission)"
       :mode="filePreview.mode"
+      :viewer-role="role"
       :targets="filePreview.targets"
       :target-index="filePreview.targetIndex"
       :initial-feedback="filePreview.initialFeedback"
