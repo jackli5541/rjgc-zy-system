@@ -345,7 +345,7 @@ const { selectedAssignment, selectedCampaign, selectedSubmission, fileReviewDraw
       </div>
     </div></a-layout-content>
 
-    <AssignmentReviewDrawer v-if="selectedSubmission || selectedCampaign || fileReviewDrawer" />
+    <AssignmentReviewDrawer />
     <SystemModals v-if="modals.password || noticesOpen" />
     <StudentAttendanceModal v-if="role==='STUDENT' && attendanceOpen" />
     <MemberModals v-if="modals.class || modals.import || modals.member || modals.team || modals.topicDecision || memberDetail" />
