@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowDownOutlined, ArrowUpOutlined, BookOutlined, CaretRightOutlined, CloseOutlined, CommentOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined, HighlightOutlined, LeftOutlined, MinusOutlined, RightOutlined, StrikethroughOutlined, UnderlineOutlined } from '@ant-design/icons-vue'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { api, exportArchive, randomUUID } from '../../../api'
 import { loadMarkdownPreview } from '../../../markdownPreview'
 import RichTextEditor from '../../../shared/components/RichTextEditor.vue'
@@ -9,6 +9,7 @@ import RichTextViewer from '../../../shared/components/RichTextViewer.vue'
 import MarkdownReader from '../../../shared/components/MarkdownReader.vue'
 import DocumentScaleControls from '../../../shared/components/DocumentScaleControls.vue'
 import SingleAiGradingPanel from '../../ai_grading/components/SingleAiGradingPanel.vue'
+import { applyFeedbackSuggestion, feedbackMatchesSuggestion, hasFeedbackContent } from '../../ai_grading/feedbackSuggestion'
 import { useSingleAiGrading } from '../../ai_grading/composables/useSingleAiGrading'
 import { useResizableDrawer, useResizableRightPane } from '../../../useHorizontalResize'
 
@@ -18,6 +19,7 @@ const props = defineProps({
   criteriaFiles: { type: Array, default: () => [] },
   criteriaText: { type: String, default: '' },
   initialIndex: { type: Number, default: 0 },
+  assignmentId: { type: String, default: '' },
   submissionVersionId: { type: String, default: '' },
   owner: { type: String, default: '' },
   assignmentTitle: { type: String, default: '' },
@@ -98,16 +100,27 @@ const toggleExpanded = () => {
   drawerAnimationTimer = setTimeout(() => { drawerAnimating.value = false }, 220)
 }
 const feedback = reactive({ status: null, revision: 0, grade: undefined, comment: '', annotations: [], published_at: null, has_draft: false })
-const aiGrading = useSingleAiGrading(() => props.mode === 'TEACHER' && props.editable && props.assignmentId && props.submissionVersionId
+const aiGrading = reactive(useSingleAiGrading(() => props.open && props.mode === 'TEACHER' && props.editable && props.assignmentId && props.submissionVersionId
   ? { assignmentId: props.assignmentId, versionId: props.submissionVersionId }
-  : null)
+  : null))
 function startAiGrading() { aiGrading.start() }
-function adoptAiGrading(draft) {
-  if (!draft) return
-  feedback.grade = draft.suggested_grade || feedback.grade
-  feedback.comment = draft.suggested_comment || feedback.comment
+const aiEnabled = computed(() => props.open && props.editable && props.mode === 'TEACHER')
+const aiDraft = computed(() => aiGrading.draft)
+const aiAdopted = computed(() => feedbackMatchesSuggestion(feedback, aiDraft.value))
+let aiAdoptConfirmation
+function adoptAiSuggestion(draft) {
+  if (!aiEnabled.value || saving.value || draft !== aiDraft.value || feedbackMatchesSuggestion(feedback, draft)) return
+  const assignmentId = props.assignmentId
+  const versionId = props.submissionVersionId
+  const apply = () => {
+    if (!aiEnabled.value || props.assignmentId !== assignmentId || props.submissionVersionId !== versionId || draft !== aiDraft.value) return
+    applyFeedbackSuggestion(feedback, draft)
+  }
+  if (hasFeedbackContent(feedback)) {
+    aiAdoptConfirmation = Modal.confirm({ title: '替换当前等级和总评？', onOk: apply })
+  } else apply()
 }
-watch(() => [props.assignmentId, props.submissionVersionId], () => aiGrading.reset())
+watch(() => [props.open, props.mode, props.assignmentId, props.submissionVersionId], () => aiGrading.reset())
 const externalWarning = ref(false)
 const teacherFeedbackEditor = reactive({ open: false, saving: false, assessment: null, targetType: '', annotationId: null, feedbackId: null, category: 'MISUNDERSTANDING', reason: '' })
 
@@ -825,7 +838,6 @@ onBeforeUnmount(() => { aiGrading.reset(); stopSpeechInput(); loadSequence += 1;
       <aside v-if="hasFeedbackPanel" v-show="!feedbackCollapsed" class="feedback-sidebar">
         <a-alert v-if="externalWarning" type="warning" show-icon message="提交或评价数据已更新" description="当前未保存内容已保留。完成本次编辑后将自动同步最新数据。"/>
         <div class="feedback-heading"><div><strong>{{owner||'教师反馈'}}</strong><span v-if="feedback.status">{{feedback.status==='PUBLISHED'?'已发布':'草稿'}}<template v-if="feedback.has_draft"> · 有待发布修改</template></span></div><a-tag v-if="feedback.grade" :color="feedback.status==='PUBLISHED'?'green':'gold'">{{feedback.grade}}</a-tag></div>
-        <SingleAiGradingPanel v-if="aiGrading.visible" :draft="aiGrading.draft" :loading="aiGrading.loading" :phase="aiGrading.phase" :error="aiGrading.error" :animate="aiGrading.animate" :adopted="false" @adopt="adoptAiGrading" @retry="startAiGrading" />
         <div v-if="mode==='PEER'" v-for="item in teacherFeedbacksFor(feedback, 'GRADE')" :key="item.id" class="teacher-feedback-note"><strong>{{item.teacher_name}} · {{feedbackCategories.find(option=>option.value===item.category)?.label}}</strong><div v-html="item.reason"></div></div>
         <template v-if="editable">
           <label class="feedback-field"><span>总评</span><RichTextEditor ref="overallEditor" v-model="feedback.comment" speech-enabled placeholder="填写整体评价"/></label>
@@ -865,11 +877,12 @@ onBeforeUnmount(() => { aiGrading.reset(); stopSpeechInput(); loadSequence += 1;
             </div>
           </article>
         </section>
+        <SingleAiGradingPanel v-if="aiGrading.visible" :draft="aiGrading.draft" :loading="aiGrading.loading" :phase="aiGrading.phase" :error="aiGrading.error" :animate="aiGrading.animate" :adopted="aiAdopted" @adopt="adoptAiSuggestion" @retry="startAiGrading" />
         <div v-if="!editable&&feedback.comment" class="published-overall"><strong>{{mode==='PEER'?'互评总评':'教师总评'}}</strong><div v-html="feedback.comment"></div></div>
         <div v-if="mode==='PEER'" v-for="item in teacherFeedbacksFor(feedback, 'COMMENT')" :key="item.id" class="teacher-feedback-note"><strong>{{item.teacher_name}} · {{feedbackCategories.find(option=>option.value===item.category)?.label}}</strong><div v-html="item.reason"></div></div>
         <div v-if="editable" class="feedback-actions">
           <div class="feedback-action-grade"><span>作业等级</span><div class="feedback-grade-options" role="group" aria-label="作业等级"><button v-for="grade in ['A','B','C','D','E']" :key="grade" type="button" :class="{selected:feedback.grade===grade}" :aria-pressed="feedback.grade===grade" @click="feedback.grade=grade">{{grade}}</button></div></div>
-          <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button><a-button v-if="mode==='TEACHER'" @click="startAiGrading">{{aiGrading.visible?'重新生成 AI 批改':'AI 批改'}}</a-button></div>
+          <div class="feedback-action-buttons"><a-button v-if="mode==='TEACHER'" :loading="saving" @click="saveFeedback(false)">保存草稿</a-button><a-button type="primary" :loading="saving" @click="saveFeedback(true)">{{mode==='PEER'?(feedback.status==='PUBLISHED'?'更新评价':'提交评价'):(feedback.status==='PUBLISHED'?'更新反馈':'发布')}}</a-button><a-button v-if="mode==='TEACHER'" @click="startAiGrading">AI批改</a-button></div>
         </div>
       </aside>
     </div>
