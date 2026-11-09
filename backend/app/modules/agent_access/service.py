@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import Request
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import and_, case, exists, func, select
 from sqlalchemy.orm import Session
 
 from app.core.context import request_ip_address
@@ -173,7 +173,7 @@ def _latest_submitted(assignment: Assignment):
 
 
 def progress(db: Session, assignment: Assignment) -> dict:
-    rows = db.execute(_latest_submitted(assignment).add_columns(_teacher_graded().label("graded"), _claimed().label("claimed"))).all()
+    rows = db.execute(_latest_submitted(assignment).add_columns(case((_teacher_graded(), 1), else_=0).label("graded"), case((_claimed(), 1), else_=0).label("claimed"))).all()
     total = len(rows)
     graded = sum(1 for row in rows if row.graded)
     claimed = sum(1 for row in rows if not row.graded and row.claimed)
