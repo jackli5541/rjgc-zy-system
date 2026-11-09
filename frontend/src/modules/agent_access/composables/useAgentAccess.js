@@ -110,11 +110,23 @@ export function useAgentAccess(ctx) {
 
   async function copyAgentText(text, tip = '已复制') {
     try {
+      if (!window.isSecureContext || !navigator.clipboard) throw new Error('insecure')
       await navigator.clipboard.writeText(text)
       message.success(tip)
+      return
     } catch (_) {
-      message.error('复制失败，请手动选择文本复制')
+      // HTTP 站点没有 clipboard API，退回到 execCommand。
     }
+    const box = document.createElement('textarea')
+    box.value = text
+    box.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
+    document.body.appendChild(box)
+    box.select()
+    let copied = false
+    try { copied = document.execCommand('copy') } catch (_) { copied = false }
+    document.body.removeChild(box)
+    if (copied) message.success(tip)
+    else message.error('复制失败，请手动选择文本复制')
   }
 
   function agentConfigExample(token = '<粘贴你的令牌>') {
