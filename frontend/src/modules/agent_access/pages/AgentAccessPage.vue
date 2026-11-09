@@ -7,7 +7,7 @@ const {
   agentTokens, agentCalls, agentTab, agentTokenModal, agentTokenForm, agentCreatedToken, agentGuideOpen, agentEndpoint,
   agentScopeOptions, agentClassOptions, loading, formatTime, openAgentTokenForm, saveAgentToken, revokeAgentToken, copyAgentText,
   agentConfigExample, agentPromptExample, session,
-  importState, loadImportAssignments, pickImportFile, previewImport, confirmImport,
+  importState, loadImportAssignments, downloadImportTemplate, pickImportFile, previewImport, confirmImport,
 } = useShellContext()
 const rowStatus = { OK: { color: 'green', text: '可导入' }, ERROR: { color: 'red', text: '有问题' }, SKIPPED: { color: 'default', text: '已跳过' } }
 const overwriteRows = computed(() => (importState.report?.grades || []).filter(item => item.status === 'OK' && item.needs_overwrite))
@@ -52,7 +52,7 @@ function classNames(ids) { return ids.length ? ids.map(id => session.classes.fin
       <div class="agent-toolbar">
         <a-select :value="importState.classId" :options="agentClassOptions" placeholder="选择教学班" style="min-width: 220px" @change="loadImportAssignments" />
         <a-select v-model:value="importState.assignmentId" :options="importState.assignments" placeholder="选择个人作业" style="min-width: 240px" :disabled="!importState.classId" />
-        <a-button :disabled="!importState.assignmentId" :href="`/api/v1/agent/excel-template?assignment_id=${importState.assignmentId}`">下载模板</a-button>
+        <a-button :disabled="!importState.assignmentId" @click="downloadImportTemplate">下载模板</a-button>
         <a-upload :before-upload="pickImportFile" :show-upload-list="false" accept=".xlsx,.xlsm"><a-button :disabled="!importState.assignmentId">{{ importState.file ? importState.file.name : '选择 Excel' }}</a-button></a-upload>
         <a-button type="primary" :loading="importState.loading" :disabled="!importState.file" @click="previewImport">上传并预览</a-button>
       </div>

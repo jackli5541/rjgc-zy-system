@@ -22,6 +22,15 @@ export function useAgentAccess(ctx) {
     if (!isCurrent()) return
     agentTokens.value = tokens.items
     agentCalls.value = calls.items
+    if (!importState.classId) {
+      const first = ctx.classId?.value || ctx.session.classes[0]?.id
+      if (first) await loadImportAssignments(first)
+    }
+  }
+
+  function downloadImportTemplate() {
+    if (!importState.assignmentId) { message.warning('请先选择作业'); return }
+    window.location.href = `/api/v1/agent/excel-template?assignment_id=${importState.assignmentId}`
   }
 
   function resetImport() {
@@ -138,6 +147,6 @@ export function useAgentAccess(ctx) {
   return {
     agentTokens, agentCalls, agentTab, agentTokenModal, agentTokenForm, agentCreatedToken, agentGuideOpen, agentEndpoint,
     agentScopeOptions, agentClassOptions, loadAgentAccessView, openAgentTokenForm, saveAgentToken, revokeAgentToken, copyAgentText,
-    agentConfigExample, agentPromptExample, importState, loadImportAssignments, pickImportFile, previewImport, confirmImport, resetImport,
+    agentConfigExample, agentPromptExample, importState, loadImportAssignments, downloadImportTemplate, pickImportFile, previewImport, confirmImport, resetImport,
   }
 }
