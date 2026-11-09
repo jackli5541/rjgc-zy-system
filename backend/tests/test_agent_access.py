@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.core.utils import now
 from app.database import SessionLocal
 from app.main import app
-from app.models import AgentToken, AiGradingDraft, SubmissionAssessment, User
+from app.models import AgentToken, AiGradingDraft, PeerAssessmentFeedback, SubmissionAssessment, User
 from app.security import token_hash
 from app.settings import settings
 
@@ -229,3 +229,92 @@ def test_unreadable_file_reports_problem_and_rate_limit(monkeypatch):
     assert rpc(limited, "ping").status_code == 200
     assert rpc(limited, "ping").status_code == 200
     assert rpc(limited, "ping").status_code == 429
+
+
+def fill_workbook(content, grade_rows, feedback_rows=(), meta_assignment=None):
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb["批改"]
+    headers = [cell.value for cell in ws[1]]
+    for row in ws.iter_rows(min_row=2):
+        values = {headers[i]: cell for i, cell in enumerate(row)}
+        spec = grade_rows.get(values["学号"].value)
+        if spec:
+            values["教师等级"].value, values["作业点评"].value = spec
+    fb = wb["互评二次点评"]
+    fb_headers = [cell.value for cell in fb[1]]
+    for row in fb.iter_rows(min_row=2):
+        values = {fb_headers[i]: cell for i, cell in enumerate(row)}
+        for category, reason, target in feedback_rows:
+            values["二次点评类别"].value, values["二次点评内容"].value, values["针对"].value = category, reason, target
+    if meta_assignment:
+        wb["元信息"]["B2"].value = meta_assignment
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def test_excel_import_preview_confirm_overwrite_and_idempotency():
+    teacher, headers = login("teacher", "123456", "teacher")
+    first, second, reviewer = numbers(3)
+    aid, _ = make_assignment(teacher, headers, [first, second, reviewer])
+    submit(aid, first)
+    submit(aid, second)
+    board = teacher.get(f"/api/v1/assignments/{aid}/submissions").json()["items"]
+    versions = {entry["student_no"]: entry["submission_version_id"] for entry in board if entry.get("student_no")}
+    with SessionLocal.begin() as db:
+        teacher_id = db.scalar(select(User.id).where(User.login_name == "teacher"))
+        db.add(SubmissionAssessment(assignment_id=UUID(aid), submission_version_id=UUID(versions[first]), evaluator_id=db.scalar(select(User.id).where(User.login_name == reviewer)),
+                                    subject_user_id=db.scalar(select(User.id).where(User.login_name == first)), kind="PEER", grade="C", comment="<p>太粗糙</p>", status="PUBLISHED"))
+        db.add(AiGradingDraft(assignment_id=UUID(aid), submission_version_id=UUID(versions[first]), teacher_id=teacher_id, assignment_version=1, status="READY", suggested_grade="B", rubric_snapshot={}))
+
+    template = teacher.get(f"/api/v1/agent/excel-template?assignment_id={aid}")
+    assert template.status_code == 200
+    # 学生重新提交，旧版本应被标为过期
+    resubmitted_second = versions[second]
+    submit(aid, second)
+
+    def upload(content):
+        return teacher.post(f"/api/v1/agent/imports/preview?assignment_id={aid}", headers=headers,
+                            files={"file": ("result.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+
+    wrong = upload(fill_workbook(template.content, {}, meta_assignment=str(uuid4())))
+    assert wrong.status_code == 422 and wrong.json()["code"] == "IMPORT_ASSIGNMENT_MISMATCH"
+
+    filled = fill_workbook(template.content, {first: ("a", "结构完整，需求清晰。"), second: ("B", "不错")}, [("理解有误", "互评者忽略了需求追踪矩阵。", "评分")])
+    preview = upload(filled)
+    assert preview.status_code == 200, preview.text
+    report = preview.json()
+    assert report["summary"]["ok"] == 1 and report["summary"]["error"] == 1 and report["summary"]["ai_draft"] == 1
+    stale = next(item for item in report["grades"] if item["version_id"] == resubmitted_second)
+    assert stale["status"] == "ERROR" and "重新提交" in stale["errors"][0]
+    assert report["summary"]["feedback_ok"] == 1
+
+    confirmed = teacher.post(f"/api/v1/agent/imports/{report['batch_id']}/confirm", headers=headers, json={"overwrite_version_ids": []})
+    assert confirmed.status_code == 200, confirmed.text
+    result = confirmed.json()
+    assert result["summary"]["imported"] == 1 and result["imported"][0]["ai_draft_superseded"] is True and result["imported"][0]["feedbacks"] == 1
+    with SessionLocal() as db:
+        item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == UUID(versions[first]), SubmissionAssessment.kind == "TEACHER"))
+        assert item.grade == "A" and item.status == "PUBLISHED" and "结构完整" in item.comment
+        assert db.scalar(select(AiGradingDraft.status).where(AiGradingDraft.submission_version_id == UUID(versions[first]))) == "SUPERSEDED"
+    assert teacher.post(f"/api/v1/agent/imports/{report['batch_id']}/confirm", headers=headers, json={}).status_code == 409
+
+    # 二次点评已发布（学生可见）
+    with SessionLocal() as db:
+        assert db.scalar(select(PeerAssessmentFeedback.status).where(PeerAssessmentFeedback.teacher_id == teacher_id, PeerAssessmentFeedback.reason.like(f"%需求追踪矩阵%")).limit(1)) == "PUBLISHED"
+
+    # 再次导入：已有教师评价，需要显式覆盖；不勾选则跳过，勾选则覆盖
+    again = upload(fill_workbook(template.content, {first: ("B", "修改后的点评")})).json()
+    assert again["summary"]["needs_overwrite"] == 1
+    skipped = teacher.post(f"/api/v1/agent/imports/{again['batch_id']}/confirm", headers=headers, json={"overwrite_version_ids": []}).json()
+    assert skipped["summary"]["skipped"] >= 1 and skipped["summary"]["imported"] == 0
+    again = upload(fill_workbook(template.content, {first: ("B", "修改后的点评")})).json()
+    overwritten = teacher.post(f"/api/v1/agent/imports/{again['batch_id']}/confirm", headers=headers, json={"overwrite_version_ids": [versions[first]]}).json()
+    assert overwritten["imported"][0]["overwritten"] is True
+    with SessionLocal() as db:
+        assert db.scalar(select(SubmissionAssessment.grade).where(SubmissionAssessment.submission_version_id == UUID(versions[first]), SubmissionAssessment.kind == "TEACHER")) == "B"
+
+    # 非 xlsx 文件、他人不能确认
+    assert teacher.post(f"/api/v1/agent/imports/preview?assignment_id={aid}", headers=headers, files={"file": ("a.txt", b"x", "text/plain")}).status_code == 422

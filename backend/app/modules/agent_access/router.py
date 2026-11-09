@@ -4,15 +4,16 @@ from __future__ import annotations
 from datetime import timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, File, Query, Response, UploadFile
 from sqlalchemy import case, func, select
 
 from app.core.audit import audit
-from app.core.deps import CsrfUser, CurrentUser, Db, teacher
+from app.core.deps import CsrfUser, CurrentUser, Db, require_writable_class, teacher, user_class
 from app.core.errors import ApiError
-from app.core.utils import now
-from app.models import AgentCallLog, AgentToken, Assignment, TeachingClass
-from app.modules.agent_access.schemas import AgentTokenIn, AgentTokenUpdateIn
+from app.core.utils import content_disposition, now
+from app.models import AgentCallLog, AgentImportBatch, AgentToken, Assignment, TeachingClass
+from app.modules.agent_access import imports
+from app.modules.agent_access.schemas import AgentTokenIn, AgentTokenUpdateIn, ImportConfirmIn
 from app.modules.agent_access.service import ALL_SCOPES, create_token
 
 router = APIRouter()
@@ -107,3 +108,52 @@ def list_calls(user: CurrentUser, db: Db, token_id: UUID | None = Query(None), l
     rows = db.execute(query).all()
     return {"items": [{"id": str(log.id), "token_name": name, "tool": log.tool, "status": log.status, "error_code": log.error_code,
                        "latency_ms": log.latency_ms, "ip_address": log.ip_address, "created_at": log.created_at} for log, name in rows]}
+
+
+# ---------------------------------------------------------------- 批改结果导入（Excel）
+
+MAX_IMPORT_BYTES = 5 * 1024 * 1024
+
+
+def import_assignment(db, user, assignment_id: UUID) -> Assignment:
+    teacher(user)
+    assignment = db.get(Assignment, assignment_id)
+    if not assignment or assignment.submitter_type != "INDIVIDUAL" or not user_class(db, user, assignment.class_id):
+        raise ApiError(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    require_writable_class(db, user, assignment.class_id)
+    return assignment
+
+
+@router.get("/api/v1/agent/excel-template")
+def download_template(user: CurrentUser, db: Db, assignment_id: UUID = Query()):
+    assignment = import_assignment(db, user, assignment_id)
+    content = imports.template_bytes(db, assignment)
+    return Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": content_disposition(f"批改结果模板-{assignment.title}.xlsx")})
+
+
+@router.post("/api/v1/agent/imports/preview")
+def preview_import(user: CsrfUser, db: Db, assignment_id: UUID = Query(), file: UploadFile = File(...)):
+    assignment = import_assignment(db, user, assignment_id)
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise ApiError(422, "IMPORT_FILE_INVALID", "请上传 .xlsx 文件")
+    content = file.file.read(MAX_IMPORT_BYTES + 1)
+    if len(content) > MAX_IMPORT_BYTES:
+        raise ApiError(413, "IMPORT_FILE_TOO_LARGE", "文件超过 5MB")
+    report = imports.create_preview(db, user, assignment, file.filename or "import.xlsx", content)
+    db.commit()
+    return report
+
+
+@router.post("/api/v1/agent/imports/{batch_id}/confirm")
+def confirm_import(batch_id: UUID, data: ImportConfirmIn, user: CsrfUser, db: Db):
+    teacher(user)
+    batch = db.scalar(select(AgentImportBatch).where(AgentImportBatch.id == batch_id, AgentImportBatch.teacher_id == user.id).with_for_update())
+    if not batch:
+        raise ApiError(404, "IMPORT_BATCH_NOT_FOUND", "导入记录不存在")
+    if batch.status != "PREVIEW":
+        raise ApiError(409, "IMPORT_ALREADY_CONFIRMED", "这份导入已经提交过，请重新上传预览")
+    assignment = import_assignment(db, user, batch.assignment_id)
+    result = imports.confirm(db, user, batch, assignment, {str(item) for item in data.overwrite_version_ids})
+    db.commit()
+    return result

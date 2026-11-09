@@ -471,6 +471,20 @@ def assessment_json(db: Session, item: SubmissionAssessment) -> dict:
     return assessment_payload(db, item, evaluator.display_name, assessment_annotations(db, item.id))
 
 
+def upsert_teacher_assessment(db: Session, user: User, assignment_id: UUID, student_id: UUID, version: SubmissionVersion, grade: str, comment: str):
+    """写入（或覆盖）教师对某个提交版本的已发布评价，返回 (评价, 是否为更新)。"""
+    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
+    updating = item is not None
+    if item:
+        item.grade, item.comment, item.status, item.published_at = grade, clean_html(comment), "PUBLISHED", now()
+        item.version += 1
+    else:
+        item = SubmissionAssessment(assignment_id=assignment_id, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=student_id, kind="TEACHER", grade=grade, comment=clean_html(comment), status="PUBLISHED", published_at=now())
+        db.add(item)
+    db.flush()
+    return item, updating
+
+
 def publish_peer_assessment_feedbacks(db: Session, submission_version_id: UUID, teacher_user: User) -> int:
     rows = db.scalars(
         select(PeerAssessmentFeedback)

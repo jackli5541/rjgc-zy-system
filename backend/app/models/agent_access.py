@@ -54,3 +54,16 @@ class AgentCallLog(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     ip_address: Mapped[str | None] = mapped_column(String(45))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now(), index=True)
+
+
+class AgentImportBatch(Base):
+    __tablename__ = "agent_import_batches"
+    id: Mapped[UUID] = uuid_pk()
+    teacher_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    assignment_id: Mapped[UUID] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True)
+    file_name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(16), default="PREVIEW")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, server_default=func.now())
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

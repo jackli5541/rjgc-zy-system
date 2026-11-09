@@ -14,7 +14,7 @@ from app.core.files import BASE64_IMAGE_PATTERN
 from app.core.html import clean_html
 from app.core.utils import now
 from app.modules.assignments.schemas import SubmissionAssessmentIn, SubmissionFeedbackIn
-from app.modules.assignments.service import annotation_json, assert_submission_update_allowed, assessment_json, assessment_payload, build_submission_grade_result, check_source_images, displayed_submission_grade_result, document_is_criteria, feedback_context, feedback_json, file_json, latest_personal_submission, markdown_asset_ids, missing_submission_grade_result, own_submission, publish_peer_assessment_feedbacks, remove_file_asset_links, save_submission_feedback, submission_grade_result, sync_document_assets
+from app.modules.assignments.service import annotation_json, assert_submission_update_allowed, assessment_json, assessment_payload, build_submission_grade_result, check_source_images, displayed_submission_grade_result, document_is_criteria, feedback_context, feedback_json, file_json, latest_personal_submission, markdown_asset_ids, missing_submission_grade_result, own_submission, publish_peer_assessment_feedbacks, remove_file_asset_links, save_submission_feedback, upsert_teacher_assessment, submission_grade_result, sync_document_assets
 
 router = APIRouter()
 
@@ -136,15 +136,8 @@ def save_teacher_submission_assessment(aid: UUID, student_id: UUID, data: Submis
     submitted = latest_personal_submission(db, aid, student_id)
     if not submitted: raise ApiError(409, "SUBMISSION_REQUIRED", "该学生尚未提交作业")
     _, version = submitted
-    item = db.scalar(select(SubmissionAssessment).where(SubmissionAssessment.submission_version_id == version.id, SubmissionAssessment.evaluator_id == user.id, SubmissionAssessment.kind == "TEACHER"))
-    updating = item is not None
-    if item:
-        item.grade, item.comment, item.status, item.published_at = data.grade, clean_html(data.comment), "PUBLISHED", now()
-        item.version += 1
-    else:
-        item = SubmissionAssessment(assignment_id=aid, submission_version_id=version.id, evaluator_id=user.id, subject_user_id=student_id, kind="TEACHER", grade=data.grade, comment=clean_html(data.comment), status="PUBLISHED", published_at=now())
-        db.add(item)
-    db.flush(); publish_peer_assessment_feedbacks(db, version.id, user); audit(db, user, "TEACHER_ASSESSMENT_UPDATED" if updating else "TEACHER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(student_id)}); db.commit()
+    item, updating = upsert_teacher_assessment(db, user, assignment.id, student_id, version, data.grade, data.comment)
+    publish_peer_assessment_feedbacks(db, version.id, user); audit(db, user, "TEACHER_ASSESSMENT_UPDATED" if updating else "TEACHER_ASSESSMENT_SUBMITTED", "submission_assessment", str(item.id), {"grade": data.grade, "subject_user_id": str(student_id)}); db.commit()
     return {**assessment_json(db, item), "updated": updating, "result": submission_grade_result(db, version)}
 
 

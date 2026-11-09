@@ -25,3 +25,7 @@ class AgentTokenUpdateIn(BaseModel):
     expose_real_name: bool = True
     # 传入则从现在起重新计算有效期（续期）
     expires_days: int | None = Field(None, ge=1, le=365)
+
+
+class ImportConfirmIn(BaseModel):
+    overwrite_version_ids: list[UUID] = Field(default_factory=list, max_length=2000)

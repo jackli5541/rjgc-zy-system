@@ -13,11 +13,12 @@ from app.models.capstone import CAPSTONE_STAGES, CapstoneAsset, CapstoneConfig, 
 from app.models.attendance import AttendanceRecord, AttendanceSession
 from app.models.ai_teacher import AiChatMessage, AiKnowledgeChunk, AiKnowledgeNode, AiSubjectKnowledge
 from app.models.ai_grading import AiGradingDraft, AiGradingJob
-from app.models.agent_access import AgentCallLog, AgentClaim, AgentToken
+from app.models.agent_access import AgentCallLog, AgentClaim, AgentImportBatch, AgentToken
 
 __all__ = [
     "AgentCallLog",
     "AgentClaim",
+    "AgentImportBatch",
     "AgentToken",
     "AiChatMessage",
     "AiKnowledgeChunk",
