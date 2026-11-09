@@ -7,12 +7,12 @@ const {
   agentTokens, agentCalls, agentTab, agentTokenModal, agentTokenForm, agentCreatedToken, agentGuideOpen, agentEndpoint,
   agentScopeOptions, agentClassOptions, loading, formatTime, openAgentTokenForm, saveAgentToken, revokeAgentToken, copyAgentText,
   agentConfigExample, agentPromptExample, session,
-  importState, loadImportAssignments, downloadImportTemplate, pickImportFile, previewImport, confirmImport,
+  agentImport, loadAgentImportAssignments, downloadAgentImportTemplate, pickAgentImportFile, previewAgentImport, confirmAgentImport,
 } = useShellContext()
 const rowStatus = { OK: { color: 'green', text: '可导入' }, ERROR: { color: 'red', text: '有问题' }, SKIPPED: { color: 'default', text: '已跳过' } }
-const overwriteRows = computed(() => (importState.report?.grades || []).filter(item => item.status === 'OK' && item.needs_overwrite))
-const feedbackProblems = computed(() => (importState.report?.feedbacks || []).filter(item => item.status === 'ERROR'))
-const importable = computed(() => (importState.report?.summary.ok || 0) > 0)
+const overwriteRows = computed(() => (agentImport.report?.grades || []).filter(item => item.status === 'OK' && item.needs_overwrite))
+const feedbackProblems = computed(() => (agentImport.report?.feedbacks || []).filter(item => item.status === 'ERROR'))
+const importable = computed(() => (agentImport.report?.summary.ok || 0) > 0)
 const statusMeta = { ACTIVE: { color: 'green', text: '有效' }, EXPIRED: { color: 'orange', text: '已过期' }, REVOKED: { color: 'default', text: '已吊销' } }
 function classNames(ids) { return ids.length ? ids.map(id => session.classes.find(item => item.id === id)?.name || '已删除班级').join('、') : '我的全部教学班' }
 </script>
@@ -50,22 +50,22 @@ function classNames(ids) { return ids.length ? ids.map(id => session.classes.fin
     <a-tab-pane key="import" tab="导入批改结果">
       <a-alert type="info" show-icon class="agent-gap-bottom" message="先下载模板交给 Agent 填写，审核修改后在这里上传。预览确认前不会改动任何成绩。" />
       <div class="agent-toolbar">
-        <a-select :value="importState.classId" :options="agentClassOptions" placeholder="选择教学班" style="min-width: 220px" @change="loadImportAssignments" />
-        <a-select v-model:value="importState.assignmentId" :options="importState.assignments" placeholder="选择个人作业" style="min-width: 240px" :disabled="!importState.classId" />
-        <a-button :disabled="!importState.assignmentId" @click="downloadImportTemplate">下载模板</a-button>
-        <a-upload :before-upload="pickImportFile" :show-upload-list="false" accept=".xlsx,.xlsm"><a-button :disabled="!importState.assignmentId">{{ importState.file ? importState.file.name : '选择 Excel' }}</a-button></a-upload>
-        <a-button type="primary" :loading="importState.loading" :disabled="!importState.file" @click="previewImport">上传并预览</a-button>
+        <a-select :value="agentImport.classId" :options="agentClassOptions" placeholder="选择教学班" style="min-width: 220px" @change="loadAgentImportAssignments" />
+        <a-select v-model:value="agentImport.assignmentId" :options="agentImport.assignments" placeholder="选择个人作业" :loading="agentImport.loadingAssignments" :not-found-content="agentImport.classId ? '该班级暂无已发布的个人作业' : '请先选择教学班'" style="min-width: 240px" />
+        <a-button :disabled="!agentImport.assignmentId" @click="downloadAgentImportTemplate">下载模板</a-button>
+        <a-upload :before-upload="pickAgentImportFile" :show-upload-list="false" accept=".xlsx,.xlsm"><a-button :disabled="!agentImport.assignmentId">{{ agentImport.file ? agentImport.file.name : '选择 Excel' }}</a-button></a-upload>
+        <a-button type="primary" :loading="agentImport.loading" :disabled="!agentImport.file" @click="previewAgentImport">上传并预览</a-button>
       </div>
-      <template v-if="importState.report">
+      <template v-if="agentImport.report">
         <a-space wrap class="agent-gap-bottom">
-          <a-tag color="green">可导入 {{ importState.report.summary.ok }}</a-tag>
-          <a-tag color="red">有问题 {{ importState.report.summary.error }}</a-tag>
-          <a-tag>已跳过 {{ importState.report.summary.skipped }}</a-tag>
-          <a-tag color="orange">将覆盖网页 AI 草稿 {{ importState.report.summary.ai_draft }}</a-tag>
-          <a-tag color="orange">已有教师评价 {{ importState.report.summary.needs_overwrite }}</a-tag>
-          <a-tag>二次点评 {{ importState.report.summary.feedback_ok }}</a-tag>
+          <a-tag color="green">可导入 {{ agentImport.report.summary.ok }}</a-tag>
+          <a-tag color="red">有问题 {{ agentImport.report.summary.error }}</a-tag>
+          <a-tag>已跳过 {{ agentImport.report.summary.skipped }}</a-tag>
+          <a-tag color="orange">将覆盖网页 AI 草稿 {{ agentImport.report.summary.ai_draft }}</a-tag>
+          <a-tag color="orange">已有教师评价 {{ agentImport.report.summary.needs_overwrite }}</a-tag>
+          <a-tag>二次点评 {{ agentImport.report.summary.feedback_ok }}</a-tag>
         </a-space>
-        <a-table :data-source="importState.report.grades" :pagination="{ pageSize: 20, showSizeChanger: false }" :scroll="{ x: 900 }" row-key="row" size="small">
+        <a-table :data-source="agentImport.report.grades" :pagination="{ pageSize: 20, showSizeChanger: false }" :scroll="{ x: 900 }" row-key="row" size="small">
           <a-table-column title="行" data-index="row" :width="60" />
           <a-table-column title="学号" data-index="student_no" :width="120" />
           <a-table-column title="姓名" data-index="name" :width="100" />
@@ -84,17 +84,17 @@ function classNames(ids) { return ids.length ? ids.map(id => session.classes.fin
         </div>
         <div v-if="overwriteRows.length" class="agent-gap">
           <strong>以下学生已有教师评价，勾选后才会覆盖：</strong>
-          <a-checkbox-group v-model:value="importState.overwrite" class="agent-overwrite">
+          <a-checkbox-group v-model:value="agentImport.overwrite" class="agent-overwrite">
             <a-checkbox v-for="item in overwriteRows" :key="item.version_id" :value="item.version_id">{{ item.student_no }} {{ item.name }}（原 {{ item.existing_grade }} → {{ item.grade }}）</a-checkbox>
           </a-checkbox-group>
         </div>
-        <a-popconfirm v-if="importable" title="确认导入？教师评分和二次点评将立即对学生可见。" ok-text="确认导入" cancel-text="取消" @confirm="confirmImport">
-          <a-button type="primary" class="agent-gap" :loading="importState.loading">确认导入 {{ importState.report.summary.ok }} 人</a-button>
+        <a-popconfirm v-if="importable" title="确认导入？教师评分和二次点评将立即对学生可见。" ok-text="确认导入" cancel-text="取消" @confirm="confirmAgentImport">
+          <a-button type="primary" class="agent-gap" :loading="agentImport.loading">确认导入 {{ agentImport.report.summary.ok }} 人</a-button>
         </a-popconfirm>
       </template>
-      <template v-if="importState.result">
-        <a-result status="success" :title="`已导入 ${importState.result.summary.imported} 人`" :sub-title="`失败 ${importState.result.summary.failed}，跳过 ${importState.result.summary.skipped}`" />
-        <div v-for="item in [...importState.result.failed, ...importState.result.skipped]" :key="`${item.row}-${item.reason}`" class="agent-hint">第 {{ item.row }} 行 {{ item.student_no }} {{ item.name }}：{{ item.reason }}</div>
+      <template v-if="agentImport.result">
+        <a-result status="success" :title="`已导入 ${agentImport.result.summary.imported} 人`" :sub-title="`失败 ${agentImport.result.summary.failed}，跳过 ${agentImport.result.summary.skipped}`" />
+        <div v-for="item in [...agentImport.result.failed, ...agentImport.result.skipped]" :key="`${item.row}-${item.reason}`" class="agent-hint">第 {{ item.row }} 行 {{ item.student_no }} {{ item.name }}：{{ item.reason }}</div>
       </template>
     </a-tab-pane>
     <a-tab-pane key="calls" tab="调用记录">

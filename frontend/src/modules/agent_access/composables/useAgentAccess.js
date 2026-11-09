@@ -12,7 +12,7 @@ export function useAgentAccess(ctx) {
   const agentTokenForm = reactive({ name: '', scopes: ['assignment:read', 'submission:read'], class_ids: [], expose_real_name: true, expires_days: 90, renew: false })
   const agentCreatedToken = ref('')
   const agentGuideOpen = ref(false)
-  const importState = reactive({ classId: undefined, assignmentId: undefined, assignments: [], file: null, loading: false, report: null, overwrite: [], result: null })
+  const agentImport = reactive({ classId: undefined, assignmentId: undefined, assignments: [], loadingAssignments: false, file: null, loading: false, report: null, overwrite: [], result: null })
   const agentEndpoint = computed(() => `${window.location.origin}/mcp`)
   const agentScopeOptions = Object.entries(AGENT_SCOPE_LABELS).map(([value, label]) => ({ value, label }))
   const agentClassOptions = computed(() => ctx.session.classes.map(item => ({ value: item.id, label: `${item.semester} · ${item.name}` })))
@@ -22,70 +22,77 @@ export function useAgentAccess(ctx) {
     if (!isCurrent()) return
     agentTokens.value = tokens.items
     agentCalls.value = calls.items
-    if (!importState.classId) {
+    if (!agentImport.classId) {
       const first = ctx.classId?.value || ctx.session.classes[0]?.id
-      if (first) await loadImportAssignments(first)
+      if (first) await loadAgentImportAssignments(first)
     }
   }
 
-  function downloadImportTemplate() {
-    if (!importState.assignmentId) { message.warning('请先选择作业'); return }
-    window.location.href = `/api/v1/agent/excel-template?assignment_id=${importState.assignmentId}`
+  function downloadAgentImportTemplate() {
+    if (!agentImport.assignmentId) { message.warning('请先选择作业'); return }
+    window.location.href = `/api/v1/agent/excel-template?assignment_id=${agentImport.assignmentId}`
   }
 
-  function resetImport() {
-    importState.file = null
-    importState.report = null
-    importState.overwrite = []
-    importState.result = null
+  function resetAgentImport() {
+    agentImport.file = null
+    agentImport.report = null
+    agentImport.overwrite = []
+    agentImport.result = null
   }
 
-  async function loadImportAssignments(classId) {
-    importState.classId = classId
-    importState.assignmentId = undefined
-    importState.assignments = []
-    resetImport()
+  async function loadAgentImportAssignments(classId) {
+    agentImport.classId = classId
+    agentImport.assignmentId = undefined
+    agentImport.assignments = []
+    resetAgentImport()
     if (!classId) return
-    const data = await api(`/assignments?class_id=${classId}`)
-    importState.assignments = data.items.filter(item => item.submitter_type === 'INDIVIDUAL' && item.status !== 'DRAFT').map(item => ({ value: item.id, label: item.title }))
+    agentImport.loadingAssignments = true
+    try {
+      const data = await api(`/assignments?class_id=${classId}`)
+      agentImport.assignments = data.items.filter(item => item.submitter_type === 'INDIVIDUAL' && item.status !== 'DRAFT').map(item => ({ value: item.id, label: item.title }))
+    } catch (error) {
+      message.error(error.message || '加载作业列表失败')
+    } finally {
+      agentImport.loadingAssignments = false
+    }
   }
 
-  function pickImportFile(file) {
-    importState.file = file
-    importState.report = null
-    importState.result = null
+  function pickAgentImportFile(file) {
+    agentImport.file = file
+    agentImport.report = null
+    agentImport.result = null
     return false
   }
 
-  async function previewImport() {
-    if (!importState.assignmentId || !importState.file) { message.warning('请先选择作业并上传 Excel'); return }
-    importState.loading = true
+  async function previewAgentImport() {
+    if (!agentImport.assignmentId || !agentImport.file) { message.warning('请先选择作业并上传 Excel'); return }
+    agentImport.loading = true
     try {
       const body = new FormData()
-      body.append('file', importState.file)
-      importState.report = await api(`/agent/imports/preview?assignment_id=${importState.assignmentId}`, { method: 'POST', body })
-      importState.overwrite = []
-      importState.result = null
+      body.append('file', agentImport.file)
+      agentImport.report = await api(`/agent/imports/preview?assignment_id=${agentImport.assignmentId}`, { method: 'POST', body })
+      agentImport.overwrite = []
+      agentImport.result = null
     } catch (error) {
       message.error(error.message || '预览失败')
     } finally {
-      importState.loading = false
+      agentImport.loading = false
     }
   }
 
-  async function confirmImport() {
-    const report = importState.report
+  async function confirmAgentImport() {
+    const report = agentImport.report
     if (!report) return
-    importState.loading = true
+    agentImport.loading = true
     try {
-      importState.result = await api(`/agent/imports/${report.batch_id}/confirm`, { method: 'POST', body: JSON.stringify({ overwrite_version_ids: importState.overwrite }) })
-      importState.report = null
-      importState.file = null
+      agentImport.result = await api(`/agent/imports/${report.batch_id}/confirm`, { method: 'POST', body: JSON.stringify({ overwrite_version_ids: agentImport.overwrite }) })
+      agentImport.report = null
+      agentImport.file = null
       message.success('导入完成')
     } catch (error) {
       message.error(error.message || '导入失败')
     } finally {
-      importState.loading = false
+      agentImport.loading = false
     }
   }
 
@@ -147,6 +154,6 @@ export function useAgentAccess(ctx) {
   return {
     agentTokens, agentCalls, agentTab, agentTokenModal, agentTokenForm, agentCreatedToken, agentGuideOpen, agentEndpoint,
     agentScopeOptions, agentClassOptions, loadAgentAccessView, openAgentTokenForm, saveAgentToken, revokeAgentToken, copyAgentText,
-    agentConfigExample, agentPromptExample, importState, loadImportAssignments, downloadImportTemplate, pickImportFile, previewImport, confirmImport, resetImport,
+    agentConfigExample, agentPromptExample, agentImport, loadAgentImportAssignments, downloadAgentImportTemplate, pickAgentImportFile, previewAgentImport, confirmAgentImport, resetAgentImport,
   }
 }
