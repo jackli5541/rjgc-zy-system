@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.core.utils import now
 from app.database import SessionLocal
 from app.main import app
-from app.models import AgentToken, AiGradingDraft, PeerAssessmentFeedback, SubmissionAssessment, User
+from app.models import AgentToken, AiGradingDraft, Notification, PeerAssessmentFeedback, SubmissionAssessment, User
 from app.security import token_hash
 from app.settings import settings
 
@@ -301,6 +301,16 @@ def test_excel_import_preview_confirm_overwrite_and_idempotency():
         assert db.scalar(select(AiGradingDraft.status).where(AiGradingDraft.submission_version_id == UUID(versions[first]))) == "SUPERSEDED"
     assert teacher.post(f"/api/v1/agent/imports/{report['batch_id']}/confirm", headers=headers, json={}).status_code == 409
 
+    # 导入评语后学生收到站内信：只提示已评阅，不带等级与评语；未导入的学生没有
+    def teacher_notices(student_no):
+        with SessionLocal() as db:
+            uid = db.scalar(select(User.id).where(User.login_name == student_no))
+            return db.scalars(select(Notification).where(Notification.user_id == uid, Notification.kind == "TEACHER_ASSESSMENT")).all()
+    notices = teacher_notices(first)
+    assert len(notices) == 1 and notices[0].title.startswith("教师已评阅：") and notices[0].object_type == "assignment" and notices[0].object_id == aid
+    assert not notices[0].content and "A" not in notices[0].title.split("》")[-1] and "结构完整" not in notices[0].title
+    assert teacher_notices(second) == []
+
     # 二次点评已发布（学生可见）
     with SessionLocal() as db:
         assert db.scalar(select(PeerAssessmentFeedback.status).where(PeerAssessmentFeedback.teacher_id == teacher_id, PeerAssessmentFeedback.reason.like(f"%需求追踪矩阵%")).limit(1)) == "PUBLISHED"
@@ -313,6 +323,7 @@ def test_excel_import_preview_confirm_overwrite_and_idempotency():
     again = upload(fill_workbook(template.content, {first: ("B", "修改后的点评")})).json()
     overwritten = teacher.post(f"/api/v1/agent/imports/{again['batch_id']}/confirm", headers=headers, json={"overwrite_version_ids": [versions[first]]}).json()
     assert overwritten["imported"][0]["overwritten"] is True
+    assert [n.title.startswith("教师更新了对") for n in sorted(teacher_notices(first), key=lambda n: n.created_at)] == [False, True]
     with SessionLocal() as db:
         assert db.scalar(select(SubmissionAssessment.grade).where(SubmissionAssessment.submission_version_id == UUID(versions[first]), SubmissionAssessment.kind == "TEACHER")) == "B"
 

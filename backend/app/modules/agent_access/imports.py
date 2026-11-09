@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import and_, delete, select
 from sqlalchemy.orm import Session
 
-from app.core.audit import audit
+from app.core.audit import audit, notify
 from app.core.errors import ApiError
 from app.core.html import clean_html, html_to_text
 from app.core.utils import now
@@ -211,6 +211,10 @@ def confirm(db: Session, teacher: User, batch: AgentImportBatch, assignment: Ass
                     db.add(PeerAssessmentFeedback(assessment_id=UUID(fb["assessment_id"]), target_type=fb["target_type"], category=fb["category"], reason=reason, teacher_id=teacher.id))
                     created += 1
                 db.flush()
+                # 站内信只提示已评阅，不带等级与评语（学生点开作业详情查看）
+                notify(db, student.id, "TEACHER_ASSESSMENT",
+                       f"{'教师更新了对' if updating else '教师已评阅：'}《{assignment.title}》{'的评阅' if updating else ''}",
+                       "assignment", str(assignment.id))
                 publish_peer_assessment_feedbacks(db, version.id, teacher)
                 audit(db, teacher, "TEACHER_ASSESSMENT_UPDATED" if updating else "TEACHER_ASSESSMENT_SUBMITTED", "submission_assessment", str(assessment.id),
                       {"grade": item["grade"], "subject_user_id": str(student.id), "source": "agent_import"})
