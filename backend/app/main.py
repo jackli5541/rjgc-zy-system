@@ -16,6 +16,8 @@ from app.core.errors import ApiError
 from app.realtime import hub as realtime_hub
 from app.settings import settings
 
+from app.modules.agent_access import mcp as agent_mcp
+from app.modules.agent_access import router as agent_access_router
 from app.modules.assignments import files as assignment_files
 from app.modules.assignments import reviews as assignment_reviews
 from app.modules.assignments import router as assignments_router
@@ -96,6 +98,8 @@ app.include_router(grades_router.router)
 app.include_router(attendance_router.router)
 app.include_router(grade_exports.router)
 app.include_router(capstone_router.router)
+app.include_router(agent_access_router.router)
+app.include_router(agent_mcp.router)
 
 
 @app.api_route("/{full_path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], include_in_schema=False)
@@ -118,6 +122,6 @@ def serve_frontend(request: Request, full_path: str):
         return FileResponse(requested, headers={"Cache-Control": cache_control})
 
     first_segment = full_path.split("/", 1)[0]
-    if first_segment in {"api", "health", "assets"} or Path(full_path).suffix:
+    if first_segment in {"api", "health", "assets", "mcp"} or Path(full_path).suffix:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     return FileResponse(index, headers={"Cache-Control": "no-cache"})

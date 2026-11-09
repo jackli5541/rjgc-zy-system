@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     ai_grading_max_output_tokens: int = 8192
     ai_teacher_max_concurrent_per_worker: int = 4
     ai_teacher_max_quote_chars: int = 1200
+    agent_access_enabled: bool = True
+    agent_require_https: bool = True
+    agent_rate_limit_per_minute: int = 60
+    agent_claim_lease_minutes: int = 30
+    agent_read_page_chars: int = 12000
     # Load the repository-level environment regardless of whether the API is
     # started from the repository root or from backend/.
     model_config = SettingsConfigDict(

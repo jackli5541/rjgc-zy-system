@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { ApartmentOutlined, BookOutlined, CalendarOutlined, ControlOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
+import { ApartmentOutlined, ApiOutlined, BookOutlined, CalendarOutlined, ControlOutlined, DashboardOutlined, FileTextOutlined, FolderOpenOutlined, FormOutlined, SettingOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons-vue'
 import { api, apiClientId } from '../api'
 import ShellHeader from '../shared/components/ShellHeader.vue'
 import AssignmentsPage from '../modules/assignments/pages/AssignmentsPage.vue'
@@ -18,6 +18,7 @@ import RoleMenuPage from '../modules/system/pages/RoleMenuPage.vue'
 import SystemPage from '../modules/system/pages/SystemPage.vue'
 import TeachingMaterialsPage from '../modules/materials/pages/TeachingMaterialsPage.vue'
 import AttendancePage from '../modules/attendance/pages/AttendancePage.vue'
+import AgentAccessPage from '../modules/agent_access/pages/AgentAccessPage.vue'
 const StudentAttendanceModal = defineAsyncComponent(() => import('../modules/attendance/components/StudentAttendanceModal.vue'))
 import TeamsPage from '../modules/members/pages/TeamsPage.vue'
 const AssignmentDetailDrawer = defineAsyncComponent(() => import('../modules/assignments/components/AssignmentDetailDrawer.vue'))
@@ -40,6 +41,7 @@ import { useReviews } from '../modules/assignments/composables/useReviews'
 import { useGrades } from '../modules/grades/composables/useGrades'
 import { useAttendance } from '../modules/attendance/composables/useAttendance'
 import { useAudits } from '../modules/system/composables/useAudits'
+import { useAgentAccess } from '../modules/agent_access/composables/useAgentAccess'
 import { useNotifications } from '../modules/system/composables/useNotifications'
 import { useSessionStore } from '../stores/session'
 import { shellContextKey } from '../shellContext'
@@ -78,7 +80,7 @@ const menu = computed(() => {
   const visible = items => items.filter(item => session.isMenuEnabled(item[0]))
   if (role.value === 'TEACHER') return [...visible([
     ['overview', DashboardOutlined, '总览'], ['classes', BookOutlined, '教学班'], ['teams', TeamOutlined, '小组与选题'],
-    ['assignments', FileTextOutlined, '作业管理'], ['capstone', ApartmentOutlined, '大作业管理'], ['materials', FolderOpenOutlined, '教学资料'], ['attendance', CalendarOutlined, '考勤管理'], ['grades', TrophyOutlined, '成绩与导出'], ['system', SettingOutlined, '系统与审计']
+    ['assignments', FileTextOutlined, '作业管理'], ['capstone', ApartmentOutlined, '大作业管理'], ['materials', FolderOpenOutlined, '教学资料'], ['attendance', CalendarOutlined, '考勤管理'], ['grades', TrophyOutlined, '成绩与导出'], ['agent-access', ApiOutlined, 'Agent 接入'], ['system', SettingOutlined, '系统与审计']
   ]), ['menu-permissions', ControlOutlined, '角色菜单']]
   if (session.teamGate) return [['teams', TeamOutlined, '加入小组']]
   return visible([['overview', DashboardOutlined, '总览'], ['teams', TeamOutlined, '我的小组'], ['assignments', FileTextOutlined, '我的作业'], ['reviews', FormOutlined, '作品互评'], ['capstone', ApartmentOutlined, '大作业'], ['grades', TrophyOutlined, '成绩与反馈'], ['materials', FolderOpenOutlined, '教学资料']])
@@ -96,6 +98,7 @@ Object.assign(
   useLabels(ctx),
   useNotifications(ctx),
   useAudits(ctx),
+  useAgentAccess(ctx),
   useClasses(ctx),
   useRoster(ctx),
   useMembers(ctx),
@@ -127,6 +130,7 @@ const viewLoaders = {
   grades: (...args) => ctx.loadGradesView(...args),
   attendance: (...args) => ctx.loadAttendanceView(...args),
   system: (...args) => ctx.loadAuditsView(...args),
+  'agent-access': (...args) => ctx.loadAgentAccessView(...args),
   'grade-detail': async () => {
     if (role.value !== 'TEACHER') { await router.replace('/grades'); return }
     await router.replace({ name: 'assignment-detail', params: { id: detailId.value }, query: { tab: 'grades' } })
@@ -190,6 +194,7 @@ function currentViewUses(scopes) {
     grades: ['grades'],
     attendance: ['attendance'],
     materials: [],
+    'agent-access': [],
     system: ['audit']
   }
   return (needed[view.value] || []).some(scope => scopes.includes(scope))
@@ -335,6 +340,7 @@ const { selectedAssignment, selectedCampaign, selectedSubmission, fileReviewDraw
       <GradesPage v-else-if="view==='grades'" />
       <AttendancePage v-else-if="view==='attendance'&&role==='TEACHER'" />
       <TeachingMaterialsPage v-else-if="view==='materials'" />
+      <AgentAccessPage v-else-if="view==='agent-access'&&role==='TEACHER'" />
       <SystemPage v-else-if="view==='system'&&role==='TEACHER'" />
       <RoleMenuPage v-else-if="view==='menu-permissions'&&role==='TEACHER'" />
       <section v-if="(view==='review-detail'&&selectedCampaign?.assignment_id!==detailId)||(view==='assignment-detail'&&role==='STUDENT'&&selectedAssignment?.id!==detailId)" :aria-busy="loading">

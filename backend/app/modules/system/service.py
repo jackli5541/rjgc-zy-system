@@ -20,6 +20,7 @@ MENU_CATALOG = [
     {"key": "materials", "labels": {"TEACHER": "教学资料", "STUDENT": "教学资料"}, "roles": ["TEACHER", "STUDENT"]},
     {"key": "attendance", "labels": {"TEACHER": "考勤管理"}, "roles": ["TEACHER"]},
     {"key": "grades", "labels": {"TEACHER": "成绩与导出", "STUDENT": "成绩与反馈"}, "roles": ["TEACHER", "STUDENT"]},
+    {"key": "agent-access", "labels": {"TEACHER": "Agent 接入"}, "roles": ["TEACHER"]},
     {"key": "system", "labels": {"TEACHER": "系统与审计"}, "roles": ["TEACHER"]},
 ]
 
