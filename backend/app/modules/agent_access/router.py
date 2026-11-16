@@ -128,8 +128,10 @@ def import_assignment(db, user, assignment_id: UUID) -> Assignment:
 def download_template(user: CurrentUser, db: Db, assignment_id: UUID = Query()):
     assignment = import_assignment(db, user, assignment_id)
     content = imports.template_bytes(db, assignment)
+    klass = db.get(TeachingClass, assignment.class_id)
+    class_part = f"-{klass.name}" if klass and klass.name else ""
     return Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    headers={"Content-Disposition": content_disposition(f"批改结果模板-{assignment.title}.xlsx")})
+                    headers={"Content-Disposition": content_disposition(f"批改结果模板{class_part}-{assignment.title}.xlsx")})
 
 
 @router.post("/api/v1/agent/imports/preview")

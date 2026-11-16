@@ -12,6 +12,9 @@ const {
 const rowStatus = { OK: { color: 'green', text: '可导入' }, ERROR: { color: 'red', text: '有问题' }, SKIPPED: { color: 'default', text: '已跳过' } }
 const overwriteRows = computed(() => (agentImport.report?.grades || []).filter(item => item.status === 'OK' && item.needs_overwrite))
 const feedbackProblems = computed(() => (agentImport.report?.feedbacks || []).filter(item => item.status === 'ERROR'))
+const allOverwriteSelected = computed(() => overwriteRows.value.length > 0 && overwriteRows.value.every(item => agentImport.overwrite.includes(item.version_id)))
+const someOverwriteSelected = computed(() => agentImport.overwrite.length > 0 && !allOverwriteSelected.value)
+function toggleAllOverwrite(event) { agentImport.overwrite = event.target.checked ? overwriteRows.value.map(item => item.version_id) : [] }
 const importable = computed(() => (agentImport.report?.summary.ok || 0) > 0)
 const statusMeta = { ACTIVE: { color: 'green', text: '有效' }, EXPIRED: { color: 'orange', text: '已过期' }, REVOKED: { color: 'default', text: '已吊销' } }
 function classNames(ids) { return ids.length ? ids.map(id => session.classes.find(item => item.id === id)?.name || '已删除班级').join('、') : '我的全部教学班' }
@@ -84,6 +87,7 @@ function classNames(ids) { return ids.length ? ids.map(id => session.classes.fin
         </div>
         <div v-if="overwriteRows.length" class="agent-gap">
           <strong>以下学生已有教师评价，勾选后才会覆盖：</strong>
+          <a-checkbox :checked="allOverwriteSelected" :indeterminate="someOverwriteSelected" @change="toggleAllOverwrite">全选（{{ overwriteRows.length }} 人）</a-checkbox>
           <a-checkbox-group v-model:value="agentImport.overwrite" class="agent-overwrite">
             <a-checkbox v-for="item in overwriteRows" :key="item.version_id" :value="item.version_id">{{ item.student_no }} {{ item.name }}（原 {{ item.existing_grade }} → {{ item.grade }}）</a-checkbox>
           </a-checkbox-group>
