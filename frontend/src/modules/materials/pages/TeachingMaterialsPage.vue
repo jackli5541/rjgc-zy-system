@@ -1,7 +1,7 @@
 <script setup>
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message, Modal, Input } from 'ant-design-vue'
-import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, MenuFoldOutlined, MenuUnfoldOutlined, UnorderedListOutlined, UploadOutlined, VideoCameraOutlined } from '@ant-design/icons-vue'
+import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, FileMarkdownOutlined, FolderOpenOutlined, FolderOutlined, FullscreenExitOutlined, FullscreenOutlined, MenuFoldOutlined, MenuUnfoldOutlined, UnorderedListOutlined, UploadOutlined, VideoCameraOutlined } from '@ant-design/icons-vue'
 import { api } from '../../../api'
 import { loadMarkdownPreview } from '../../../markdownPreview'
 import MaterialResizeHandle from '../../../shared/components/MaterialResizeHandle.vue'
@@ -25,6 +25,10 @@ const content = ref('')
 const htmlDocument = ref('')
 const htmlViewport = ref(null)
 const htmlScale = ref(1)
+const htmlZoom = ref(100)
+const htmlCanvasW = computed(() => HTML_CANVAS_WIDTH * 100 / htmlZoom.value)
+const htmlCanvasH = computed(() => HTML_CANVAS_HEIGHT * 100 / htmlZoom.value)
+function stepHtmlZoom(d) { htmlZoom.value = Math.min(400, Math.max(100, htmlZoom.value + d)) }
 const HTML_CANVAS_WIDTH = 1920
 const HTML_CANVAS_HEIGHT = 1080
 const HTML_PREVIEW_GUTTER = 32
@@ -184,8 +188,9 @@ function resizeHtmlStage() {
   if (!htmlViewport.value) return
   const availableWidth = Math.max(1, htmlViewport.value.clientWidth - HTML_PREVIEW_GUTTER)
   const availableHeight = Math.max(1, htmlViewport.value.clientHeight - HTML_PREVIEW_GUTTER)
-  htmlScale.value = Math.min(1, availableWidth / HTML_CANVAS_WIDTH, availableHeight / HTML_CANVAS_HEIGHT)
+  htmlScale.value = Math.min(htmlZoom.value / 100, availableWidth / htmlCanvasW.value, availableHeight / htmlCanvasH.value)
 }
+watch(htmlZoom, () => nextTick(resizeHtmlStage))
 function observeHtmlStage() {
   htmlResizeObserver?.disconnect()
   if (!htmlViewport.value) return
@@ -197,8 +202,17 @@ watch([() => selected.value?.media_type, contentLoading], async ([type, loading]
   htmlResizeObserver?.disconnect()
   if (type === 'HTML' && !loading) { await nextTick(); observeHtmlStage() }
 })
-onMounted(loadTree)
-onBeforeUnmount(() => htmlResizeObserver?.disconnect())
+const previewPane = ref(null)
+const isFullscreen = ref(false)
+function syncFullscreen() { isFullscreen.value = document.fullscreenElement === previewPane.value }
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen()
+    else await previewPane.value?.requestFullscreen()
+  } catch { message.warning('当前浏览器不支持全屏') }
+}
+onMounted(() => { loadTree(); document.addEventListener('fullscreenchange', syncFullscreen) })
+onBeforeUnmount(() => { htmlResizeObserver?.disconnect(); document.removeEventListener('fullscreenchange', syncFullscreen) })
 </script>
 
 <template>
@@ -224,13 +238,13 @@ onBeforeUnmount(() => htmlResizeObserver?.disconnect())
         </div>
         <MaterialResizeHandle v-if="!treeCollapsed" v-model="treeWidth" :min="180" :max="420" label="文件目录宽度" />
       </aside>
-      <main class="teaching-materials-preview">
+      <main ref="previewPane" class="teaching-materials-preview" :class="{fullscreen:isFullscreen}">
         <div v-if="!selected" class="teaching-materials-placeholder"><FolderOpenOutlined/><h2>选择文件查看内容</h2><p>点击左侧文件，内容会显示在这里</p></div>
         <template v-else>
-          <div class="teaching-material-preview-heading"><div><div class="eyebrow">{{typeLabel(selected.media_type)}}</div><h2>{{selected.name}}</h2></div><div class="teaching-material-preview-actions"><DocumentScaleControls v-if="selected.media_type === 'MARKDOWN'" v-model:text-scale="textScale" v-model:page-scale="pageScale" :default-page-scale="80" :default-text-scale="120" /><a-button class="document-outline-toggle" v-if="selected.media_type === 'MARKDOWN'" :aria-expanded="outlineOpen" @click="outlineOpen = !outlineOpen"><UnorderedListOutlined/>{{ outlineOpen ? '收起大纲' : '展开大纲' }}</a-button><a-tag>{{Math.max(1, Math.ceil(selected.size / 1024))}} KB</a-tag></div></div>
+          <div class="teaching-material-preview-heading"><div><div class="eyebrow">{{typeLabel(selected.media_type)}}</div><h2>{{selected.name}}</h2></div><div class="teaching-material-preview-actions"><a-button class="document-fullscreen-toggle" :title="isFullscreen ? '退出全屏' : '全屏'" @click="toggleFullscreen"><FullscreenExitOutlined v-if="isFullscreen"/><FullscreenOutlined v-else/>{{ isFullscreen ? '退出全屏' : '全屏' }}</a-button><span v-if="selected.media_type === 'HTML'" class="html-zoom-controls"><a-button @click="stepHtmlZoom(-25)">−</a-button><a-button title="还原" @click="htmlZoom = 100">{{ htmlZoom }}%</a-button><a-button @click="stepHtmlZoom(25)">＋</a-button></span><DocumentScaleControls v-if="selected.media_type === 'MARKDOWN'" v-model:text-scale="textScale" v-model:page-scale="pageScale" :default-page-scale="80" :default-text-scale="120" /><a-button class="document-outline-toggle" v-if="selected.media_type === 'MARKDOWN'" :aria-expanded="outlineOpen" @click="outlineOpen = !outlineOpen"><UnorderedListOutlined/>{{ outlineOpen ? '收起大纲' : '展开大纲' }}</a-button><a-tag>{{Math.max(1, Math.ceil(selected.size / 1024))}} KB</a-tag></div></div>
           <a-spin v-if="contentLoading" class="teaching-material-content-loading" />
           <div v-else-if="selected.media_type==='VIDEO'" class="teaching-material-video"><video :src="selected.content_url" controls preload="metadata" /></div>
-          <div v-else-if="selected.media_type==='HTML'" ref="htmlViewport" class="teaching-material-html"><div class="teaching-material-html-stage" :style="{width:`${HTML_CANVAS_WIDTH * htmlScale}px`,height:`${HTML_CANVAS_HEIGHT * htmlScale}px`}"><iframe :srcdoc="htmlDocument" title="HTML 教学资料" sandbox="allow-scripts" allow="fullscreen" allowfullscreen referrerpolicy="no-referrer" :style="{width:`${HTML_CANVAS_WIDTH}px`,height:`${HTML_CANVAS_HEIGHT}px`,transform:`scale(${htmlScale})`}" /></div></div>
+          <div v-else-if="selected.media_type==='HTML'" ref="htmlViewport" class="teaching-material-html"><div class="teaching-material-html-stage" :style="{width:`${htmlCanvasW * htmlScale}px`,height:`${htmlCanvasH * htmlScale}px`}"><iframe :srcdoc="htmlDocument" title="HTML 教学资料" sandbox="allow-scripts" allow="fullscreen" allowfullscreen referrerpolicy="no-referrer" :style="{width:`${htmlCanvasW}px`,height:`${htmlCanvasH}px`,transform:`scale(${htmlScale})`}" /></div></div>
           <MarkdownReader v-else :html="content" :outline-open="outlineOpen" :text-scale="textScale" :page-scale="pageScale" @close-outline="outlineOpen = false" />
         </template>
       </main>

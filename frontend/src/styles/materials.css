@@ -100,6 +100,8 @@
 .teaching-materials-node-list{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
 .teaching-materials-preview{display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .teaching-material-preview-heading{flex:0 0 auto}
+.teaching-materials-preview.fullscreen{width:100vw;height:100vh;background:#f5f7f8}
+.document-fullscreen-toggle{display:inline-flex;align-items:center;gap:6px}
 .teaching-material-html{flex:1;height:auto;min-height:0}
 .teaching-material-video{flex:1;min-height:0;overflow:auto}
 .teaching-material-video video{max-height:100%}
@@ -142,3 +144,7 @@
   .material-outline-title{margin-bottom:4px}
   .material-outline-items{max-height:80px}
 }
+
+.teaching-material-html{align-items:flex-start;justify-content:flex-start}
+.teaching-material-html-stage{margin:auto}
+.html-zoom-controls{display:inline-flex;gap:4px}
