@@ -767,3 +767,7 @@ html.file-preview-open { overflow: hidden; }
   .app-shell:has(.student-assignment-detail.editor-focused) .mobile-nav{display:none}
   .content-wrap:has(.student-assignment-detail.editor-focused){padding-bottom:8px}
 }
+.published-overall>div{margin-top:6px;color:#33475b;font-size:13px;line-height:1.75;word-break:break-word}
+.published-overall>div p{margin:0 0 6px}
+.published-overall>div ul{margin:0 0 6px;padding-left:20px}
+.published-overall>div li{margin-bottom:3px}

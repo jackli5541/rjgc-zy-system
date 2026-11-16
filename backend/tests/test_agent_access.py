@@ -329,3 +329,10 @@ def test_excel_import_preview_confirm_overwrite_and_idempotency():
 
     # 非 xlsx 文件、他人不能确认
     assert teacher.post(f"/api/v1/agent/imports/preview?assignment_id={aid}", headers=headers, files={"file": ("a.txt", b"x", "text/plain")}).status_code == 422
+
+
+def test_text_to_html_structures_comment_lines():
+    from app.modules.agent_access.imports import text_to_html
+    out = text_to_html("定档：A，质量很高\n任务一：6处全对\n可改进：\n- 修法可写删除\n2. 补 <b>类</b>\n见 http://x.com")
+    assert out == ("<p><strong>定档：</strong>A，质量很高</p><p><strong>任务一：</strong>6处全对</p><p><strong>可改进：</strong></p>"
+                   "<ul><li>修法可写删除</li><li>补 &lt;b&gt;类&lt;/b&gt;</li></ul><p>见 http://x.com</p>")

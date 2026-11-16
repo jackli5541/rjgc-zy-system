@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import re
 from uuid import UUID
 
 from sqlalchemy import and_, delete, select
@@ -21,9 +22,34 @@ MAX_COMMENT = 2000
 MAX_REASON = 20000
 
 
+_BULLET = re.compile(r"^(?:[-*•]|\d{1,2}[.、)])\s+(.*)$")
+_LABEL = re.compile(r"^([^\s：:]{1,12})[：:](?!//)\s*(.*)$")
+
+
 def text_to_html(value: str) -> str:
-    lines = [line.strip() for line in value.replace("\r", "").split("\n") if line.strip()]
-    return "".join(f"<p>{html.escape(line)}</p>" for line in lines)
+    """按行转 HTML：行首「标签：」加粗，`- `/`1. ` 开头的连续行合并成列表，其余为段落。"""
+    lines = [line.strip() for line in value.replace(chr(13), "").split(chr(10)) if line.strip()]
+    parts: list[str] = []
+    items: list[str] = []
+
+    def flush() -> None:
+        if items:
+            parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>")
+            items.clear()
+
+    for line in lines:
+        bullet = _BULLET.match(line)
+        if bullet:
+            items.append(html.escape(bullet.group(1)))
+            continue
+        flush()
+        label = _LABEL.match(line)
+        if label:
+            parts.append(f"<p><strong>{html.escape(label.group(1))}：</strong>{html.escape(label.group(2))}</p>")
+        else:
+            parts.append(f"<p>{html.escape(line)}</p>")
+    flush()
+    return "".join(parts)
 
 
 def _uuid(value: str) -> UUID | None:
